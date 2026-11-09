@@ -1,0 +1,99 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>bf terminal spike</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.css">
+<style>
+  html, body { margin: 0; height: 100%; background: #1e1e1e; color: #ccc; font: 12px -apple-system, sans-serif; }
+  body { display: flex; flex-direction: column; }
+  #bar { display: flex; gap: 8px; align-items: center; padding: 4px 8px; background: #2b2b2b; }
+  #bar input { width: 280px; }
+  #status { min-width: 260px; }
+  #term { flex: 1; min-height: 0; padding: 4px 0 0 6px; }
+</style>
+<script>
+  window.__errors = [];
+  window.onerror = (msg, src, line) => { window.__errors.push(`${msg} @${src}:${line}`); };
+</script>
+<script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@xterm/addon-search@0.15.0/lib/addon-search.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@xterm/addon-webgl@0.18.0/lib/addon-webgl.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@xterm/addon-unicode11@0.8.0/lib/addon-unicode11.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@xterm/addon-web-links@0.11.0/lib/addon-web-links.js"></script>
+</head>
+<body>
+<div id="bar">
+  <span id="status">connecting...</span>
+  <input id="find" placeholder="find in scrollback (Cmd+F), Enter = previous match">
+  <button id="reload" title="tests the replay of the output buffer">reload page</button>
+</div>
+<div id="term"></div>
+<script>
+const term = new Terminal({
+  allowProposedApi: true,
+  macOptionIsMeta: true,
+  scrollback: 50000,
+  cursorBlink: true,
+  fontFamily: 'Menlo, Monaco, monospace',
+  fontSize: 13,
+  theme: { background: '#1e1e1e' },
+});
+const fit = new FitAddon.FitAddon();
+const search = new SearchAddon.SearchAddon();
+term.loadAddon(fit);
+term.loadAddon(search);
+term.loadAddon(new WebLinksAddon.WebLinksAddon());
+term.loadAddon(new Unicode11Addon.Unicode11Addon());
+term.unicode.activeVersion = '11';
+term.open(document.getElementById('term'));
+
+let renderer = 'dom';
+try {
+  const gl = new WebglAddon.WebglAddon();
+  gl.onContextLoss(() => gl.dispose());
+  term.loadAddon(gl);
+  renderer = 'webgl';
+} catch (e) {
+  window.__errors.push('webgl: ' + e);
+}
+fit.fit();
+
+const statusEl = document.getElementById('status');
+const show = (s) => { statusEl.textContent = `${s}, ${renderer}, ${term.cols}x${term.rows}`; };
+
+const ws = new WebSocket(`ws://${location.host}/ws`);
+ws.binaryType = 'arraybuffer';
+const send = (msg) => { if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg)); };
+ws.onopen = () => { send({ t: 'resize', cols: term.cols, rows: term.rows }); show('connected'); term.focus(); };
+ws.onclose = () => show('disconnected');
+ws.onmessage = (ev) => term.write(new Uint8Array(ev.data));
+
+term.onData((d) => send({ t: 'in', d }));
+term.onBinary((d) => send({ t: 'bin', d }));
+term.onResize(({ cols, rows }) => { send({ t: 'resize', cols, rows }); show('connected'); });
+new ResizeObserver(() => requestAnimationFrame(() => fit.fit())).observe(document.getElementById('term'));
+
+term.attachCustomKeyEventHandler((e) => {
+  // Shift+Enter --> new line in Claude Code: send ESC CR, the same bytes as Option+Enter
+  if (e.key === 'Enter' && e.shiftKey && !e.metaKey) {
+    if (e.type === 'keydown') send({ t: 'in', d: '\x1b\r' });
+    return false;
+  }
+  if (e.type === 'keydown' && e.metaKey && e.key === 'f') {
+    document.getElementById('find').focus();
+    return false;
+  }
+  return true;
+});
+
+const find = document.getElementById('find');
+find.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') search.findPrevious(find.value);
+  if (e.key === 'Escape') term.focus();
+});
+document.getElementById('reload').onclick = () => location.reload();
+</script>
+</body>
+</html>

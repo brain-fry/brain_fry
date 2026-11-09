@@ -1,0 +1,91 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Brain Fry</title>
+<link rel="icon" href="/icon.png">
+<link rel="stylesheet" href="/vendor/xterm/xterm.css">
+<link rel="stylesheet" href="/app.css">
+<script>
+  window.__errors = [];
+  window.onerror = (msg, src, line) => { window.__errors.push(`${msg} @${src}:${line}`); };
+</script>
+</head>
+<body>
+<!-- first in the page, scripts at the end: the splash paints before they load -->
+<div id="splash"><img src="/icon.png" alt=""><div class="name">Brain Fry</div></div>
+<header id="top">
+  <div class="brand"><img src="/icon.png" alt="">Brain Fry</div>
+  <div class="modes">
+    <button class="mode" data-mode="dev" title="Dev mode (Cmd+B toggles)">Dev</button>
+    <button class="mode" data-mode="organize" title="Organize mode (Cmd+B toggles)">Organize</button>
+  </div>
+  <div id="task-head"></div>
+  <button id="new-btn" title="New task (Cmd+N)">+ New task</button>
+</header>
+<div id="banner" hidden></div>
+<main id="dev">
+  <aside id="side">
+    <section>
+      <h2>Inbox <span id="inbox-count"></span></h2>
+      <div id="inbox" class="list"></div>
+    </section>
+    <section>
+      <h2>Threads</h2>
+      <div id="threads" class="list"></div>
+    </section>
+    <section>
+      <h2 id="archive-toggle" class="toggle">Archive <span id="archive-count"></span></h2>
+      <div id="archive" class="list" hidden></div>
+    </section>
+    <footer class="keys">Cmd+Up/Down inbox · Cmd+D dismiss · Cmd+E archive · Cmd+Shift+D fork · Cmd+N new · Cmd+B board · Cmd+1 files · Cmd+2 editor · Cmd+J terminal</footer>
+  </aside>
+  <div class="split v" data-split="side"></div>
+  <section id="explorer">
+    <div class="pane-head"><span id="explorer-root"></span><button id="tree-refresh" title="Refresh">↻</button></div>
+    <div id="tree"></div>
+  </section>
+  <div class="split v" data-split="explorer"></div>
+  <section id="middle">
+    <div id="files">
+      <div id="file-tabs" class="tabs"></div>
+      <div id="file-bar"></div>
+      <div id="editors">
+        <div id="file-empty" class="empty-pane">Open a file from the explorer.</div>
+      </div>
+    </div>
+    <div class="split h" data-split="shellsHeight"></div>
+    <div id="shells">
+      <div id="shell-tabs" class="tabs"></div>
+      <div id="shell-terms">
+        <div id="shell-empty" class="empty-pane">No terminal. + opens one in the task's folder.</div>
+      </div>
+    </div>
+  </section>
+  <div class="split v" data-split="middle"></div>
+  <section id="agent">
+    <div id="terms"></div>
+    <div id="overlay" hidden></div>
+  </section>
+</main>
+<main id="board" tabindex="-1" hidden>
+  <div class="board-bar">
+    <label><input type="checkbox" id="show-hidden"> Show later, more later, never and archived (H)</label>
+    <span class="keys">Arrows move · Shift+Left/Right change prio · Enter open in Dev · E archive · D dismiss · F fork · N new · Esc / Cmd+B Dev</span>
+  </div>
+  <div id="columns"></div>
+</main>
+<div id="picker" class="modal" hidden></div>
+<div id="toast" hidden></div>
+<script src="/vendor/xterm/xterm.js"></script>
+<script src="/vendor/xterm/addon-fit.js"></script>
+<script src="/vendor/xterm/addon-search.js"></script>
+<script src="/vendor/xterm/addon-webgl.js"></script>
+<script src="/vendor/xterm/addon-unicode11.js"></script>
+<script src="/vendor/codemirror.js"></script>
+<script src="/app.js"></script>
+<script src="/files.js"></script>
+<script src="/shells.js"></script>
+<script src="/layout.js"></script>
+</body>
+</html>

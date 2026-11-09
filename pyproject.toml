@@ -1,0 +1,23 @@
+[project]
+name = "brain-fry"
+version = "0.1.0"
+description = "A Mac app that turns Claude Code sessions into an owner inbox"
+requires-python = ">=3.12"
+dependencies = [
+    "pyyaml>=6",
+    "pywebview>=5.3",
+    "websockets>=14",
+]
+
+[project.scripts]
+bf = "brain_fry.cli:main"
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
