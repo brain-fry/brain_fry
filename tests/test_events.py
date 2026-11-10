@@ -1,7 +1,7 @@
 import json
 from itertools import count
 
-from brain_fry import events, paths, taskfile
+from brain_fry import actions, events, paths, taskfile
 
 _seq = count()
 
@@ -146,3 +146,134 @@ def test_one_reader_at_a_time(project):
 
 def test_project_folder_gone(project, tmp_path):
     assert events.consume(tmp_path / "deleted") == []
+
+
+def test_each_event_is_logged_with_what_it_changed(project, caplog):
+    import logging
+
+    with caplog.at_level(logging.INFO, logger="brain_fry"):
+        put(project, "UserPromptSubmit", prompt="fix the bug")
+        put(project, "Stop", last_assistant_message="Done.")
+        put(project, "SessionEnd", sid="unknown", reason="exit")
+        events.consume(project)
+    lines = [r.getMessage() for r in caplog.records]
+    assert any(m.startswith("event UserPromptSubmit s1 'fix the bug' in proj: new task") for m in lines)
+    assert any("event Stop s1" in m and "status working -> waiting" in m and "thread 1 pending" in m for m in lines)
+    assert any("event SessionEnd unknown in proj: ignored" in m for m in lines)
+
+
+# ---- a session that becomes a task in the middle: its earlier turns come from its transcript
+
+
+def _transcript(project, prompts, last_reply=True):
+    """Prompts with promptId p1, p2, ...; every turn has a reply except maybe the last."""
+    f = project / "t.jsonl"
+    lines = []
+    for i, p in enumerate(prompts, 1):
+        lines.append({"type": "user", "origin": {"kind": "human"}, "promptId": f"p{i}", "cwd": str(project),
+                      "timestamp": f"2026-11-10T08:0{i}:00Z", "message": {"role": "user", "content": p}})
+        if i < len(prompts) or last_reply:
+            lines.append({"type": "assistant", "message": {"content": [{"type": "text", "text": f"reply {i}"}]}})
+    f.write_text("".join(json.dumps(x) + "\n" for x in lines))
+    return str(f)
+
+
+def test_first_event_a_stop_imports_the_earlier_turns(project):
+    t = _transcript(project, ["a", "b", "c"], last_reply=False)  # c: the turn that just ended
+    put(project, "Stop", transcript_path=t, prompt_id="p3", last_assistant_message="final reply of c")
+    events.consume(project)
+    th = task(project).threads
+    assert [(x.n, x.prompt, x.reply, x.kind) for x in th] == [
+        (1, "a", "reply 1", "imported"), (2, "b", "reply 2", "imported"), (3, "c", "final reply of c", "pending")]
+
+
+def test_first_event_a_prompt_that_the_transcript_has_already(project):
+    t = _transcript(project, ["a", "b", "new one"], last_reply=False)
+    put(project, "UserPromptSubmit", transcript_path=t, prompt_id="p3", prompt="new one")
+    events.consume(project)
+    th = task(project).threads
+    assert [(x.prompt, x.kind) for x in th] == [("a", "imported"), ("b", "imported"), ("new one", "working")]
+
+
+def test_first_event_a_prompt_that_the_transcript_has_not_yet(project):
+    t = _transcript(project, ["a", "b"])
+    put(project, "UserPromptSubmit", transcript_path=t, prompt="new one")  # no prompt_id: by text
+    events.consume(project)
+    assert [(x.n, x.prompt, x.kind) for x in task(project).threads] == [
+        (1, "a", "imported"), (2, "b", "imported"), (3, "new one", "working")]
+
+
+def test_first_event_a_stop_without_prompt(project):
+    """A background task that finishes: its prompt_id is not the last prompt's."""
+    t = _transcript(project, ["a", "b"])
+    put(project, "Stop", transcript_path=t, prompt_id="bg", last_assistant_message="background done")
+    events.consume(project)
+    assert [(x.prompt, x.reply, x.kind) for x in task(project).threads] == [
+        ("a", "reply 1", "imported"), ("b", "reply 2", "imported"), ("", "background done", "pending")]
+
+
+def test_first_event_blocked_keeps_the_turn_open(project):
+    t = _transcript(project, ["a", "b"], last_reply=False)
+    put(project, "Notification", transcript_path=t, notification_type="permission_prompt", message="needs Bash")
+    put(project, "Stop", transcript_path=t, prompt_id="p2", last_assistant_message="done b")
+    events.consume(project)
+    assert [(x.prompt, x.reply, x.kind) for x in task(project).threads] == [
+        ("a", "reply 1", "imported"), ("b", "done b", "pending")]
+
+
+def test_later_events_import_nothing(project):
+    put(project, "UserPromptSubmit", prompt="first")
+    events.consume(project)
+    t = _transcript(project, ["first", "x", "y"])
+    put(project, "Stop", transcript_path=t, prompt_id="p3", last_assistant_message="done")
+    events.consume(project)
+    assert [(x.prompt, x.kind) for x in task(project).threads] == [("first", "pending")]
+
+
+def test_close_archives_the_task(project):
+    put(project, "UserPromptSubmit", prompt="close")
+    put(project, "Stop", last_assistant_message="Wrote the findings to DESIGN.md.\n\n**closed :-)**\n")
+    events.consume(project)
+    t = task(project)
+    assert (t.status, t.live, t.inbox, t.unread) == ("done", True, False, False)
+    assert t.threads[-1].kind == "pending"  # the digest still runs
+
+    put(project, "SessionEnd", reason="exit")
+    events.consume(project)
+    assert (task(project).status, task(project).live) == ("done", False)
+
+    put(project, "UserPromptSubmit", prompt="one more thing")  # resumed and prompted: back from the archive
+    events.consume(project)
+    assert task(project).status == "working"
+
+
+def test_close_unpins_the_task(project):
+    put(project, "UserPromptSubmit", prompt="start")
+    events.consume(project)
+    actions.pin(task(project).id)
+    put(project, "UserPromptSubmit", prompt="close")
+    put(project, "Stop", last_assistant_message="Notes written.\nclosed :-)")
+    events.consume(project)
+    assert (task(project).status, task(project).pinned) == ("done", False)
+
+
+def test_close_mark_before_a_trailer(project):
+    put(project, "UserPromptSubmit", prompt=" Close.\n")
+    put(project, "Stop", last_assistant_message="Done.\nclosed :-)\n[needs: fyi] notes written")
+    events.consume(project)
+    assert task(project).status == "done"
+
+
+def test_close_without_the_mark_goes_to_the_inbox(project):
+    put(project, "UserPromptSubmit", prompt="close")
+    put(project, "Stop", last_assistant_message="Before I close: keep the spike folder?")
+    events.consume(project)
+    t = task(project)
+    assert (t.status, t.inbox) == ("waiting", True)
+
+
+def test_mark_without_close_prompt_goes_to_the_inbox(project):
+    put(project, "UserPromptSubmit", prompt="close the dialog when the user clicks outside")
+    put(project, "Stop", last_assistant_message="Done.\nclosed :-)")
+    events.consume(project)
+    assert (task(project).status, task(project).inbox) == ("waiting", True)

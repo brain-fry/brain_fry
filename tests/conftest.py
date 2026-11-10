@@ -8,6 +8,7 @@ def home(tmp_path, monkeypatch):
     h.mkdir()
     monkeypatch.setenv("HOME", str(h))
     monkeypatch.setenv("BRAIN_FRY_HOME", str(h / ".brain_fry"))
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)  # ~/.claude is the fake one too
     return h
 
 

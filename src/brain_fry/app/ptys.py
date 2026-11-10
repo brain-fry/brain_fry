@@ -10,8 +10,10 @@ from __future__ import annotations
 
 import asyncio
 import fcntl
+import logging
 import os
 import pty
+import shlex
 import signal
 import struct
 import subprocess
@@ -22,6 +24,7 @@ from collections.abc import Callable
 
 REPLAY_BYTES = 4 * 1024 * 1024
 
+log = logging.getLogger(__name__)
 WRAPPER = "import fcntl,os,sys,termios\nfcntl.ioctl(0, termios.TIOCSCTTY, 0)\nos.execvp(sys.argv[1], sys.argv[1:])\n"
 
 
@@ -60,6 +63,9 @@ class PtySession:
         self.key, self.gen, self.argv, self.cwd = key, gen, argv, cwd
         self.kind, self.task, self.title = "claude", key, ""  # set by the caller for shells
         self.proc, self.fd = spawn(argv, cwd, env, rows, cols)
+        self.started = time.time()
+        self.bytes_out = 0
+        log.info("pty %s: pid %d started, %s (cwd %s, %dx%d)", key, self.proc.pid, shlex.join(argv), cwd, cols, rows)
         self.on_exit = on_exit
         self.replay = bytearray()
         self.queues: set[asyncio.Queue] = set()
@@ -84,6 +90,7 @@ class PtySession:
         self._emit(data)
 
     def _emit(self, data: bytes) -> None:
+        self.bytes_out += len(data)
         self.replay += data
         if len(self.replay) > REPLAY_BYTES:  # may cut an escape sequence at the very start
             del self.replay[: len(self.replay) - REPLAY_BYTES]
@@ -102,9 +109,14 @@ class PtySession:
         except OSError:
             pass
         try:
-            self.proc.wait(timeout=2)
+            code = self.proc.wait(timeout=2)
+            how = f"exit code {code}" if code >= 0 else f"signal {signal.Signals(-code).name}"
         except subprocess.TimeoutExpired:
-            pass
+            how = "output closed, process still running"
+        except ValueError:
+            how = f"exit code {self.proc.returncode}"
+        log.info("pty %s: pid %d ended (%s) after %.0f s, %d bytes of output", self.key, self.proc.pid, how,
+                 time.time() - self.started, self.bytes_out)  # fmt: skip
         self.on_exit(self)
 
     def write(self, data: bytes) -> None:
@@ -129,6 +141,7 @@ class PtySession:
 
     def hangup(self) -> None:
         """SIGHUP to the child's process group, like closing a terminal window."""
+        log.info("pty %s: SIGHUP to pid %d", self.key, self.proc.pid)
         try:
             os.killpg(self.proc.pid, signal.SIGHUP)
         except OSError:

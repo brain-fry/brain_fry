@@ -47,6 +47,26 @@ def test_binary_and_large_files_are_not_opened(repo):
     assert files.read_file(repo, "big.txt")["tooLarge"]
 
 
+def test_images_and_pdfs_go_to_a_viewer_whatever_their_size(repo):
+    (repo / "plot.PNG").write_bytes(b"\x89PNG" + b"\x00" * (files.MAX_BYTES + 1))
+    (repo / "paper.pdf").write_bytes(b"%PDF-1.7\n")
+    r = files.read_file(repo, "plot.PNG")
+    assert (r["kind"], r["size"]) == ("image", files.MAX_BYTES + 5) and r["version"] and "text" not in r
+    assert files.read_file(repo, "paper.pdf")["kind"] == "pdf"
+    (repo / "logo.svg").write_text("<svg/>")
+    assert files.read_file(repo, "logo.svg")["text"] == "<svg/>"  # SVG is text: the editor
+
+
+def test_viewable_serves_only_images_and_pdfs_inside_the_project(repo):
+    (repo / "paper.pdf").write_bytes(b"%PDF-1.7\n")
+    assert files.viewable(repo, "paper.pdf") == ((repo / "paper.pdf").resolve(), "application/pdf")
+    for rel in ("README.md", "missing.png", "src"):
+        with pytest.raises(FileNotFoundError):
+            files.viewable(repo, rel)
+    with pytest.raises(PermissionError):
+        files.viewable(repo, "../x.png")
+
+
 def test_write_detects_a_change_on_disk_and_keeps_the_mode(repo):
     p = repo / "run.sh"
     p.write_text("echo 1\n")
@@ -64,3 +84,69 @@ def test_write_detects_a_change_on_disk_and_keeps_the_mode(repo):
 def test_versions(repo):
     v = files.versions(repo, ["README.md", "gone.txt", "../x"])
     assert v["README.md"] and v["gone.txt"] is None and v["../x"] is None
+
+
+# ---------------------------------------------------------------- the right-click menu of 2a
+
+
+def test_rename_in_place_refuses_a_taken_name_and_bad_names(repo):
+    assert files.rename(repo, "src/a.py", "b.py") == "src/b.py"
+    assert (repo / "src" / "b.py").read_text() == "x = 1\n" and not (repo / "src" / "a.py").exists()
+    assert files.rename(repo, "src", "lib") == "lib"
+    assert (repo / "lib" / "b.py").exists()
+    assert files.rename(repo, "lib/b.py", "b.py") == "lib/b.py"  # same name: nothing to do
+    (repo / "lib" / "c.py").write_text("")
+    with pytest.raises(FileExistsError):
+        files.rename(repo, "lib/c.py", "b.py")
+    for bad in ("", ".", "..", "x/y.py", "a\0b"):
+        with pytest.raises(ValueError):
+            files.rename(repo, "lib/c.py", bad)
+    assert files.rename(repo, "lib/c.py", "C.py") == "lib/C.py"  # a change of case only (same entry on macOS)
+    assert "C.py" in os.listdir(repo / "lib")
+    with pytest.raises(PermissionError):
+        files.rename(repo, "", "x")  # the project folder itself
+
+
+def test_a_symlink_is_renamed_and_trashed_as_a_link_never_its_target(repo, monkeypatch):
+    os.symlink("README.md", repo / "link.md")
+    assert files.rename(repo, "link.md", "other.md") == "other.md"
+    assert os.path.islink(repo / "other.md") and (repo / "README.md").read_text() == "hi\n"
+    trashed = []
+    monkeypatch.setattr(files, "_move_to_trash", trashed.append)
+    files.trash(repo, "other.md")
+    assert trashed == [files.resolve(repo, "") / "other.md"]
+    with pytest.raises(FileNotFoundError):
+        files.trash(repo, "missing.md")
+    with pytest.raises(PermissionError):
+        files.trash(repo, "../repo")
+
+
+def test_paste_copies_under_a_free_name_and_moves_without_replacing(repo, tmp_path):
+    assert files.paste(repo, ["README.md"], repo, "", cut=False) == [["README.md", "README copy.md"]]
+    assert files.paste(repo, ["README.md"], repo, "", cut=False) == [["README.md", "README copy 2.md"]]
+    assert files.paste(repo, ["src"], repo, "", cut=False) == [["src", "src copy"]]
+    assert (repo / "src copy" / "a.py").read_text() == "x = 1\n"
+    assert files.paste(repo, ["README.md"], repo, "src", cut=False) == [["README.md", "src/README.md"]]
+    # move
+    assert files.paste(repo, ["README copy.md"], repo, "src copy", cut=True) == [["README copy.md", "src copy/README copy.md"]]
+    assert not (repo / "README copy.md").exists()
+    with pytest.raises(FileExistsError):
+        files.paste(repo, ["README.md"], repo, "src", cut=True)  # src/README.md exists
+    assert files.paste(repo, ["src/a.py"], repo, "src", cut=True) == []  # already there
+    for cut in (False, True):
+        with pytest.raises(ValueError):
+            files.paste(repo, ["src"], repo, "src", cut=cut)  # into itself
+    with pytest.raises(NotADirectoryError):
+        files.paste(repo, ["src/a.py"], repo, "README.md", cut=False)
+    # to another project
+    other = tmp_path / "other"
+    other.mkdir()
+    assert files.paste(repo, ["src/a.py"], other, "", cut=True) == [["src/a.py", "a.py"]]
+    assert (other / "a.py").exists() and not (repo / "src" / "a.py").exists()
+
+
+def test_path_text_is_the_path_shown_by_the_explorer(repo):
+    assert files.path_text(repo, "src/a.py", relative=True) == "src/a.py"
+    assert files.path_text(repo, "src/a.py", relative=False) == str(repo / "src" / "a.py")
+    with pytest.raises(PermissionError):
+        files.path_text(repo, "../x", relative=True)

@@ -8,6 +8,8 @@ owner's prompt, the tools that Claude used, and Claude's final reply.
 Return:
 
 - title: 3 to 8 words naming what the task is about (not what happened last). Plain words.
+- short_title: 2 or 3 words naming what the task is about, the heading of its card on the
+  board (example: "PDF viewer" for "Show PDFs and images in the file panel"). Plain words.
 - digest: the rolling digest of the whole task, 3 to 5 short lines: the goal, what is done,
   what is open. Rewrite it from the current digest and the new turns.
 - threads: one entry per turn, with its number n and:

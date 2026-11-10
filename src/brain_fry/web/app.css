@@ -23,8 +23,20 @@ button:disabled { opacity: .45; cursor: default; }
 
 #top { display: flex; align-items: center; gap: 14px; padding: 6px 12px; background: var(--panel);
   border-bottom: 1px solid var(--line); min-height: 42px; }
-.brand { font-weight: 600; letter-spacing: .02em; display: flex; align-items: center; gap: 6px; }
+.brand { display: flex; align-items: center; gap: 8px; }
+#project-select { font: inherit; font-weight: 600; background: var(--panel-2); color: var(--text); border: 1px solid var(--line);
+  border-radius: 5px; padding: 3px 6px; max-width: 220px; cursor: pointer; }
+#project-select:hover { border-color: var(--dim); }
 .brand img { width: 26px; height: 26px; border-radius: 5px; image-rendering: pixelated; }
+#menu-btn { padding: 1px 7px; font-size: 15px; line-height: 1.3; color: var(--dim); background: transparent; border-color: transparent; }
+#menu-btn:hover, #menu-btn.on { color: var(--text); background: var(--panel-2); border-color: var(--line); }
+#menu { position: fixed; z-index: 50; width: 300px; padding: 4px; background: var(--panel-2); border: 1px solid var(--line);
+  border-radius: 7px; box-shadow: 0 8px 24px rgba(0, 0, 0, .45); }
+#menu button { display: block; width: 100%; text-align: left; border: none; background: none; padding: 6px 10px; }
+#menu button:hover { background: var(--accent); color: #fff; }
+#menu button small { display: block; margin-top: 2px; font-size: 11px; color: var(--dim); }
+#menu button:hover small { color: rgba(255, 255, 255, .85); }
+.menu-note { padding: 2px 10px 6px; font-size: 11px; color: var(--dim); }
 .modes { display: flex; }
 .mode { border-radius: 0; }
 .mode:first-child { border-radius: 5px 0 0 5px; }
@@ -36,6 +48,7 @@ button:disabled { opacity: .45; cursor: default; }
 #task-head select { font: inherit; background: var(--panel-2); color: var(--text); border: 1px solid var(--line);
   border-radius: 5px; padding: 2px 4px; }
 #task-head .actions { display: flex; gap: 6px; margin-left: auto; }
+.switch { display: flex; align-items: center; gap: 5px; color: var(--dim); font-size: 12px; white-space: nowrap; cursor: pointer; }
 
 #banner { padding: 6px 12px; background: #4a3a12; color: #ffd98a; border-bottom: 1px solid var(--line); }
 #banner code { background: #0004; padding: 0 4px; border-radius: 3px; }
@@ -50,10 +63,6 @@ body.resizing-h, body.resizing-h * { cursor: col-resize !important; user-select:
 body.resizing-v, body.resizing-v * { cursor: row-resize !important; user-select: none; }
 
 #explorer { width: var(--w-explorer, 220px); flex: none; display: flex; flex-direction: column; background: var(--panel); min-height: 0; }
-.pane-head { display: flex; align-items: center; gap: 6px; padding: 6px 8px 6px 10px; font-size: 11px; font-weight: 600;
-  text-transform: uppercase; letter-spacing: .06em; color: var(--dim); border-bottom: 1px solid var(--line); }
-.pane-head span { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.pane-head button { padding: 0 6px; font-size: 12px; }
 #tree { flex: 1; overflow: auto; padding: 4px 0; font-size: 12.5px; }
 #tree .node { padding: 2px 8px; white-space: nowrap; cursor: pointer; }
 #tree .node:hover { background: var(--panel-2); }
@@ -61,6 +70,24 @@ body.resizing-v, body.resizing-v * { cursor: row-resize !important; user-select:
 #tree .node .caret { display: inline-block; width: 12px; color: var(--dim); }
 #tree .node.loading, #tree .empty { color: var(--dim); }
 #tree .empty { padding: 6px 10px; font-style: italic; }
+#tree { outline: none; }
+/* collapse all: over the top right of the tree, not on a line of its own */
+#explorer { position: relative; }
+#tree-collapse { position: absolute; top: 3px; right: 8px; z-index: 2; padding: 2px 3px; line-height: 0;
+  color: var(--dim); background: var(--panel); border-color: transparent; }
+#tree-collapse:hover { color: var(--text); background: var(--panel-2); border-color: var(--line); }
+#tree:focus .node.sel { box-shadow: inset 0 0 0 1px var(--accent); }  /* the entry that Enter renames */
+#tree .node.cut .name { opacity: .5; }
+#tree .tree-rename { font: inherit; color: var(--text); background: var(--bg); border: 1px solid var(--accent); border-radius: 3px;
+  padding: 0 3px; width: calc(100% - 16px); outline: none; }
+/* right-click menu of 2a (explorer.js) */
+.ctx-menu { position: fixed; z-index: 60; min-width: 220px; padding: 4px; background: var(--panel-2); border: 1px solid var(--line);
+  border-radius: 7px; box-shadow: 0 8px 24px rgba(0, 0, 0, .45); font-size: 12.5px; }
+.ctx-menu button { display: flex; width: 100%; text-align: left; border: none; background: none; padding: 4px 10px; border-radius: 4px; }
+.ctx-menu button:hover:not(:disabled) { background: var(--accent); color: #fff; }
+.ctx-menu button kbd { margin-left: auto; padding-left: 24px; font: inherit; color: var(--dim); }
+.ctx-menu button:hover:not(:disabled) kbd { color: rgba(255, 255, 255, .85); }
+.ctx-menu hr { border: none; border-top: 1px solid var(--line); margin: 4px 6px; }
 
 /* the middle column gives way first when the window is narrow; 4a keeps at least 360 px */
 #middle { flex: 0 1 var(--w-middle, 480px); display: flex; flex-direction: column; min-height: 0; min-width: 280px; }
@@ -85,6 +112,21 @@ body.resizing-v, body.resizing-v * { cursor: row-resize !important; user-select:
 #file-bar button.on { background: var(--accent); border-color: var(--accent); color: #fff; }
 #editors { flex: 1; position: relative; min-height: 0; }
 .editor { position: absolute; inset: 0; }
+/* viewers of 3a: images and PDFs */
+.viewer { background: #1b1e23; outline: none; }
+.image-viewer { display: flex; overflow: auto; }
+.image-viewer img { margin: auto; flex: none; cursor: zoom-out;  /* margin auto: centered, and scrollable at 100% */
+  background: repeating-conic-gradient(#3a3f4b 0% 25%, #2c313a 0% 50%) 50% / 16px 16px; }  /* shows transparency */
+.image-viewer.fit img { max-width: 100%; max-height: 100%; object-fit: contain; cursor: zoom-in; }
+.pdf-container { position: absolute; inset: 0; overflow: auto; background: #3b3f46; outline: none; }  /* PDF.js wants it absolute */
+#file-bar .meta { white-space: nowrap; }
+#file-bar .pdf-tools { display: flex; align-items: center; gap: 4px; flex: none; }
+#file-bar .pdf-tools input, #file-bar .pdf-tools select { font: inherit; color: var(--text); background: var(--panel-2);
+  border: 1px solid var(--line); border-radius: 3px; padding: 1px 4px; }
+#file-bar .pdf-page { width: 3.5em; text-align: right; }
+#file-bar .pdf-find { width: 11em; margin-left: 6px; }
+#file-bar .pdf-count { min-width: 4em; white-space: nowrap; }
+#toast button { margin-left: 8px; font-size: 12px; padding: 1px 8px; }
 #shell-terms { flex: 1; position: relative; min-height: 0; }
 .empty-pane { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: var(--dim);
   font-style: italic; padding: 16px; text-align: center; }
@@ -118,8 +160,6 @@ body.resizing-v, body.resizing-v * { cursor: row-resize !important; user-select:
 .dot.waiting { background: var(--waiting); border-color: var(--waiting); }
 .dot.done { background: var(--done); border-color: var(--done); }
 .dot.stale { background: transparent; border: 2px solid var(--working); }
-.live { width: 7px; height: 7px; border-radius: 50%; border: 1.5px solid var(--dim); }
-.live.on { background: var(--dim); }
 .kind { font-size: 10px; text-transform: uppercase; letter-spacing: .04em; padding: 0 4px; border-radius: 3px;
   background: var(--panel-2); color: var(--dim); border: 1px solid var(--line); }
 .kind.review { color: #8fc1ff; } .kind.answer, .kind.rule { color: #e9d38a; } .kind.blocked { color: #ff8b8f; }
@@ -130,6 +170,11 @@ body.resizing-v, body.resizing-v * { cursor: row-resize !important; user-select:
 #overlay { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; flex-direction: column;
   gap: 12px; background: #1e1e1ee6; color: var(--dim); text-align: center; padding: 24px; }
 #overlay[hidden] { display: none; }
+/* on top of the terminal, not above it: showing it must not resize the PTY (Claude Code would re-render) */
+#sel-chip { position: absolute; top: 6px; right: 14px; z-index: 20; font-size: 11.5px; color: var(--text);
+  background: #2b2d32ee; border: 1px solid var(--accent); border-radius: 10px; padding: 1px 4px 1px 9px; }
+#sel-chip .x { margin-left: 6px; padding: 0 4px; color: var(--dim); cursor: pointer; }
+#sel-chip .x:hover { color: var(--text); }
 #overlay .big { font-size: 15px; color: var(--text); }
 
 .modal { position: fixed; inset: 0; background: #0008; display: flex; align-items: flex-start; justify-content: center; padding-top: 12vh; }
@@ -137,9 +182,15 @@ body.resizing-v, body.resizing-v * { cursor: row-resize !important; user-select:
 .modal .box { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; width: 460px; max-height: 60vh;
   overflow-y: auto; box-shadow: 0 10px 40px #0008; }
 .modal h3 { margin: 0; padding: 10px 14px; font-size: 13px; border-bottom: 1px solid var(--line); }
-.modal .item { padding: 8px 14px; cursor: pointer; }
+.modal h3 .hint { color: var(--dim); font-weight: normal; font-size: 11px; margin-left: 6px; }
+.modal .item { padding: 8px 14px; cursor: pointer; display: flex; align-items: center; gap: 10px; }
 .modal .item:hover, .modal .item.sel { background: var(--panel-2); }
-.modal .item .path { color: var(--dim); font-size: 11px; }
+.modal .item .main { flex: 1; min-width: 0; }
+.modal .item .path { color: var(--dim); font-size: 11px; overflow-wrap: anywhere; }
+.modal .item .recent { color: var(--dim); font-size: 11px; white-space: nowrap; }
+.modal kbd { font: 11px ui-monospace, Menlo, monospace; color: var(--dim); border: 1px solid var(--line); border-radius: 4px;
+  padding: 1px 6px; min-width: 22px; text-align: center; }
+.modal .item.sel kbd { color: var(--text); border-color: var(--dim); }
 .modal .empty { padding: 14px; color: var(--dim); }
 
 #board { flex: 1; display: flex; flex-direction: column; min-height: 0; outline: none; }
@@ -161,10 +212,30 @@ body.resizing-v, body.resizing-v * { cursor: row-resize !important; user-select:
 .card .title { overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
 .card.unread .title { font-weight: 700; }
 .card .line { color: #b9bac0; font-size: 12px; margin-top: 3px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+/* the task's digest under its short title; the full text is in the tooltip */
+.card .desc { color: #a3a5ae; font-size: 12px; margin-top: 2px; white-space: pre-line; display: -webkit-box; -webkit-line-clamp: 4;
+  -webkit-box-orient: vertical; overflow: hidden; }
+.card .need { border-top: 1px solid var(--line); margin-top: 5px; padding-top: 4px; }
 .proj { font-size: 10px; padding: 0 5px; border-radius: 3px; color: hsl(var(--h) 70% 78%); background: hsl(var(--h) 40% 24%);
   margin-left: auto; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 60%; }
 .inbox-badge { font-size: 10px; padding: 0 4px; border-radius: 3px; background: #30a46c33; color: #7ee2a8; }
+.pin-badge { font-size: 10px; padding: 0 4px; border-radius: 3px; background: #8fc1ff22; color: #8fc1ff; }
 .column .empty { color: var(--dim); font-style: italic; padding: 4px; }
+.run { font-size: 10px; padding: 0 5px; border-radius: 3px; background: #30a46c22; color: #7ee2a8; white-space: nowrap; }
+.run.busy { background: #e8912d22; color: #f0b26b; }
+
+/* sessions of my projects that are not tasks: drag one onto a column to adopt it */
+#others { flex: none; max-height: 40%; display: flex; flex-direction: column; min-height: 0; border-top: 1px solid var(--line); }
+#others h3 { margin: 0; padding: 8px 14px; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .06em;
+  color: var(--dim); cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#others h3::before { content: "▸ "; }
+#others h3.open::before { content: "▾ "; }
+#others h3 .hint { text-transform: none; letter-spacing: 0; font-weight: 400; margin-left: 10px; }
+#others-cards { overflow-y: auto; display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 8px;
+  padding: 0 14px 12px; align-content: start; }
+#others-cards .empty { color: var(--dim); font-style: italic; }
+.card.other { border-style: dashed; background: var(--panel); }
+.card.other .line { -webkit-line-clamp: 3; }
 
 #splash { position: fixed; inset: 0; z-index: 100; background: #040510; display: flex; flex-direction: column;
   align-items: center; justify-content: center; gap: 18px; transition: opacity .45s ease; }

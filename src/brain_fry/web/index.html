@@ -6,23 +6,33 @@
 <link rel="icon" href="/icon.png">
 <link rel="stylesheet" href="/vendor/xterm/xterm.css">
 <link rel="stylesheet" href="/app.css">
+<link rel="stylesheet" href="/browser.css">
 <script>
   window.__errors = [];
-  window.onerror = (msg, src, line) => { window.__errors.push(`${msg} @${src}:${line}`); };
+  window.onerror = (msg, src, line) => {
+    if (String(msg).startsWith('ResizeObserver loop')) return; // harmless: a layout took two passes (PDF.js)
+    window.__errors.push(`${msg} @${src}:${line}`);
+  };
 </script>
 </head>
 <body>
 <!-- first in the page, scripts at the end: the splash paints before they load -->
 <div id="splash"><img src="/icon.png" alt=""><div class="name">Brain Fry</div></div>
 <header id="top">
-  <div class="brand"><img src="/icon.png" alt="">Brain Fry</div>
+  <div class="brand"><img src="/icon.png" alt=""><button id="menu-btn" title="Menu">&#9776;</button>
+    <select id="project-select" title="Project (Cmd+P): lands on the task that I opened last in it. The most worked in the last 7 days first"></select></div>
   <div class="modes">
     <button class="mode" data-mode="dev" title="Dev mode (Cmd+B toggles)">Dev</button>
     <button class="mode" data-mode="organize" title="Organize mode (Cmd+B toggles)">Organize</button>
   </div>
   <div id="task-head"></div>
+  <label class="switch" title="After I answer the selected task, select the next inbox item (Cmd+Up from the first item goes back)"><input type="checkbox" id="auto-advance"> Auto-advance</label>
   <button id="new-btn" title="New task (Cmd+N)">+ New task</button>
 </header>
+<div id="menu" hidden>
+  <button data-menu="cookies">Overwrite my cookies<small>Copies my Firefox cookies into the browser of 3a. For each site that Firefox has cookies for, they replace the browser's.</small></button>
+  <div class="menu-note" id="menu-cookies-note"></div>
+</div>
 <div id="banner" hidden></div>
 <main id="dev">
   <aside id="side">
@@ -38,12 +48,13 @@
       <h2 id="archive-toggle" class="toggle">Archive <span id="archive-count"></span></h2>
       <div id="archive" class="list" hidden></div>
     </section>
-    <footer class="keys">Cmd+Up/Down inbox · Cmd+D dismiss · Cmd+E archive · Cmd+Shift+D fork · Cmd+N new · Cmd+B board · Cmd+1 files · Cmd+2 editor · Cmd+J terminal</footer>
+    <footer class="keys">Cmd+Up/Down inbox · Cmd+D dismiss · Cmd+E archive · Cmd+Shift+D fork · Cmd+N new · Cmd+P project · Cmd+B board · Cmd+1 files · Cmd+2 editor · Cmd+J terminal</footer>
   </aside>
   <div class="split v" data-split="side"></div>
   <section id="explorer">
-    <div class="pane-head"><span id="explorer-root"></span><button id="tree-refresh" title="Refresh">↻</button></div>
-    <div id="tree"></div>
+    <div id="tree" tabindex="0"></div>
+    <button id="tree-collapse" title="Collapse folders"><svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor"
+      stroke-width="1.2"><path d="M4.5 2.5h9v9"/><rect x="2.5" y="4.5" width="9" height="9" rx="1"/><path d="M5 9h4"/></svg></button>
   </section>
   <div class="split v" data-split="explorer"></div>
   <section id="middle">
@@ -65,17 +76,24 @@
   <div class="split v" data-split="middle"></div>
   <section id="agent">
     <div id="terms"></div>
+    <div id="sel-chip" hidden></div>
     <div id="overlay" hidden></div>
   </section>
 </main>
 <main id="board" tabindex="-1" hidden>
   <div class="board-bar">
     <label><input type="checkbox" id="show-hidden"> Show later, more later, never and archived (H)</label>
-    <span class="keys">Arrows move · Shift+Left/Right change prio · Enter open in Dev · E archive · D dismiss · F fork · N new · Esc / Cmd+B Dev</span>
+    <span class="keys">Arrows move · Shift+Left/Right change prio · Enter open in Dev · E archive · D dismiss · F fork · N new · O other sessions · Esc / Cmd+B Dev</span>
   </div>
   <div id="columns"></div>
+  <section id="others">
+    <h3 id="others-toggle">Other Claude Code sessions <span id="others-count"></span>
+      <span class="hint">in your Brain Fry projects, not tasks yet · drag one onto a column to add it · double-click: add it and open it (O shows or hides)</span></h3>
+    <div id="others-cards"></div>
+  </section>
 </main>
 <div id="picker" class="modal" hidden></div>
+<div id="ctx" class="ctx-menu" hidden></div>
 <div id="toast" hidden></div>
 <script src="/vendor/xterm/xterm.js"></script>
 <script src="/vendor/xterm/addon-fit.js"></script>
@@ -85,6 +103,9 @@
 <script src="/vendor/codemirror.js"></script>
 <script src="/app.js"></script>
 <script src="/files.js"></script>
+<script src="/explorer.js"></script>
+<script src="/browser.js"></script>
+<script src="/menu.js"></script>
 <script src="/shells.js"></script>
 <script src="/layout.js"></script>
 </body>

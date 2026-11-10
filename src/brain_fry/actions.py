@@ -1,14 +1,18 @@
-"""My actions on tasks (DESIGN.md "Status, inbox, board", "Split = fork"). Each one is a
+"""My actions on tasks (DESIGN_DETAILS.md "Status, inbox, board", "Split = fork"). Each one is a
 load-modify-save under the task-file lock. No processes here: the app starts them."""
 
 from __future__ import annotations
 
+import logging
 import uuid
 from pathlib import Path
 
-from . import paths, projects, taskfile
+from . import paths, projects, taskfile, views
 from .taskfile import PRIOS, Task
+from .logs import short
 from .util import iso
+
+log = logging.getLogger(__name__)
 
 
 class NotFound(KeyError):
@@ -34,14 +38,47 @@ def all_tasks() -> list[Task]:
 def _update(task_id: str, **values) -> Task:
     with taskfile.LOCK:
         task = load(task_id)
+        changes = {k: (getattr(task, k), v) for k, v in values.items() if getattr(task, k) != v}
         for k, v in values.items():
             setattr(task, k, v)
         taskfile.save(task)
-        return task
+    log_changes(task, changes)
+    return task
+
+
+PRIVATE_LISTS = {"browser_tabs"}  # logged as counts: URLs are browsing history
+
+
+def log_changes(task: Task, changes: dict) -> None:
+    """Every change of a task field by an action, old -> new."""
+    if changes:
+        text = ", ".join(f"{k} {len(old)} -> {len(new)}" if k in PRIVATE_LISTS else f"{k} {_brief(old)} -> {_brief(new)}"
+                         for k, (old, new) in changes.items())  # fmt: skip
+        log.info("task %s %r: %s", short(task.id), task.display_title[:50], text)
+
+
+def _brief(value) -> str:
+    if isinstance(value, list) and value and hasattr(value[0], "n"):  # threads
+        return f"{len(value)} threads"
+    text = repr(value)
+    return text if len(text) <= 120 else text[:117] + "..."
 
 
 def mark_read(task_id: str) -> Task:
     return _update(task_id, unread=False)
+
+
+def mark_opened(task_id: str) -> Task:
+    """Selected in Dev mode: read, and the last opened task of its project, where the
+    project dropdown lands. `opened` is not logged (the select command is) and does not
+    touch `updated`, so the board order stays."""
+    with taskfile.LOCK:
+        task = load(task_id)
+        changes = {"unread": (True, False)} if task.unread else {}
+        task.unread, task.opened = False, iso()
+        taskfile.save(task)
+    log_changes(task, changes)
+    return task
 
 
 def dismiss(task_id: str) -> Task:
@@ -50,14 +87,25 @@ def dismiss(task_id: str) -> Task:
 
 
 def archive(task_id: str) -> Task:
-    """Archive, or bring back an archived task. Does not end the process."""
+    """Archive, or bring back an archived task. Does not end the process. Archiving unpins:
+    the task is done, and an unarchived task comes back unpinned."""
     if load(task_id).status == "done":
         return _update(task_id, status="waiting")
-    return _update(task_id, status="done", inbox=False, unread=False)
+    return _update(task_id, status="done", inbox=False, unread=False, pinned=False)
+
+
+def pin(task_id: str) -> Task:
+    """Pin: the task stays in the inbox until I unpin it, whatever its flags. Or unpin a
+    pinned task. An archived task cannot be pinned (it is done; unarchive it first)."""
+    task = load(task_id)
+    if not task.pinned and task.status == "done":
+        raise ValueError("An archived task cannot be pinned: unarchive it first.")
+    return _update(task_id, pinned=not task.pinned)
 
 
 def rename(task_id: str, title: str) -> Task:
-    return _update(task_id, title=title.strip())
+    """My name wins on the card too: the short title takes it, whatever its length."""
+    return _update(task_id, title=title.strip(), short_title=title.strip())
 
 
 def set_prio(task_id: str, prio: str) -> Task:
@@ -74,36 +122,97 @@ def set_terminal_tabs(task_id: str, tabs: list[str]) -> Task:
     return _update(task_id, terminal_tabs=[str(t) for t in tabs])
 
 
+def set_browser_tabs(task_id: str, urls: list[str]) -> Task:
+    return _update(task_id, browser_tabs=[str(u) for u in urls])
+
+
 def set_live(task_id: str, live: bool) -> Task:
     with taskfile.LOCK:
         task = load(task_id)
+        changes = {"live": (task.live, live)} if task.live != live else {}
         task.live = live
         if not live and task.status in ("working", "blocked"):
+            changes["status"] = (task.status, "waiting")
             task.status = "waiting"
         taskfile.save(task)
-        return task
-
-
-def new_task(project: Path) -> Task:
-    """A task started from Brain Fry: born at once, before `claude --session-id` runs."""
-    project = Path(project)
-    now = iso()
-    task = Task(session_ids=[str(uuid.uuid4())], project=str(project), cwd=str(project),
-                status="waiting", live=True, created=now, updated=now)  # fmt: skip
-    with taskfile.LOCK:
-        taskfile.save(task)
+    log_changes(task, changes)
     return task
 
 
+def end_block(task_id: str, process_status: str, since: float) -> Task | None:
+    """The dialog of a blocked task closed: I granted or refused the permission, or answered
+    the question. No hook fires for it; Claude Code's process file leaves `waiting` (see
+    DESIGN_DETAILS.md, "Hooks"). The task leaves the inbox, as after an answer. process_status busy:
+    the agent goes on (working); idle: the turn ended (a refusal), waiting.
+    None, and no change, when the task is no longer blocked (a Stop came first), or when the
+    process status is older than the block (a snapshot of the files from before it)."""
+    if process_status not in ("busy", "idle"):
+        raise ValueError(process_status)
+    with taskfile.LOCK:
+        task = load(task_id)
+        if task.status != "blocked" or since <= views.epoch(task.updated):  # updated: the time of the Notification
+            return None
+        new = {"status": "working" if process_status == "busy" else "waiting",
+               "inbox": False, "unread": False, "notification": None}  # fmt: skip
+        changes = {k: (getattr(task, k), v) for k, v in new.items() if getattr(task, k) != v}
+        for k, v in new.items():
+            setattr(task, k, v)
+        taskfile.save(task)
+    log_changes(task, changes)
+    return task
+
+
+def new_task(project: Path, like: str | None = None) -> Task:
+    """A task started from Brain Fry: born at once, before `claude --session-id` runs.
+    `like`: a task of the same project whose workspace it starts with, its file, browser and
+    terminal tabs (the front end picks it: the previous task, see newTask in app.js). A task
+    of another project, or one that does not exist, is ignored.
+    `opened` is set: the backend selects the new task (see mark_opened)."""
+    project = Path(project)
+    now = iso()
+    task = Task(session_ids=[str(uuid.uuid4())], project=str(project), cwd=str(project),
+                status="waiting", live=True, created=now, updated=now, opened=now)  # fmt: skip
+    src = _workspace_source(like, project)
+    if src:
+        task.open_files, task.browser_tabs = list(src.open_files), list(src.browser_tabs)
+        task.terminal_tabs = list(src.terminal_tabs)
+    with taskfile.LOCK:
+        taskfile.save(task)
+    copied = (f", with the tabs of {short(src.id)}: {len(task.open_files)} files, {len(task.browser_tabs)} browser,"
+              f" {len(task.terminal_tabs)} terminals" if src else "")  # fmt: skip
+    log.info("task %s created in %s (new session%s)", short(task.id), project.name, copied)
+    return task
+
+
+def _workspace_source(like: str | None, project: Path) -> Task | None:
+    if not like:
+        return None
+    try:
+        src = load(like)
+    except NotFound:
+        log.warning("new task: no task %s to copy the tabs of", short(like))
+        return None
+    if Path(src.project).resolve() != project.resolve():  # its paths belong to another project
+        log.warning("new task: %s is in %s, not in %s: tabs not copied", short(like), Path(src.project).name, project.name)
+        return None
+    return src
+
+
 def fork_task(parent_id: str) -> Task:
-    """The new task for `claude --resume <parent> --fork-session --session-id <new>`."""
+    """The new task for `claude --resume <parent> --fork-session --session-id <new>`. It starts
+    with the parent's tabs (file, browser, terminal), as a new task with the previous one's."""
     parent = load(parent_id)
     now = iso()
     task = Task(
         session_ids=[str(uuid.uuid4())], project=parent.project, cwd=parent.cwd,
         prio=parent.prio, status="waiting", live=True, parent=parent.id,
-        digest=parent.digest, title="", created=now, updated=now,
+        digest=parent.digest, title="", created=now, updated=now, opened=now,  # opened: as new_task
+        open_files=list(parent.open_files), browser_tabs=list(parent.browser_tabs),
+        terminal_tabs=list(parent.terminal_tabs),
     )  # fmt: skip
     with taskfile.LOCK:
         taskfile.save(task)
+    log.info("task %s created in %s: fork of %s %r, with its tabs: %d files, %d browser, %d terminals", short(task.id),
+             Path(task.project).name, short(parent.id), parent.display_title[:50], len(task.open_files),
+             len(task.browser_tabs), len(task.terminal_tabs))  # fmt: skip
     return task

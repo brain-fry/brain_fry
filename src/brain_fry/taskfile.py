@@ -1,4 +1,4 @@
-"""A task file, <project>/.brain_fry/<session-id>.md. See DESIGN.md, "Task file".
+"""A task file, <project>/.brain_fry/<session-id>.md. See DESIGN_DETAILS.md, "Task file".
 
 Layout: YAML frontmatter, then "# Digest", then "# Threads" with one "## n | ts | kind"
 section per thread (TT). All free text (digests, prompts, replies) is written as
@@ -23,8 +23,9 @@ from .util import write_atomic
 PRIOS = ("working", "planning", "later", "more_later", "never")
 STATUSES = ("working", "blocked", "waiting", "done")
 # working: turn in progress. interrupted: a new prompt came before any Stop (Esc).
-# pending: the turn is over, the digest is not there yet. The rest is set by the digest.
-KINDS = ("working", "interrupted", "pending", "review", "answer", "rule", "FYI", "blocked")
+# pending: the turn is over, the digest is not there yet. imported: a past turn of a session
+# that started elsewhere (sessions.adopt), never digested. The rest is set by the digest.
+KINDS = ("working", "interrupted", "pending", "imported", "review", "answer", "rule", "FYI", "blocked")
 PARTS = ("digest", "question", "prompt", "reply")
 
 # Held around every load-modify-save of a task file: the reader, the digest worker and
@@ -52,18 +53,22 @@ class Task:
     project: str
     cwd: str
     title: str = ""
+    short_title: str = ""  # 2 or 3 words, the heading of the task's card on the board
     transcript_path: str = ""
     prio: str = "working"
     status: str = "waiting"
     live: bool = False
     inbox: bool = False
     unread: bool = False
+    pinned: bool = False  # stays in the inbox until I unpin it (or archive it)
     notification: str | None = None
     parent: str | None = None
     created: str = ""
     updated: str = ""
+    opened: str = ""  # last selected in Dev mode: the project dropdown lands on it
     open_files: list[str] = field(default_factory=list)
     terminal_tabs: list[str] = field(default_factory=list)
+    browser_tabs: list[str] = field(default_factory=list)  # URLs of the browser tabs of 3a
     digest: str = ""
     threads: list[Thread] = field(default_factory=list)
 

@@ -1,5 +1,5 @@
 """The digest: Sonnet via `claude -p` turns pending threads into inbox entries.
-See DESIGN.md, "Digest".
+See DESIGN_DETAILS.md, "Digest".
 
 One call per task covers all its pending threads (normally one). The call runs without
 the task-file lock; the task is reloaded afterwards, because events may have changed it
@@ -9,19 +9,26 @@ in the meantime.
 from __future__ import annotations
 
 import json
+import logging
 import subprocess
+import time
 from importlib import resources
 from pathlib import Path
 
 from . import paths, taskfile
 from .taskfile import Task
+from .logs import short
 from .util import child_env, claude_bin
+
+log = logging.getLogger(__name__)
 
 KINDS = ["review", "answer", "rule", "FYI", "blocked"]
 SCHEMA = {
     "type": "object",
     "properties": {
         "title": {"type": "string"},
+        # described here too, so that an inbox_prompt.md older than the field still gets it
+        "short_title": {"type": "string", "description": "2 or 3 words naming what the task is about"},
         "digest": {"type": "string"},
         "threads": {
             "type": "array",
@@ -37,7 +44,7 @@ SCHEMA = {
             },
         },
     },
-    "required": ["title", "digest", "threads"],
+    "required": ["title", "short_title", "digest", "threads"],
 }
 MAX_PROMPT, MAX_REPLY, MAX_TOOLS = 4_000, 8_000, 40
 
@@ -93,6 +100,10 @@ def tools_of_last_turn(transcript_path: str) -> list[str]:
 def build_prompt(task: Task, instructions: str) -> tuple[str, list[int]]:
     pending = [t for t in task.threads if t.kind == "pending"]
     parts = [instructions.strip(), "", "# Current digest", "", task.digest or "(none yet)", "", "# Turns"]
+    if not pending:  # only the short title is missing (a task from before the field)
+        parts += ["", "(none: the digest is up to date. Return it unchanged, with an empty threads list.)"]
+        if task.title:
+            parts += ["", "# Title", "", task.title]
     for t in pending:
         parts += ["", f"## Turn {t.n}", "", "Prompt:", _cut(t.prompt, MAX_PROMPT) or "(no prompt: the turn started on its own)"]
         if t is pending[-1] and (tools := tools_of_last_turn(task.transcript_path)):
@@ -127,8 +138,13 @@ def call_sonnet(prompt: str, timeout: float = 240) -> dict:
 
 
 def apply_result(task: Task, result: dict, sent: list[int]) -> None:
+    if not sent:  # a call for the short title only: the rest stays as it was
+        task.short_title = task.short_title or short_title_of(result, task)
+        return
     if not task.title and result.get("title", "").strip():
         task.title = result["title"].strip()
+    if not task.short_title:  # set once, as the title
+        task.short_title = short_title_of(result, task)
     if result.get("digest", "").strip():
         task.digest = result["digest"].strip()
     by_n = {r.get("n"): r for r in result.get("threads") or []}
@@ -145,8 +161,23 @@ def apply_result(task: Task, result: dict, sent: list[int]) -> None:
             t.question = (r.get("question") or "").strip() or None
 
 
+def short_title_of(result: dict, task: Task) -> str:
+    """Sonnet's short title, else the first three words of the title: never empty, so
+    that a task cannot loop on calls for it."""
+    return (result.get("short_title") or "").strip() or " ".join(task.display_title.split()[:3])
+
+
+def needs_call(task: Task) -> bool:
+    """Pending threads, or a digested task without a short title (one from before the
+    field). A fork that has no turn of its own waits for its first digest: a short title
+    made from its parent's digest would name the parent's topic."""
+    if any(th.kind == "pending" for th in task.threads):
+        return True
+    return bool(task.threads and task.digest and not task.short_title)
+
+
 def pending_tasks(project: Path) -> list[Task]:
-    return [t for t in taskfile.all_tasks(project) if any(th.kind == "pending" for th in t.threads)]
+    return [t for t in taskfile.all_tasks(project) if needs_call(t)]
 
 
 def digest_task(task: Task, call=call_sonnet) -> Task:
@@ -156,16 +187,25 @@ def digest_task(task: Task, call=call_sonnet) -> Task:
     else:
         text = resources.files("brain_fry").joinpath("inbox_prompt.md").read_text()
     prompt, sent = build_prompt(task, text)
-    result = call(prompt)
+    log.info("digest %s %r: sending thread(s) %s, %d chars", short(task.id), task.display_title[:50], sent, len(prompt))
+    t0 = time.monotonic()
+    try:
+        result = call(prompt)
+    except DigestError as e:
+        log.warning("digest %s failed after %.1f s: %s", short(task.id), time.monotonic() - t0, e)
+        raise
     with taskfile.LOCK:
         fresh = taskfile.load(paths.task_path(Path(task.project), task.id))
         apply_result(fresh, result, sent)
         taskfile.save(fresh)
+    kinds = {t.n: t.kind for t in fresh.threads if t.n in sent}
+    log.info("digest %s done in %.1f s: kinds %s, title %r, short title %r", short(task.id), time.monotonic() - t0,
+             kinds, fresh.display_title[:50], fresh.short_title[:40])  # fmt: skip
     return fresh
 
 
 def digest_project(project: Path, call=call_sonnet) -> tuple[list[str], list[str]]:
-    """Digest every task with pending threads. Returns (changed ids, error messages)."""
+    """Digest every task that needs it (`needs_call`). Returns (changed ids, error messages)."""
     changed, errors = [], []
     for task in pending_tasks(project):
         try:

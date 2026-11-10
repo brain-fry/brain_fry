@@ -1,4 +1,4 @@
-"""`bf install` / `bf uninstall`: once per machine. See DESIGN.md, "Naming and files"."""
+"""`bf install` / `bf uninstall`: once per machine. See DESIGN_DETAILS.md, "Naming and files"."""
 
 from __future__ import annotations
 
@@ -24,6 +24,11 @@ def default_gitignore() -> Path:
     return Path.home() / ".gitignore_global"
 
 
+def packaged_hook() -> str:
+    """The hook.sh of this version of Brain Fry. `bf install` copies it to ~/.brain_fry/."""
+    return resources.files("brain_fry").joinpath("hook.sh").read_text()
+
+
 def hook_command() -> str:
     return shlex.quote(str(paths.hook_file()))
 
@@ -45,7 +50,7 @@ def install(settings: Path | None = None, gitignore: Path | None = None) -> list
     paths.bf_home().mkdir(parents=True, exist_ok=True)
 
     hook = paths.hook_file()
-    src = resources.files("brain_fry").joinpath("hook.sh").read_text()
+    src = packaged_hook()
     if not hook.exists() or hook.read_text() != src:
         write_atomic(hook, src)
         done.append(f"wrote {hook}")

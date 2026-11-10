@@ -7,7 +7,7 @@ const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '
 const KINDS = new Set(['review', 'answer', 'rule', 'FYI', 'blocked']);
 const PRIOS = ['working', 'planning', 'later', 'more_later', 'never'];
 const HIDDEN_PRIOS = new Set(['later', 'more_later', 'never']);
-const OUR_KEYS = new Set(['arrowdown', 'arrowup', 'n', 'd', 'e', 'b', '1', '2', 'j']);
+const OUR_KEYS = new Set(['arrowdown', 'arrowup', 'n', 'p', 'd', 'e', 'b', '1', '2', 'j']);
 
 function stored(key, fallback) {
   try { const v = localStorage.getItem(key); return v === null ? fallback : JSON.parse(v); } catch { return fallback; }
@@ -25,7 +25,15 @@ const S = {
   starting: null, // task id: select sent, waiting for its session to start
   terms: new Map(), // task id -> {id, el, term, fit, search, gen, ws}
   archiveOpen: false,
-  picker: null, // {items, index}
+  picker: null, // {mode, items, index, moved}; mode 'new' (Cmd+N: new task) or 'open' (Cmd+P: switch project)
+  othersOpen: stored('othersOpen', true), // the region of other sessions under the board
+  otherSel: null, // the other session under the mouse cursor (click)
+  adopting: null, // {id, open}: adopt sent, waiting for the task in the state
+  dragging: false, // no re-render of the board while a card is dragged
+  autoAdvance: stored('autoAdvance', true), // after an answer, select the next inbox item
+  advance: null, // {from, order, at, timer}: an advance waiting for its second
+  lastAnswered: null, // the task that the last advance (answer or archive) left: Cmd+Up from the first item goes back
+  project: null, // the project picked in the dropdown when it had no task to land on (path)
 };
 
 // the task that the header and the actions apply to
@@ -36,9 +44,12 @@ const targetId = () => (S.mode === 'organize' ? S.boardSel : S.selected);
 let ctl;
 function connectCtl() {
   ctl = new WebSocket(`ws://${location.host}/ctl`);
+  ctl.onopen = () => { for (const m of window.__errors) reportError(m); }; // errors from before the connection
   ctl.onmessage = (ev) => {
     const m = JSON.parse(ev.data);
     if (m.type === 'state') onState(m);
+    else if (m.type === 'prompted') onPrompted(m);
+    else if (m.type === 'browser') onBrowser(m); // browser.js
     else if (m.type === 'reply') {
       const p = pending.get(m.req);
       if (p) { pending.delete(m.req); if (m.ok) p.resolve(m.data); else p.reject(new Error(m.error)); }
@@ -53,6 +64,17 @@ function connectCtl() {
 
 function send(cmd, extra = {}) {
   if (ctl && ctl.readyState === WebSocket.OPEN) ctl.send(JSON.stringify({ cmd, ...extra }));
+}
+
+// JS errors go to the backend's log (bf.log), as well as to window.__errors for the selftest
+function reportError(msg) { send('log', { level: 'error', msg: String(msg).slice(0, 4000) }); }
+{
+  const push = window.__errors.push.bind(window.__errors);
+  window.__errors.push = (m) => { reportError(m); return push(m); };
+  window.addEventListener('unhandledrejection', (e) => {
+    const r = e.reason; // WebKit's stack does not hold the message
+    window.__errors.push(`unhandled rejection: ${r instanceof Error ? `${r.name}: ${r.message}\n${r.stack}` : r}`);
+  });
 }
 
 // a command whose reply we need (files, new shell): a Promise of the reply's data
@@ -85,10 +107,20 @@ function onState(st) {
   if (!prev && st.selected && st.tasks[st.selected]) return select(st.selected);
   // new and forked tasks: the backend selects them; follow it, into Dev mode
   if (prev && st.selected && !prev.tasks[st.selected] && st.tasks[st.selected]) {
+    const task = st.tasks[st.selected];
+    const from = task.parent || S.newFrom; // whose tabs the backend copied: the parent of a fork
+    S.newFrom = null;
+    if (from && st.tasks[from] && st.tasks[from].projectPath === task.projectPath) copyView(from, task.id); // files.js
     setMode('dev', false);
     return select(st.selected, false);
   }
   if (S.starting && st.tasks[S.starting] && (st.tasks[S.starting].pty || st.tasks[S.starting].outside)) S.starting = null;
+  if (S.adopting && st.tasks[S.adopting.id]) { // a session of the bottom region is now a task
+    const { id, open } = S.adopting;
+    S.adopting = null;
+    S.boardSel = id;
+    if (open) return openInDev(id);
+  }
   render();
 }
 
@@ -121,6 +153,7 @@ function ensureTerm(id, container = $('#terms'), shell = false) {
   term.loadAddon(new Unicode11Addon.Unicode11Addon());
   term.unicode.activeVersion = '11';
   term.open(el);
+  browserTermLinks(term); // Cmd+click on a URL: a browser tab (browser.js)
   try {
     const gl = new WebglAddon.WebglAddon();
     gl.onContextLoss(() => gl.dispose());
@@ -128,7 +161,7 @@ function ensureTerm(id, container = $('#terms'), shell = false) {
   } catch (e) { window.__errors.push('webgl: ' + e); }
   t = { id, el, term, fit, search, gen: null, ws: null, shell };
   // a hidden terminal (Organize mode) must never type into Claude: drop its input
-  term.onData((d) => { if (S.mode === 'dev') wsSend(t, { t: 'in', d }); });
+  term.onData((d) => { if (S.mode === 'dev') { t.lastInput = Date.now(); wsSend(t, { t: 'in', d }); } });
   term.onBinary((d) => { if (S.mode === 'dev') wsSend(t, { t: 'bin', d }); });
   term.onResize(({ cols, rows }) => wsSend(t, { t: 'resize', cols, rows }));
   term.attachCustomKeyEventHandler((e) => {
@@ -201,10 +234,62 @@ function openInDev(id) {
   select(id);
 }
 
+// ------------------------------------------------------------------ project dropdown (header)
+// Picking a project lands in Dev mode on the task of that project that I opened last
+// (`opened`, set by the backend at each select), with its files and terminals.
+
+function currentProject() {
+  const task = S.state && S.state.tasks[S.selected];
+  return task ? task.projectPath : S.project;
+}
+
+// archived tasks are done: never landed on (newTask counts them). Never opened (older tasks): the last updated.
+function lastOpened(path, archived = false) {
+  const time = (iso) => Date.parse(iso) || 0;
+  const tasks = Object.values(S.state.tasks).filter((t) => t.projectPath === path && (archived || t.status !== 'done'));
+  tasks.sort((a, b) => time(b.opened) - time(a.opened) || time(b.updated) - time(a.updated));
+  return tasks.length ? tasks[0].id : null;
+}
+
+function openProject(path) {
+  const id = lastOpened(path);
+  const name = path.split('/').pop();
+  if (id) {
+    uiLog(`project ${name}: lands on ${id.slice(0, 8)} ${JSON.stringify(S.state.tasks[id].title)}`);
+    return openInDev(id);
+  }
+  uiLog(`project ${name}: no open task to land on`);
+  setMode('dev', false);
+  cancelAdvance();
+  S.project = path;
+  S.selected = null;
+  S.starting = null;
+  showTerm(null);
+  send('select', { id: null });
+  render();
+}
+
+function renderProjectSelect(st) {
+  const el = $('#project-select');
+  if (document.activeElement === el) return; // its menu may be open
+  const cur = currentProject() || '';
+  const count = {};
+  for (const p of st.projects) count[p.name] = (count[p.name] || 0) + 1;
+  // two folders with one name: add the parent folder
+  const label = (p) => (count[p.name] > 1 ? `${p.name} (${p.path.split('/').slice(-2, -1)[0]})` : p.name);
+  const html = (cur ? '' : '<option value="" disabled selected>Project</option>')
+    + st.projects.map((p) => `<option value="${esc(p.path)}" ${p.path === cur ? 'selected' : ''}>${esc(label(p))}</option>`).join('');
+  if (el.dataset.html !== html) { el.innerHTML = html; el.dataset.html = html; }
+  if (cur) el.value = cur;
+  else el.selectedIndex = 0; // the placeholder
+}
+
 // ------------------------------------------------------------------ selection and actions
 
 function select(id, notify = true) {
+  if (S.advance && S.advance.from !== id) cancelAdvance();
   S.selected = id;
+  S.project = null; // the dropdown follows the task's project
   const t = ensureTerm(id);
   showTerm(id);
   const task = S.state && S.state.tasks[id];
@@ -228,14 +313,88 @@ function visibleInbox() {
 
 function move(step) {
   const ids = visibleInbox();
-  if (!ids.length) return;
   const i = ids.indexOf(S.selected);
+  const back = S.lastAnswered;
+  if (step < 0 && i <= 0 && back && back !== S.selected && S.state.tasks[back] && !ids.includes(back)) {
+    return select(back); // to watch it, or to press Esc when its agent goes the wrong way
+  }
+  if (!ids.length) return;
   select(ids[i < 0 ? 0 : (i + step + ids.length) % ids.length]);
+}
+
+// ------------------------------------------------------------------ auto-advance (DESIGN_DETAILS.md)
+// When I answer the selected task (its UserPromptSubmit, or the dialog of a blocked task
+// that closed: m.why), select the next inbox item about 1 s later: the second lets me see
+// that the prompt was accepted.
+
+const ADVANCE_MS = 1000;
+
+function uiLog(msg) { send('log', { level: 'info', msg }); }
+
+function onPrompted(m) {
+  if (m.id !== S.selected || S.mode !== 'dev') return;
+  const title = (S.state.tasks[m.id] || {}).title || m.id;
+  if (!S.autoAdvance) return uiLog(`auto-advance off: stays on ${m.id.slice(0, 8)} ${JSON.stringify(title)}`);
+  if (m.slash) return uiLog(`auto-advance: no advance for a slash command in ${m.id.slice(0, 8)}`);
+  cancelAdvance();
+  // the inbox order before the answer: the "next" item is the one after it
+  S.advance = { from: m.id, order: [...S.state.inbox], at: Date.now(), why: m.why };
+  S.advance.timer = setTimeout(doAdvance, ADVANCE_MS);
+}
+
+function cancelAdvance() {
+  if (S.advance) clearTimeout(S.advance.timer);
+  S.advance = null;
+}
+
+// only items that need me: a pinned task without a reply or a block is skipped
+function nextAfter(from, order) {
+  const inbox = S.state.inbox.filter((id) => id !== from && S.state.tasks[id].inbox);
+  const i = order.indexOf(from);
+  if (i >= 0) for (const id of [...order.slice(i + 1), ...order.slice(0, i)]) if (inbox.includes(id)) return id;
+  return inbox[0] || null;
+}
+
+function doAdvance() {
+  const a = S.advance;
+  S.advance = null;
+  if (!a || S.mode !== 'dev' || S.selected !== a.from || !S.autoAdvance) return;
+  const t = S.terms.get(a.from);
+  if (t && t.lastInput > a.at) return uiLog(`auto-advance: stays on ${a.from.slice(0, 8)}, I am typing in it`);
+  const next = nextAfter(a.from, a.order);
+  if (!next) return uiLog(`auto-advance: stays on ${a.from.slice(0, 8)}, nothing else needs me`);
+  uiLog(`auto-advance${a.why ? ` (${a.why})` : ''}: ${a.from.slice(0, 8)} --> ${next.slice(0, 8)} ${JSON.stringify(S.state.tasks[next].title)}`);
+  S.lastAnswered = a.from;
+  select(next);
 }
 
 function act(cmd) {
   const id = targetId();
-  if (id) send(cmd, { id, ...termSize() });
+  if (!id) return;
+  const task = S.state.tasks[id];
+  const archiving = cmd === 'archive' && S.mode === 'dev' && id === S.selected && task && task.status !== 'done';
+  const next = archiving ? nextAfter(id, [...S.state.inbox]) : null; // the inbox order before the archive
+  const sh = cmd === 'fork' ? shellBoxSize() : null; // a fork starts the parent's terminal tabs
+  send(cmd, { id, ...termSize(), ...(sh ? { shellRows: sh.rows, shellCols: sh.cols } : {}) });
+  if (archiving) afterArchive(id, next);
+}
+
+// Archiving the selected task (Dev mode): it is done, so it leaves 1a at once and the next
+// item that needs me is selected, whatever the auto-advance switch (that switch is about
+// watching an agent after an answer). Nothing needs me: 4a empties. Cmd+Up goes back to the
+// archived task, to unarchive it.
+function afterArchive(id, next) {
+  S.lastAnswered = id;
+  S.state.inbox = S.state.inbox.filter((x) => x !== id); // no flash of its row before the state push
+  uiLog(`archive: ${id.slice(0, 8)} --> ${next ? `${next.slice(0, 8)} ${JSON.stringify(S.state.tasks[next].title)}` : 'nothing needs me'}`);
+  if (next) return select(next);
+  cancelAdvance();
+  S.selected = null;
+  S.starting = null;
+  S.project = null;
+  showTerm(null);
+  send('select', { id: null });
+  render();
 }
 
 // ------------------------------------------------------------------ board (Organize mode)
@@ -257,11 +416,59 @@ function boardColumns(st) {
 function card(t) {
   const cls = ['card', t.id === S.boardSel ? 'sel' : '', t.status === 'done' ? 'archived' : '', t.unread ? 'unread' : ''].join(' ');
   return `<div class="${cls}" data-card="${t.id}" draggable="true">
-    <div class="top"><span class="dot ${t.status}" title="${t.status}"></span><span class="live ${t.pty || t.live ? 'on' : ''}"></span>
-      ${t.inbox ? '<span class="inbox-badge">inbox</span>' : ''}<span class="proj" style="--h:${hue(t.project)}">${esc(t.project)}</span></div>
-    <div class="title">${esc(t.title)}</div>
-    ${t.inbox && t.line ? `<div class="line">${esc(t.line)}</div>` : ''}
+    <div class="top"><span class="dot ${t.status}" title="${t.status}"></span>
+      ${t.inbox ? '<span class="inbox-badge">inbox</span>' : ''}${t.pinned ? '<span class="pin-badge">pinned</span>' : ''}${runBadge(t.elsewhere)}<span class="proj" style="--h:${hue(t.project)}">${esc(t.project)}</span></div>
+    <div class="title" title="${esc(t.title)}">${esc(t.shortTitle || t.title)}</div>
+    ${t.digest ? `<div class="desc" title="${esc(t.digest)}">${esc(t.digest)}</div>` : ''}
+    ${t.inbox && t.line ? `<div class="line need">${esc(t.line)}</div>` : ''}
   </div>`;
+}
+
+// where a session runs outside Brain Fry: "VS Code · idle"
+function runBadge(run) {
+  if (!run) return '';
+  return `<span class="run ${esc(run.status)}" title="runs now in ${esc(run.where)} (pid ${run.pid})">${esc(run.where)}${run.status ? ' · ' + esc(run.status) : ''}</span>`;
+}
+
+function ago(iso) {
+  const s = (Date.now() - Date.parse(iso)) / 1000;
+  if (s < 90) return 'just now';
+  if (s < 90 * 60) return `${Math.round(s / 60)} min ago`;
+  if (s < 36 * 3600) return `${Math.round(s / 3600)} h ago`;
+  return `${Math.round(s / 86400)} d ago`;
+}
+
+// a session of my projects that is not a task: drag it onto a column to adopt it
+function otherCard(o) {
+  const tip = [o.cwd, `${o.prompts} prompt(s)`, `first: ${o.firstPrompt}`, `last: ${o.lastPrompt}`].join('\n');
+  return `<div class="card other ${o.id === S.otherSel ? 'sel' : ''}" data-other="${o.id}" draggable="true" title="${esc(tip)}">
+    <div class="top">${runBadge(o.running)}<span class="proj" style="--h:${hue(o.project)}">${esc(o.project)}</span></div>
+    <div class="title">${esc(o.title)}</div>
+    <div class="line">${o.prompts} prompt${o.prompts === 1 ? '' : 's'} · ${ago(o.updated)}${o.lastPrompt ? ' · last: ' + esc(o.lastPrompt) : ''}</div>
+  </div>`;
+}
+
+function renderOthers(st) {
+  const list = (st.others || []).filter((o) => !st.tasks[o.id]);
+  $('#others-count').textContent = list.length ? `(${list.length})` : '';
+  $('#others-toggle').classList.toggle('open', S.othersOpen);
+  const el = $('#others-cards');
+  el.hidden = !S.othersOpen;
+  if (S.othersOpen) {
+    el.innerHTML = list.length ? list.map(otherCard).join('')
+      : '<div class="empty">None: every session of your Brain Fry projects is a task.</div>';
+  }
+}
+
+function setOthersOpen(on) {
+  S.othersOpen = on;
+  store('othersOpen', on);
+  render();
+}
+
+function adopt(sessionId, prio, open = false) {
+  S.adopting = { id: sessionId, open };
+  send('adopt', { session: sessionId, prio });
 }
 
 // the card under the cursor must be on the board (it may have been hidden or moved)
@@ -281,7 +488,8 @@ function renderBoard(st) {
       <h3>${c.prio.replace('_', ' ')} <span>${c.ids.length || ''}</span></h3>
       <div class="cards">${c.ids.length ? c.ids.map((id) => card(st.tasks[id])).join('') : '<div class="empty">Empty.</div>'}</div>
     </div>`).join('');
-  const sel = document.querySelector('.card.sel');
+  renderOthers(st);
+  const sel = document.querySelector('#columns .card.sel');
   if (sel) sel.scrollIntoView({ block: 'nearest' });
 }
 
@@ -320,8 +528,15 @@ function movePrio(step) {
   else render();
 }
 
+// A new task starts with the tabs of the previous task (files, browser, terminals; DESIGN_DETAILS.md,
+// "2a, 3a, 3b"): the selected task if it is in that project, else the task of that project that I
+// opened last, archived ones included (a task that I just archived is the one that I continue).
 function newTask(projectPath) { // also called by the selftest
-  send('new', { project: projectPath, ...termSize() });
+  const sel = S.state && S.state.tasks[S.selected];
+  const from = sel && sel.projectPath === projectPath ? sel.id : lastOpened(projectPath, true);
+  S.newFrom = from; // onState copies its view when the new task arrives
+  const sh = shellBoxSize();
+  send('new', { project: projectPath, from, ...termSize(), shellRows: sh.rows, shellCols: sh.cols });
 }
 
 // ------------------------------------------------------------------ rendering
@@ -329,9 +544,12 @@ function newTask(projectPath) { // also called by the selftest
 function render() {
   const st = S.state;
   if (!st) return;
+  if (S.dragging && S.mode === 'organize') return; // replacing the dragged card would end the drag; dragend renders
   for (const b of document.querySelectorAll('.mode')) b.classList.toggle('on', b.dataset.mode === S.mode);
+  $('#auto-advance').checked = S.autoAdvance;
   if (S.mode === 'organize') ensureBoardSel(boardColumns(st));
   renderBanner(st);
+  renderProjectSelect(st);
   renderHead(st);
   if (S.mode === 'organize') return renderBoard(st);
   renderInbox(st);
@@ -345,6 +563,7 @@ function render() {
 
 function renderBanner(st) {
   if (!st.hookInstalled) return banner('The Brain Fry hook is not installed, so tasks will not update. Run <code>bf install</code> in a terminal, then restart your Claude Code sessions.');
+  if (st.hookOutdated) return banner('The Brain Fry hook in <code>~/.brain_fry/</code> is older than this version. Run <code>bf install</code> in a terminal (no restart needed).');
   if (st.digestError) return banner(esc(st.digestError));
   banner(null);
 }
@@ -366,11 +585,16 @@ function renderHead(st) {
   head.innerHTML = `
     <span class="dot ${task.status}" title="${task.status}"></span>
     <span class="title" title="Double-click to rename">${esc(task.title)}</span>
-    <span class="meta">${esc(task.project)} · ${task.status}${task.parent ? ' · fork' : ''}</span>
+    <span class="meta">${esc(task.project)} · ${task.status}${task.parent ? ' · fork' : ''}${task.elsewhere ? ' · runs in ' + esc(task.elsewhere.where) : ''}</span>
     <select class="prio" title="Prio column">${PRIOS.map((p) => `<option value="${p}" ${p === task.prio ? 'selected' : ''}>${p.replace('_', ' ')}</option>`).join('')}</select>
     <span class="actions">
       <button data-act="dismiss" ${task.inbox ? '' : 'disabled'} title="Out of the inbox, nothing to do (Cmd+D)">Dismiss</button>
-      <button data-act="archive" title="Cmd+E">${task.status === 'done' ? 'Unarchive' : 'Archive'}</button>
+      ${task.pinned
+        ? '<button data-act="pin" title="Leaves the inbox when nothing waits for me">Unpin</button>'
+        : `<button data-act="pin" ${task.status === 'done' ? 'disabled title="Unarchive it first"' : 'title="Stays in the inbox until I unpin it"'}>Pin</button>`}
+      ${task.status === 'done'
+        ? '<button data-act="archive" title="Back from the archive (Cmd+E)">Unarchive</button>'
+        : '<button data-act="archive" title="Done: out of the inbox, on to the next item (Cmd+E)">Archive</button>'}
       <button data-act="fork" title="Split: a new task with a copy of this conversation (Cmd+Shift+D)">Fork</button>
     </span>`;
 }
@@ -378,13 +602,11 @@ function renderHead(st) {
 function row(task, extra = '') {
   const cls = ['row', extra, task.unread ? 'unread' : '', task.id === S.selected ? 'sel' : ''].join(' ');
   const kind = KINDS.has(task.kind) ? ` · <span class="kind ${task.kind}">${task.kind}</span>` : '';
-  const live = task.pty ? 'on' : task.live ? 'on' : '';
-  const liveTitle = task.pty ? 'live in Brain Fry' : task.live ? 'live in another terminal' : 'no live session';
   return `<div class="${cls}" data-id="${task.id}">
-    <div class="marks"><span class="dot ${task.status}" title="${task.status}"></span><span class="live ${live}" title="${liveTitle}"></span></div>
+    <div class="marks"><span class="dot ${task.status}" title="${task.status}"></span></div>
     <div class="main">
       <div class="title">${esc(task.title)}</div>
-      <div class="meta">${esc(task.project)} · ${task.prio.replace('_', ' ')}${kind}</div>
+      <div class="meta">${esc(task.project)} · ${task.prio.replace('_', ' ')}${kind}${task.pinned ? ' · <span class="pin-badge">pinned</span>' : ''}</div>
       ${task.line ? `<div class="line">${esc(task.line)}</div>` : ''}
       ${task.question ? `<div class="q">Q: ${esc(task.question)}</div>` : ''}
     </div></div>`;
@@ -392,7 +614,8 @@ function row(task, extra = '') {
 
 function renderInbox(st) {
   const ids = visibleInbox();
-  $('#inbox-count').textContent = st.inbox.length ? `(${st.inbox.length})` : '';
+  const waiting = st.inbox.filter((id) => st.tasks[id].inbox).length; // pinned tasks that need nothing do not count
+  $('#inbox-count').textContent = waiting ? `(${waiting})` : '';
   $('#inbox').innerHTML = ids.length
     ? ids.map((id) => row(st.tasks[id], st.inbox.includes(id) ? '' : 'current')).join('')
     : '<div class="empty">Nothing needs you.</div>';
@@ -403,7 +626,7 @@ function renderThreads(st) {
   const threads = task ? [...task.threads].reverse() : [];
   $('#threads').innerHTML = threads.length
     ? threads.map((th) => {
-      const kind = th.kind === 'working' || th.kind === 'interrupted' || th.kind === 'pending' ? th.kind : `<span class="kind ${th.kind}">${th.kind}</span>`;
+      const kind = KINDS.has(th.kind) ? `<span class="kind ${th.kind}">${th.kind}</span>` : th.kind; // working, interrupted, pending, imported
       const txt = th.digest || th.prompt || '(no prompt)';
       return `<div class="thread" data-n="${th.n}" title="${esc(th.prompt)} (click: open in 3a)"><span class="n">${th.n}</span>${kind}<span class="txt">${esc(txt)}</span></div>`;
     }).join('')
@@ -420,6 +643,10 @@ function renderArchive(st) {
 
 function renderAgent(st) {
   const task = st.tasks[S.selected];
+  if (!S.selected && S.project) {
+    const name = S.project.split('/').pop();
+    return overlay(`<div class="big">No open task in ${esc(name)}.</div><button data-new-in="${esc(S.project)}">New task in ${esc(name)}</button>`);
+  }
   if (!S.selected) return overlay('<div class="big">Select a task in the inbox, or start one with Cmd+N.</div>');
   if (!task) return overlay('<div class="big">This task is gone.</div>');
   const t = S.terms.get(task.id);
@@ -428,8 +655,10 @@ function renderAgent(st) {
     return overlay(null);
   }
   if (task.outside) {
-    return overlay(`<div class="big">This session runs in another terminal.</div>
-      <div>It becomes resumable here when it ends. Resuming it now runs two processes on one conversation.</div>
+    const run = task.elsewhere;
+    const where = run ? `${run.where}${run.status ? ` (${run.status}, pid ${run.pid})` : ''}` : 'another terminal';
+    return overlay(`<div class="big">This session runs in ${esc(where)}.</div>
+      <div>Close it there, then resume it here. Resuming it now runs two processes on one conversation: their messages get mixed.</div>
       <button data-act="resume">Resume here anyway</button>`);
   }
   if (S.starting === task.id) return overlay('<div>Starting...</div>');
@@ -442,21 +671,46 @@ function overlay(html) {
   if (html) o.innerHTML = html;
 }
 
-function toast(msg) {
+function toast(msg, action = null) { // action: { label, run }, a button in the toast
   const el = $('#toast');
   el.textContent = msg;
+  if (action) {
+    const b = document.createElement('button');
+    b.textContent = action.label;
+    b.addEventListener('click', () => { el.hidden = true; action.run(); });
+    el.append(' ', b);
+  }
   el.hidden = false;
   clearTimeout(toast.timer);
   toast.timer = setTimeout(() => { el.hidden = true; }, 6000);
 }
 
-// ------------------------------------------------------------------ project picker (new task)
+// ------------------------------------------------------------------ project picker (new task, switch project)
 
-function openPicker() {
-  const projects = S.state ? S.state.projects : [];
-  S.picker = { items: projects, index: 0 };
+// Cmd+N (new task) and Cmd+P (switch project; picking one does what the dropdown does) show the
+// list of the dropdown: the most recently used project first (views.project_order). Enter opens
+// the highlighted one, the digits 1 to 9 open the n-th one. Cmd+N highlights the first project,
+// Cmd+P the first one that is not the current one: the current project is usually first, so
+// Cmd+P, Enter goes back to the project before it.
+function openPicker(mode = 'new') {
+  S.picker = { mode, items: S.state ? S.state.projects : [], index: 0, moved: false };
+  S.picker.index = pickerStart(S.picker);
   renderPicker();
   $('#picker').hidden = false;
+  // projects.json may have changed since the last state (bf init in a terminal): ask again
+  request('projects').then((items) => {
+    const p = S.picker;
+    if (!p || p.mode !== mode) return; // closed, or the other picker opened since
+    const current = p.items[p.index];
+    p.items = items;
+    p.index = p.moved && current ? Math.max(0, items.findIndex((it) => it.path === current.path)) : pickerStart(p);
+    renderPicker();
+  }).catch((e) => toast(`Could not read the projects: ${e.message}`));
+}
+
+function pickerStart(p) {
+  const i = p.mode === 'open' ? p.items.findIndex((it) => it.path !== currentProject()) : 0;
+  return Math.max(0, i);
 }
 
 function closePicker() {
@@ -469,15 +723,24 @@ function closePicker() {
 
 function renderPicker() {
   const p = S.picker;
-  $('#picker').innerHTML = `<div class="box"><h3>New task in project...</h3>${p.items.length
-    ? p.items.map((it, i) => `<div class="item ${i === p.index ? 'sel' : ''}" data-i="${i}"><div>${esc(it.name)}</div><div class="path">${esc(it.path)}</div></div>`).join('')
+  const key = (i) => (i === p.index ? 'Enter' : i < 9 ? String(i + 1) : '');
+  const head = `${p.mode === 'open' ? 'Switch to project...' : 'New task in project...'} <span class="hint">most recently used first</span>`;
+  const use = (it) => (it.path === currentProject() ? '<span class="recent">current</span>' : '')
+    + (it.last ? `<span class="recent" title="last opened task of this project">${ago(it.last)}</span>` : '');
+  $('#picker').innerHTML = `<div class="box"><h3>${head}</h3>${p.items.length
+    ? p.items.map((it, i) => `<div class="item ${i === p.index ? 'sel' : ''}" data-i="${i}">
+        <div class="main"><div>${esc(it.name)}</div><div class="path">${esc(it.path)}</div></div>
+        ${use(it)}
+        ${key(i) ? `<kbd>${key(i)}</kbd>` : ''}</div>`).join('')
     : '<div class="empty">No project yet. Run <code>bf init</code> in a project folder.</div>'}</div>`;
 }
 
 function pick(i) {
   const it = S.picker && S.picker.items[i];
+  const mode = S.picker && S.picker.mode;
   closePicker();
-  if (it) newTask(it.path);
+  if (it && mode === 'open') openProject(it.path);
+  else if (it) newTask(it.path);
 }
 
 // ------------------------------------------------------------------ events
@@ -486,14 +749,18 @@ document.addEventListener('keydown', (e) => {
   if (S.picker) {
     const n = S.picker.items.length;
     if (e.key === 'Escape') closePicker();
-    else if (e.key === 'ArrowDown' && n) { S.picker.index = (S.picker.index + 1) % n; renderPicker(); }
-    else if (e.key === 'ArrowUp' && n) { S.picker.index = (S.picker.index - 1 + n) % n; renderPicker(); }
+    else if (e.key === 'ArrowDown' && n) { S.picker.index = (S.picker.index + 1) % n; S.picker.moved = true; renderPicker(); }
+    else if (e.key === 'ArrowUp' && n) { S.picker.index = (S.picker.index - 1 + n) % n; S.picker.moved = true; renderPicker(); }
     else if (e.key === 'Enter') pick(S.picker.index);
+    else if (/^[1-9]$/.test(e.key) && !e.metaKey && !e.ctrlKey && !e.altKey) { if (Number(e.key) <= n) pick(Number(e.key) - 1); }
     else return;
     e.preventDefault(); e.stopPropagation();
     return;
   }
-  if (e.target.matches && e.target.matches('input, select, textarea')) return; // a rename in progress
+  // a rename, a resume note, an address field keep their keys. Not xterm.js's hidden textarea:
+  // it has the focus whenever a terminal (4a, 3b) has it, and the terminal's Cmd keys are ours
+  const field = e.target.matches && e.target.matches('input, select, textarea');
+  if (field && !e.target.classList.contains('xterm-helper-textarea')) return;
   if (S.mode === 'organize' && !e.metaKey && !e.ctrlKey && !e.altKey) {
     const k = e.key;
     if (k === 'ArrowLeft') e.shiftKey ? movePrio(-1) : boardMove(-1, 0);
@@ -503,6 +770,7 @@ document.addEventListener('keydown', (e) => {
     else if (k === 'Enter') { if (S.boardSel) openInDev(S.boardSel); }
     else if (k === 'Escape') setMode('dev');
     else if (k === 'h' || k === 'H') setShowHidden(!S.showHidden);
+    else if (k === 'o' || k === 'O') setOthersOpen(!S.othersOpen);
     else if (k === 'e') act('archive');
     else if (k === 'd') act('dismiss');
     else if (k === 'f') act('fork');
@@ -522,6 +790,7 @@ document.addEventListener('keydown', (e) => {
   else if (k === 'arrowdown' && S.mode === 'dev') move(1);
   else if (k === 'arrowup' && S.mode === 'dev') move(-1);
   else if (k === 'n') openPicker();
+  else if (k === 'p') openPicker('open');
   else if (k === 'd' && e.shiftKey) act('fork');
   else if (k === 'd') act('dismiss');
   else if (k === 'e') act('archive');
@@ -532,10 +801,20 @@ document.addEventListener('keydown', (e) => {
 document.addEventListener('click', (e) => {
   const modeBtn = e.target.closest('.mode');
   if (modeBtn) return setMode(modeBtn.dataset.mode);
+  // A double-click on a card is the second click (detail 2), not a dblclick listener: the
+  // first click re-renders the board, so the second click's card is gone from the page
+  // before WebKit sends it the dblclick, and the event never reaches the document.
+  const otherEl = e.target.closest('.card.other');
+  if (otherEl && e.detail === 2) return adopt(otherEl.dataset.other, 'working', true);
+  if (otherEl) { S.otherSel = otherEl.dataset.other; $('#board').focus(); return render(); }
+  if (e.target.closest('#others-toggle')) return setOthersOpen(!S.othersOpen);
   const cardEl = e.target.closest('.card');
+  if (cardEl && e.detail === 2) return openInDev(cardEl.dataset.card);
   if (cardEl) { S.boardSel = cardEl.dataset.card; $('#board').focus(); return render(); }
   const rowEl = e.target.closest('.list .row');
   if (rowEl) return select(rowEl.dataset.id);
+  const newIn = e.target.closest('[data-new-in]');
+  if (newIn) return newTask(newIn.dataset.newIn);
   const btn = e.target.closest('[data-act]');
   if (btn && !btn.disabled) return act(btn.dataset.act);
   const item = e.target.closest('#picker .item');
@@ -544,17 +823,37 @@ document.addEventListener('click', (e) => {
   if (e.target.closest('#archive-toggle')) { S.archiveOpen = !S.archiveOpen; render(); }
 });
 
-$('#new-btn').addEventListener('click', openPicker);
+$('#new-btn').addEventListener('click', () => openPicker());
 
 document.addEventListener('change', (e) => {
   if (e.target.matches('#task-head select.prio') && targetId()) send('prio', { id: targetId(), prio: e.target.value });
   if (e.target.id === 'show-hidden') { setShowHidden(e.target.checked); $('#board').focus(); }
+  if (e.target.id === 'project-select') {
+    e.target.blur(); // the selected task's terminal takes the focus
+    if (e.target.value) openProject(e.target.value);
+  }
+  if (e.target.id === 'auto-advance') {
+    S.autoAdvance = e.target.checked;
+    store('autoAdvance', S.autoAdvance);
+    if (!S.autoAdvance) cancelAdvance();
+    uiLog(`auto-advance switched ${S.autoAdvance ? 'on' : 'off'}`);
+    const t = S.selected && S.terms.get(S.selected);
+    if (S.mode === 'dev' && t) t.term.focus(); // back to the terminal, not the checkbox
+  }
 });
 
-// drag a card to another column: same as Shift+Left/Right
+// drag a card to another column: same as Shift+Left/Right. Drag an other session onto a
+// column: it becomes a task with that prio.
 document.addEventListener('dragstart', (e) => {
   const c = e.target.closest && e.target.closest('.card');
-  if (c) e.dataTransfer.setData('text/plain', c.dataset.card);
+  if (!c) return;
+  e.dataTransfer.setData('text/plain', c.dataset.other ? `other:${c.dataset.other}` : c.dataset.card);
+  S.dragging = true;
+});
+document.addEventListener('dragend', () => {
+  S.dragging = false;
+  for (const x of document.querySelectorAll('.column.drop')) x.classList.remove('drop');
+  render();
 });
 document.addEventListener('dragover', (e) => {
   const col = e.target.closest && e.target.closest('.column');
@@ -567,7 +866,14 @@ document.addEventListener('drop', (e) => {
   const col = e.target.closest && e.target.closest('.column');
   const id = e.dataTransfer.getData('text/plain');
   for (const x of document.querySelectorAll('.column.drop')) x.classList.remove('drop');
-  if (!col || !S.state.tasks[id]) return;
+  S.dragging = false;
+  if (col && id.startsWith('other:')) {
+    e.preventDefault();
+    adopt(id.slice('other:'.length), col.dataset.prio);
+    if (HIDDEN_PRIOS.has(col.dataset.prio) && !S.showHidden) setShowHidden(true);
+    return render();
+  }
+  if (!col || !S.state.tasks[id]) return render();
   e.preventDefault();
   S.state.tasks[id].prio = col.dataset.prio;
   S.boardSel = id;
@@ -575,9 +881,8 @@ document.addEventListener('drop', (e) => {
   render();
 });
 
+// double-click on a card: see the click listener
 document.addEventListener('dblclick', (e) => {
-  const cardEl = e.target.closest('.card');
-  if (cardEl) return openInDev(cardEl.dataset.card);
   const title = e.target.closest('#task-head .title');
   const id = targetId();
   if (!title || !id) return;

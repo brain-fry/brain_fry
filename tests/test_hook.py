@@ -27,6 +27,7 @@ def test_writes_one_event_in_the_nearest_project(home):
     assert ev["session_id"] == "s1" and ev["last_assistant_message"] == "a\nb"
     assert ev["bf_project"] == str(proj) and isinstance(ev["bf_ts"], float)
     assert not list((proj / ".brain_fry" / "events").glob(".*.tmp"))
+    assert f"Stop s1 --> {proj}" in (home / ".brain_fry" / "logs" / "hook.log").read_text()
 
 
 def test_nested_project_wins(home):
@@ -55,3 +56,50 @@ def test_internal_sessions_are_ignored(home):
 def test_garbage_input_is_harmless(home):
     r = subprocess.run(["bash", str(HOOK)], input="not json", capture_output=True, text=True, env={**os.environ, "HOME": str(home)})
     assert (r.returncode, r.stdout) == (0, "")
+
+
+def write_selection(home: Path, **over) -> dict:
+    sel = {"session_id": "s1", "pid": os.getpid(), "path": "src/x.py", "from": 51, "to": 52,
+           "text": "a = 1\nb = 2", "cut": False, "dirty": False, "ts": 0}  # fmt: skip
+    sel.update(over)
+    (home / ".brain_fry").mkdir(exist_ok=True)
+    (home / ".brain_fry" / "selection.json").write_text(json.dumps(sel))
+    return sel
+
+
+def prompt(home: Path, proj: Path, sid="s1", event="UserPromptSubmit") -> subprocess.CompletedProcess:
+    return run_hook(home, {"session_id": sid, "hook_event_name": event, "cwd": str(proj), "prompt": "why?"})
+
+
+def test_prints_the_selection_with_a_prompt_to_its_task(home):
+    proj = home / "proj"
+    (proj / ".brain_fry").mkdir(parents=True)
+    write_selection(home)
+    r = prompt(home, proj)
+    assert r.returncode == 0 and r.stderr == ""
+    assert r.stdout == ("The user selected the lines 51 to 52 from src/x.py:\na = 1\nb = 2\n\n"
+                        "This may or may not be related to the current task.\n")  # fmt: skip
+    assert len(spooled(proj)) == 1  # the event is written as before
+    assert f"UserPromptSubmit s1 --> {proj} + selection src/x.py 51-52" in (home / ".brain_fry" / "logs" / "hook.log").read_text()
+
+
+def test_selection_one_line_unsaved_and_cut(home):
+    proj = home / "proj"
+    (proj / ".brain_fry").mkdir(parents=True)
+    write_selection(home, to=51, dirty=True, cut=True, text="x")
+    out = prompt(home, proj).stdout
+    assert out.startswith("The user selected line 51 from src/x.py (in the editor, with unsaved changes")
+    assert "x\n[... cut here: read the file for the rest]\n" in out
+
+
+def test_selection_is_not_printed_elsewhere(home):
+    proj = home / "proj"
+    (proj / ".brain_fry").mkdir(parents=True)
+    write_selection(home)
+    assert prompt(home, proj, sid="other").stdout == ""  # another session (VS Code, another task)
+    assert prompt(home, proj, event="Stop").stdout == ""  # only a prompt carries it
+    dead = subprocess.Popen(["true"])
+    dead.wait()
+    write_selection(home, pid=dead.pid)  # the app that wrote it is gone (a crash)
+    assert prompt(home, proj).stdout == ""
+    assert len(spooled(proj)) == 3  # the events are written all the same

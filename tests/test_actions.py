@@ -1,6 +1,6 @@
 import pytest
 
-from brain_fry import actions, views
+from brain_fry import actions, events, views
 from brain_fry.taskfile import Thread
 
 
@@ -8,6 +8,24 @@ def test_new_task_is_born_live_in_working(project):
     t = actions.new_task(project)
     got = actions.load(t.id)
     assert (got.prio, got.status, got.live, got.inbox) == ("working", "waiting", True, False)
+
+
+def test_new_task_starts_with_the_tabs_of_the_previous_task(project, home):
+    from brain_fry import projects
+
+    prev = actions.new_task(project)
+    actions._update(prev.id, open_files=["a.py", "docs/b.md"], browser_tabs=["https://example.com/"],
+                    terminal_tabs=["zsh", "zsh"], status="done")  # fmt: skip  (archived: still copied)
+    t = actions.load(actions.new_task(project, like=prev.id).id)
+    assert (t.open_files, t.browser_tabs, t.terminal_tabs) == (["a.py", "docs/b.md"], ["https://example.com/"], ["zsh", "zsh"])
+    assert (t.status, t.opened) == ("waiting", t.created)  # the backend selects it: opened at birth
+
+    other = home / "other"
+    other.mkdir()
+    projects.init(other)
+    for like in (prev.id, "no-such-task"):  # another project's paths, or no task: nothing copied
+        t = actions.load(actions.new_task(other, like=like).id)
+        assert (t.open_files, t.browser_tabs, t.terminal_tabs) == ([], [], [])
 
 
 def test_dismiss_archive_and_back(project):
@@ -20,13 +38,37 @@ def test_dismiss_archive_and_back(project):
     assert actions.archive(t.id).status == "waiting"
 
 
+def test_mark_opened_reads_and_keeps_board_order(project):
+    t = actions.new_task(project)
+    actions._update(t.id, inbox=True, unread=True, updated="2026-11-01T10:00:00+01:00")
+    got = actions.mark_opened(t.id)
+    assert (got.unread, got.inbox, got.updated) == (False, True, "2026-11-01T10:00:00+01:00")
+    assert got.opened and actions.load(t.id).opened == got.opened
+    assert views.task_json(actions.load(t.id), None)["opened"] == got.opened
+
+
 def test_fork_copies_digest_prio_cwd(project):
     p = actions.new_task(project)
-    actions._update(p.id, digest="Goal: x", prio="planning", cwd=str(project / "sub"), title="Parent")
+    actions._update(p.id, digest="Goal: x", prio="planning", cwd=str(project / "sub"), title="Parent",
+                    open_files=["a.py"], browser_tabs=["https://example.com/"], terminal_tabs=["zsh"])  # fmt: skip
     f = actions.fork_task(p.id)
     got = actions.load(f.id)
     assert (got.parent, got.digest, got.prio, got.cwd, got.title) == (p.id, "Goal: x", "planning", str(project / "sub"), "")
-    assert got.id != p.id
+    assert (got.open_files, got.browser_tabs, got.terminal_tabs) == (["a.py"], ["https://example.com/"], ["zsh"])
+    assert got.id != p.id and got.opened == got.created
+
+
+def test_fork_gets_its_own_short_title(project):
+    p = actions.new_task(project)
+    actions._update(p.id, title="Parent", short_title="Parent topic")
+    assert actions.load(actions.fork_task(p.id).id).short_title == ""
+
+
+def test_rename_sets_the_short_title_too(project):
+    t = actions.new_task(project)
+    actions._update(t.id, title="Sonnet's title", short_title="Sonnet's")
+    got = actions.rename(t.id, "  My own name for it ")
+    assert (got.title, got.short_title) == ("My own name for it", "My own name for it")
 
 
 def test_set_live_false_while_working_becomes_waiting(project):
@@ -50,3 +92,65 @@ def test_task_json(project):
     j = views.task_json(t, None)
     assert (j["line"], j["question"], j["threads"][0]["prompt"], j["outside"]) == ("Asks X.", "X?", "do it", True)
     assert views.task_json(t, 2)["outside"] is False
+
+
+def _block(project, tid, ts):
+    events.apply(project, {"session_id": tid, "hook_event_name": "Notification", "bf_ts": ts,
+                           "notification_type": "permission_prompt", "message": "Claude needs your permission"})
+
+
+def test_end_block_takes_the_task_out_of_the_inbox(project):
+    t = actions.new_task(project)
+    _block(project, t.id, 1000.0)
+    assert actions.end_block(t.id, "busy", 994.0) is None  # a process status from before the block
+    got = actions.load(t.id)
+    assert (got.status, got.inbox, got.unread) == ("blocked", True, True)
+    assert actions.end_block(t.id, "busy", 1040.0)  # I granted it: the agent goes on
+    got = actions.load(t.id)
+    assert (got.status, got.inbox, got.unread, got.notification) == ("working", False, False, None)
+    assert actions.end_block(t.id, "busy", 1050.0) is None  # no longer blocked
+
+
+def test_end_block_after_a_refusal(project):
+    t = actions.new_task(project)
+    _block(project, t.id, 1000.0)
+    actions.end_block(t.id, "idle", 1040.0)  # I refused: the turn ended
+    got = actions.load(t.id)
+    assert (got.status, got.inbox) == ("waiting", False)
+
+
+def test_pin_keeps_a_task_in_the_inbox_until_unpinned(project):
+    t = actions.new_task(project)
+    assert not views.in_inbox(actions.load(t.id))
+    p = actions.pin(t.id)
+    assert p.pinned and views.in_inbox(p) and views.task_json(p, None)["pinned"] is True
+    events.apply(project, {"session_id": t.id, "hook_event_name": "UserPromptSubmit", "prompt": "go", "bf_ts": 1})
+    answered = actions.load(t.id)
+    assert (answered.inbox, answered.pinned) == (False, True) and views.in_inbox(answered)  # answering keeps it
+    events.apply(project, {"session_id": t.id, "hook_event_name": "Stop", "last_assistant_message": "done", "bf_ts": 2})
+    assert views.in_inbox(actions.dismiss(t.id))  # dismiss clears the flag, the pin keeps it
+    u = actions.pin(t.id)
+    assert not u.pinned and not views.in_inbox(u)
+
+
+def test_archive_unpins_and_an_archived_task_cannot_be_pinned(project):
+    t = actions.new_task(project)
+    actions.pin(t.id)
+    a = actions.archive(t.id)
+    assert (a.status, a.pinned) == ("done", False) and not views.in_inbox(a)
+    with pytest.raises(ValueError):
+        actions.pin(t.id)
+    assert actions.archive(t.id).pinned is False  # unarchived: back unpinned
+
+
+def test_inbox_order_puts_quiet_pinned_tasks_last(project):
+    def make(prio, **flags):
+        t = actions.new_task(project)
+        return actions._update(t.id, prio=prio, **flags)
+
+    quiet = make("working", pinned=True)
+    waiting = make("planning", inbox=True)
+    blocked = make("later", inbox=True, status="blocked")
+    pinned_waiting = make("working", pinned=True, inbox=True)
+    got = sorted([quiet, waiting, blocked, pinned_waiting], key=views.inbox_order)
+    assert [t.id for t in got] == [blocked.id, pinned_waiting.id, waiting.id, quiet.id]

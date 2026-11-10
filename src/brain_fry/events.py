@@ -1,4 +1,4 @@
-"""The reader: applies the hook events in the spool to task files. See DESIGN.md, "Hooks".
+"""The reader: applies the hook events in the spool to task files. See DESIGN_DETAILS.md, "Hooks".
 
 Order per event file: apply it to the task file, append it to events.jsonl, delete it.
 A crash between the first and the last step applies that event twice on the next run.
@@ -8,12 +8,16 @@ from __future__ import annotations
 
 import fcntl
 import json
+import logging
 import time
 from pathlib import Path
 
-from . import paths, taskfile
+from . import paths, sessions, taskfile
 from .taskfile import Task, Thread
+from .logs import short
 from .util import iso
+
+log = logging.getLogger(__name__)
 
 BLOCKING = {"permission_prompt", "elicitation_dialog"}
 CREATING = {"UserPromptSubmit", "Stop", "Notification"}  # SessionEnd alone creates no task
@@ -26,13 +30,15 @@ def pending(project: Path) -> list[tuple[Path, dict]]:
         try:
             out.append((f, json.loads(f.read_text())))
         except (OSError, json.JSONDecodeError):
+            log.warning("unreadable event file %s: set aside as .bad", f)
             f.rename(f.with_suffix(".bad"))
     out.sort(key=lambda fe: (fe[1].get("bf_ts", 0), fe[0].name))
     return out
 
 
-def consume(project: Path) -> list[str]:
+def consume(project: Path, on_event=None) -> list[str]:
     """Apply every pending event of the project. Returns the ids of the tasks that changed.
+    on_event(task_id, event) is called after each applied event (the app's auto-advance).
 
     The lock lets one reader at a time work on a project. Without it, the app's reader and
     `bf list` or `bf consume` run by hand could both read a file before either deletes it,
@@ -47,6 +53,8 @@ def consume(project: Path) -> list[str]:
             with paths.event_log(project).open("a") as log:
                 log.write(json.dumps(ev, ensure_ascii=False) + "\n")
             f.unlink()
+            if task_id and on_event:
+                on_event(task_id, ev)
             if task_id and task_id not in changed:
                 changed.append(task_id)
     return changed
@@ -65,9 +73,13 @@ def _apply(project: Path, ev: dict) -> str | None:
     path = paths.task_path(project, sid)
     if path.exists():
         task = taskfile.load(path)
+        before = _tracked(task)
     elif name in CREATING:
         task = Task(session_ids=[sid], project=str(project), cwd=ev.get("cwd") or str(project), created=ts)
+        _import_history(task, name, ev)
+        before = None
     else:
+        log.info("event %s %s in %s: ignored, no task (a session end alone creates none)", name, short(sid), project.name)
         return None
 
     task.transcript_path = ev.get("transcript_path") or task.transcript_path
@@ -87,7 +99,11 @@ def _apply(project: Path, ev: dict) -> str | None:
         thread = task.threads[-1]
         thread.reply = ev.get("last_assistant_message") or ""
         thread.kind = "pending"
-        _set(task, status="waiting", live=True, inbox=True, unread=True, notification=None)
+        if closes(thread):  # archived (and unpinned), as by my key; the digest still runs on the thread
+            _set(task, status="done", live=True, inbox=False, unread=False, pinned=False, notification=None)
+            log.info("task %s: closed by my `close` prompt: archived", short(task.id))
+        else:
+            _set(task, status="waiting", live=True, inbox=True, unread=True, notification=None)
 
     elif name == "Notification":
         if ev.get("notification_type") in BLOCKING:
@@ -101,7 +117,79 @@ def _apply(project: Path, ev: dict) -> str | None:
             task.status = "waiting"
 
     taskfile.save(task)
+    _log(name, ev, project, task, before)
     return sid
+
+
+CLOSED_MARK = "closed :-)"
+
+
+def closes(thread: Thread) -> bool:
+    """The turn of my `close` prompt, when the agent confirmed with "closed :-)": it wrote down
+    what the conversation found (~/.claude/CLAUDE.md, "close") and the task is over. Without the
+    mark (the agent asked something back, or was interrupted), the task goes to the inbox as
+    usual. The mark may be in the last line or, when the reply ends with a trailer
+    (`[needs: fyi] ...`), in the line before it."""
+    if thread.prompt.strip().rstrip(".!").strip().lower() != "close":
+        return False
+    lines = [line for line in thread.reply.splitlines() if line.strip()]
+    return any(CLOSED_MARK in line.lower() for line in lines[-2:])
+
+
+def _import_history(task: Task, name: str, ev: dict) -> None:
+    """A session that becomes a task at this event may have turns before it: its project was
+    registered in the middle of the session. They come from its transcript, as when I drag
+    a session onto the board (sessions.read_turns). The turn of this event is told apart by
+    prompt_id (the promptId of its prompt in the transcript), else by the prompt's text."""
+    path = Path(ev.get("transcript_path") or "")
+    if not path.is_file():
+        return
+    try:
+        title, threads, ids = sessions.read_turns(path)
+    except OSError as e:
+        log.warning("task %s: could not read the earlier turns in %s: %s", short(task.id), path, e)
+        return
+    task.title = title or task.title
+    if not threads:
+        return
+    current = ev.get("prompt_id")
+    last_is_current = ids[-1] == current if current and ids[-1] else None  # None: cannot tell
+    if name == "UserPromptSubmit":
+        same_text = " ".join(threads[-1].prompt.split()) == " ".join((ev.get("prompt") or "").split())
+        if last_is_current or (last_is_current is None and same_text):
+            threads.pop()  # this prompt is in the transcript already; the event adds it
+    elif name == "Stop" or ev.get("notification_type") in BLOCKING:
+        if last_is_current is not False:  # False: a turn without a prompt (a background task)
+            threads[-1].kind = "working"  # the turn of this event: Stop fills in the reply
+    else:  # an idle notification: the last turn is over
+        threads[-1].kind = "pending" if threads[-1].reply else "interrupted"
+    task.threads = threads
+    if threads:
+        log.info("task %s: %d earlier turn(s) imported from %s", short(task.id), len(threads), path)
+
+
+TRACKED = ("status", "live", "inbox", "unread")
+
+
+def _tracked(task: Task) -> dict:
+    return {k: getattr(task, k) for k in TRACKED} | {"threads": len(task.threads)}
+
+
+def _log(name: str, ev: dict, project: Path, task: Task, before: dict | None) -> None:
+    """One line per applied event: what it was, and what it changed in the task."""
+    detail = ev.get("notification_type") or ev.get("reason") or ""
+    if name == "Notification" and ev.get("message"):
+        detail += f": {ev['message']}"
+    after = _tracked(task)
+    if before is None:
+        change = "new task, " + ", ".join(f"{k} {after[k]}" for k in TRACKED)
+    else:
+        change = ", ".join(f"{k} {before[k]} -> {after[k]}" for k in TRACKED if before[k] != after[k]) or "no change"
+    if task.threads and (before is None or after["threads"] != before["threads"] or name == "Stop"):
+        th = task.threads[-1]
+        change += f"; thread {th.n} {th.kind}"
+    log.info("event %s%s %s %r in %s: %s", name, f" ({detail[:120]})" if detail else "", short(task.id),
+             task.display_title[:50], project.name, change)  # fmt: skip
 
 
 def _set(task: Task, **values) -> None:

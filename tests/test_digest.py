@@ -100,3 +100,39 @@ def test_tools_of_last_turn(tmp_path):
 def test_cut(text, limit):
     out = digest._cut(text, limit)
     assert len(out) <= limit + 20
+
+
+def test_short_title_is_set_once(project):
+    t = make(project, [Thread(n=1, ts="x", kind="pending", prompt="a", reply="r")])
+    one = {"title": "Show PDFs in the file panel", "short_title": "PDF viewer", "digest": "D",
+           "threads": [{"n": 1, "kind": "FYI", "digest": "d", "question": None}]}  # fmt: skip
+    digest.digest_task(t, fake(one))
+    got = taskfile.load(paths.task_path(project, "s1"))
+    assert (got.title, got.short_title) == ("Show PDFs in the file panel", "PDF viewer")
+    got.threads.append(Thread(n=2, ts="y", kind="pending", prompt="b", reply="r2"))
+    taskfile.save(got)
+    digest.digest_task(got, fake({**one, "short_title": "Other", "threads": [{"n": 2, "kind": "FYI", "digest": "d", "question": None}]}))
+    assert taskfile.load(paths.task_path(project, "s1")).short_title == "PDF viewer"
+
+
+def test_task_from_before_the_field_gets_only_a_short_title(project):
+    t = make(project, [Thread(n=1, ts="x", kind="review", digest="old", prompt="a", reply="r")], title="My title", digest="Goal: x.")
+    assert digest.needs_call(t) and digest.pending_tasks(project)[0].id == "s1"
+    call = fake({"title": "Other title", "short_title": "Two words", "digest": "Rewritten.", "threads": []})
+    digest.digest_task(t, call)
+    got = taskfile.load(paths.task_path(project, "s1"))
+    assert (got.title, got.short_title, got.digest, got.threads[0].digest) == ("My title", "Two words", "Goal: x.", "old")
+    assert "## Turn" not in call.calls[0] and "# Title\n\nMy title" in call.calls[0]
+    assert not digest.needs_call(got)
+
+
+def test_empty_short_title_falls_back_to_the_title(project):
+    t = make(project, [Thread(n=1, ts="x", kind="review", prompt="a", reply="r")], title="Send the editor selection", digest="D")
+    digest.digest_task(t, fake({"title": "", "short_title": " ", "digest": "", "threads": []}))
+    got = taskfile.load(paths.task_path(project, "s1"))
+    assert got.short_title == "Send the editor" and not digest.needs_call(got)  # no loop
+
+
+def test_fork_without_turns_waits_for_its_first_digest(project):
+    t = make(project, [], digest="Goal: the parent's.")
+    assert not digest.needs_call(t)
