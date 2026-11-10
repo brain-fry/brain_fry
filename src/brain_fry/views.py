@@ -90,6 +90,7 @@ def task_json(t: Task, pty_gen: int | None, shells: list[dict] | None = None, el
         "opened": t.opened,
         "parent": t.parent,
         "digest": t.digest,
+        "notes": t.notes,  # a planned task: the card's text until the first digest
         "line": inbox_line(t),
         "kind": last.kind if last else None,
         "question": last.question if last else None,

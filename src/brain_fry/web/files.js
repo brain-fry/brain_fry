@@ -76,7 +76,8 @@ function makeTab(tid, path, r) {
   el.className = 'editor';
   $('#editors').appendChild(el);
   const tab = { tid, path, el, kind: 'text', version: r.version, head: r.head, dirty: false, diskChanged: false,
-    gone: false, diff: false, diffC: new CM.Compartment(), langC: new CM.Compartment(), quiet: false };
+    gone: false, diff: false, diffC: new CM.Compartment(), langC: new CM.Compartment(), quiet: false,
+    wrap: stored(wrapKey(tid, path), false), wrapC: new CM.Compartment() };
   tab.view = new CM.EditorView({
     parent: el,
     state: CM.EditorState.create({
@@ -87,6 +88,7 @@ function makeTab(tid, path, r) {
         CM.oneDark,
         tab.langC.of(CM.languageFor(path)), // a rename may change the language (explorer.js)
         tab.diffC.of([]),
+        tab.wrapC.of(tab.wrap ? CM.EditorView.lineWrapping : []),
         r.text.includes('\r\n') ? CM.EditorState.lineSeparator.of('\r\n') : [], // save CRLF files as CRLF
         CM.EditorView.updateListener.of((u) => {
           if (u.docChanged && !tab.quiet && !tab.dirty) { tab.dirty = true; renderFileTabs(); }
@@ -369,6 +371,23 @@ async function openFile(tid, path, focus = true) {
   }
 }
 
+// Cmd+click on a file link in a terminal (browser.js): the backend resolves the target
+// against the task's cwd (fs.link), then the file opens in 3a, at its line if it has one.
+async function openLink(tid, target) {
+  let r;
+  try { r = await request('fs.link', { id: tid, target }); } catch (e) { toast(e.message); return; }
+  if (!S.layout.middle_on) toggleLayout('middle');
+  await openFile(tid, r.path);
+  if (r.line) goToLine(work(tid).tabs.find((t) => t.path === r.path), r.line);
+}
+
+function goToLine(tab, n) {
+  if (!tab || !tab.view || tab.kind === 'thread') return; // an image or a PDF has no lines
+  const doc = tab.view.state.doc;
+  const line = doc.line(Math.min(Math.max(n, 1), doc.lines));
+  tab.view.dispatch({ selection: { anchor: line.from }, effects: CM.EditorView.scrollIntoView(line.from, { y: 'center' }) });
+}
+
 function saveOpenFiles(tid) { // thread tabs are not kept: they are one click away in 1b. Browser tabs: browser.js
   send('files.set', { id: tid, paths: work(tid).tabs.filter((t) => !t.thread && !t.web).map((t) => t.path) });
 }
@@ -509,6 +528,26 @@ function setDiff(tab, on) {
   renderFiles();
 }
 
+// Wrap belongs to the file, as VS Code's Option+Z: every tab of the file follows, in every task of
+// the project (they share its files), and it is remembered by the window (localStorage).
+function wrapKey(tid, path) {
+  const t = S.state && S.state.tasks[tid];
+  return `wrap:${t ? t.projectPath : ''}:${path}`;
+}
+
+function setWrap(tab, on) {
+  const key = wrapKey(tab.tid, tab.path);
+  if (on) store(key, true); else try { localStorage.removeItem(key); } catch { /* not remembered */ }
+  for (const ws of Object.values(S.work || {})) {
+    for (const t of ws.tabs) {
+      if (t.kind !== 'text' || !t.wrapC || wrapKey(t.tid, t.path) !== key) continue;
+      t.wrap = on;
+      t.view.dispatch({ effects: t.wrapC.reconfigure(on ? CM.EditorView.lineWrapping : []) });
+    }
+  }
+  renderFiles();
+}
+
 function activeTab() {
   const w = S.selected && work(S.selected);
   return w ? w.tabs.find((t) => t.path === w.active) : null;
@@ -570,6 +609,7 @@ function renderFiles() {
   }
   const canDiff = typeof tab.head === 'string';
   setBar(`<span class="path">${esc(tab.path)}</span>${notes.join('')}
+    <button data-file-act="wrap" class="${tab.wrap ? 'on' : ''}" title="Wrap long lines (this file, in every task)">Wrap</button>
     <button data-file-act="diff" class="${tab.diff ? 'on' : ''}" ${canDiff ? '' : 'disabled'}
       title="${canDiff ? 'Show the changes against git HEAD' : 'Not in git HEAD (new, untracked, or no repository)'}">Diff vs HEAD</button>
     <button data-file-act="save" ${tab.dirty || tab.diskChanged ? '' : 'disabled'} title="Cmd+S">Save</button>`);
@@ -684,6 +724,7 @@ document.addEventListener('click', (e) => {
     const a = act.dataset.fileAct;
     if (a === 'find') findInConversation(tab.tid, tab.thread);
     else if (a === 'diff') setDiff(tab, !tab.diff);
+    else if (a === 'wrap') setWrap(tab, !tab.wrap);
     else if (a === 'save') saveTab(tab);
     else if (a === 'reload') reloadTab(tab);
     else if (a === 'overwrite') saveTab(tab, true);

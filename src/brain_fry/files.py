@@ -7,9 +7,11 @@ Every path is relative to the project and must stay inside it. A file's `version
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
+from urllib.parse import unquote, urlsplit
 
 HIDDEN = {".git", ".venv", "node_modules", "__pycache__", ".pytest_cache", ".mypy_cache",
           ".ruff_cache", ".DS_Store", ".brain_fry", ".idea", ".tox"}  # fmt: skip
@@ -35,6 +37,35 @@ def resolve(project: str | Path, rel: str) -> Path:
     if p != root and root not in p.parents:
         raise PermissionError(f"outside the project: {rel}")
     return p
+
+
+LINE_FRAGMENT = re.compile(r"L(\d+)(?:-L?\d+)?")  # #L2, #L2-5, #L2-L5: line 2
+
+
+def link_target(project: str | Path, cwd: str | None, target: str) -> dict:
+    """A file link of a terminal, as Claude Code writes it (OSC 8, from a Markdown link):
+    `hello.py#L2`, `docs/a%20b.md`, `/abs/x.py`, `file:///abs/x.py`. A relative target is
+    relative to the session's cwd. Returns {"path": relative to the project, "line": n or None}.
+    See DESIGN_DETAILS.md "Browser (3a)", file links in 4a."""
+    s = target.strip()
+    if s[:5].lower() == "file:":
+        u = urlsplit(s)
+        s = u.path + (f"#{u.fragment}" if u.fragment else "")
+    path, _, fragment = s.partition("#")
+    m = LINE_FRAGMENT.fullmatch(fragment)
+    path = unquote(path)
+    if not path:
+        raise ValueError(f"not a file: {target}")
+    base = Path(cwd) if cwd and Path(cwd).is_dir() else Path(project)
+    p = (base / path).resolve()  # an absolute path replaces the base
+    root = Path(project).resolve()
+    if p != root and root not in p.parents:
+        raise PermissionError(f"outside the project: {target}")
+    if not p.exists():
+        raise FileNotFoundError(f"no such file: {target}")
+    if p.is_dir():
+        raise ValueError(f"a folder, not a file: {target}")
+    return {"path": p.relative_to(root).as_posix(), "line": int(m.group(1)) if m else None}
 
 
 def version(p: Path) -> str | None:

@@ -7,6 +7,7 @@
 <link rel="stylesheet" href="/vendor/xterm/xterm.css">
 <link rel="stylesheet" href="/app.css">
 <link rel="stylesheet" href="/browser.css">
+<link rel="stylesheet" href="/review.css">
 <script>
   window.__errors = [];
   window.onerror = (msg, src, line) => {
@@ -24,10 +25,10 @@
   <div class="modes">
     <button class="mode" data-mode="dev" title="Dev mode (Cmd+B toggles)">Dev</button>
     <button class="mode" data-mode="organize" title="Organize mode (Cmd+B toggles)">Organize</button>
+    <button class="mode" data-mode="review" title="Review mode: git (Cmd+Shift+G toggles)">Review</button>
   </div>
   <div id="task-head"></div>
-  <label class="switch" title="After I answer the selected task, select the next inbox item (Cmd+Up from the first item goes back)"><input type="checkbox" id="auto-advance"> Auto-advance</label>
-  <button id="new-btn" title="New task (Cmd+N)">+ New task</button>
+  <button id="new-btn" title="New task (Cmd+N). In Organize mode: a card on the board, not started">+ New task</button>
 </header>
 <div id="menu" hidden>
   <button data-menu="cookies">Overwrite my cookies<small>Copies my Firefox cookies into the browser of 3a. For each site that Firefox has cookies for, they replace the browser's.</small></button>
@@ -48,7 +49,7 @@
       <h2 id="archive-toggle" class="toggle">Archive <span id="archive-count"></span></h2>
       <div id="archive" class="list" hidden></div>
     </section>
-    <footer class="keys">Cmd+Up/Down inbox · Cmd+D dismiss · Cmd+E archive · Cmd+Shift+D fork · Cmd+N new · Cmd+P project · Cmd+B board · Cmd+1 files · Cmd+2 editor · Cmd+J terminal</footer>
+    <footer class="keys">Cmd+Up/Down inbox · Cmd+E archive · Cmd+Shift+D fork · Cmd+N new · Cmd+P project · Cmd+B board · Cmd+1 files · Cmd+2 editor · Cmd+J terminal</footer>
   </aside>
   <div class="split v" data-split="side"></div>
   <section id="explorer">
@@ -74,8 +75,24 @@
     </div>
   </section>
   <div class="split v" data-split="middle"></div>
+  <!-- Review mode (review.js): replaces 1, 2a and the middle column; 4a stays at the right on demand (Cmd+4) -->
+  <section id="review">
+    <aside id="rv-side"></aside>
+    <div class="split v" data-split="rvSide"></div>
+    <div id="rv-main">
+      <div id="rv-log"><div class="rv-loghead" id="rv-loghead"></div><div id="rv-rows" tabindex="0"></div></div>
+      <div class="split h" data-split="rvLog"></div>
+      <div id="rv-bottom">
+        <div id="rv-files" tabindex="0"></div>
+        <div class="split v" data-split="rvFiles"></div>
+        <div id="rv-diff"><div class="rv-diffbar" id="rv-diffbar"></div><div id="rv-diffbody" tabindex="0"></div></div>
+      </div>
+    </div>
+  </section>
+  <div id="rv-sep"></div>
   <section id="agent">
     <div id="terms"></div>
+    <div id="calm" hidden></div>
     <div id="sel-chip" hidden></div>
     <div id="overlay" hidden></div>
   </section>
@@ -83,7 +100,7 @@
 <main id="board" tabindex="-1" hidden>
   <div class="board-bar">
     <label><input type="checkbox" id="show-hidden"> Show later, more later, never and archived (H)</label>
-    <span class="keys">Arrows move · Shift+Left/Right change prio · Enter open in Dev · E archive · D dismiss · F fork · N new · O other sessions · Esc / Cmd+B Dev</span>
+    <span class="keys">Arrows move · Shift+Left/Right change prio · Enter or 1-9 (working) open in Dev · E archive · F fork · N new task (not started) · O other sessions · Esc / Cmd+B Dev</span>
   </div>
   <div id="columns"></div>
   <section id="others">
@@ -93,6 +110,7 @@
   </section>
 </main>
 <div id="picker" class="modal" hidden></div>
+<div id="rv-dialog" class="modal" hidden></div>
 <div id="ctx" class="ctx-menu" hidden></div>
 <div id="toast" hidden></div>
 <script src="/vendor/xterm/xterm.js"></script>
@@ -105,6 +123,7 @@
 <script src="/files.js"></script>
 <script src="/explorer.js"></script>
 <script src="/browser.js"></script>
+<script src="/review.js"></script>
 <script src="/menu.js"></script>
 <script src="/shells.js"></script>
 <script src="/layout.js"></script>

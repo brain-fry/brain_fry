@@ -150,3 +150,34 @@ def test_path_text_is_the_path_shown_by_the_explorer(repo):
     assert files.path_text(repo, "src/a.py", relative=False) == str(repo / "src" / "a.py")
     with pytest.raises(PermissionError):
         files.path_text(repo, "../x", relative=True)
+
+
+def test_link_target_resolves_a_terminal_link_against_the_cwd(repo):
+    """The targets of the OSC 8 links that Claude Code writes for Markdown links (4a)."""
+    (repo / "src" / "my notes.md").write_text("a\nb\n")
+    cwd = str(repo / "src")
+    assert files.link_target(repo, cwd, "a.py") == {"path": "src/a.py", "line": None}
+    assert files.link_target(repo, cwd, "a.py#L2") == {"path": "src/a.py", "line": 2}
+    assert files.link_target(repo, cwd, "a.py#L2-5")["line"] == 2
+    assert files.link_target(repo, cwd, "a.py#L2-L5")["line"] == 2
+    assert files.link_target(repo, cwd, "a.py#intro")["line"] is None
+    assert files.link_target(repo, cwd, "../README.md")["path"] == "README.md"
+    assert files.link_target(repo, cwd, "my%20notes.md")["path"] == "src/my notes.md"
+    assert files.link_target(repo, cwd, str(repo / "README.md"))["path"] == "README.md"
+    assert files.link_target(repo, cwd, f"file://{repo}/src/my%20notes.md#L1") == {"path": "src/my notes.md", "line": 1}
+    assert files.link_target(repo, cwd, f"file://localhost{repo}/README.md")["path"] == "README.md"
+    # a cwd that is gone: the project
+    assert files.link_target(repo, str(repo / "gone"), "README.md")["path"] == "README.md"
+
+
+def test_link_target_refuses_what_3a_cannot_open(repo):
+    with pytest.raises(PermissionError):
+        files.link_target(repo, str(repo), "../outside.txt")
+    with pytest.raises(PermissionError):
+        files.link_target(repo, str(repo), "/etc/hosts")
+    with pytest.raises(FileNotFoundError):
+        files.link_target(repo, str(repo), "missing.py#L3")
+    with pytest.raises(ValueError):
+        files.link_target(repo, str(repo), "src")
+    with pytest.raises(ValueError):
+        files.link_target(repo, str(repo), "#L3")

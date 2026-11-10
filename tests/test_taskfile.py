@@ -54,6 +54,13 @@ def test_round_trip_is_stable():
     assert dumps(loads(text)) == text
 
 
+def test_notes_of_a_planned_task():
+    t = make_task()
+    t.notes = NASTY
+    assert loads(dumps(t)) == t
+    assert "# Notes" in dumps(t) and "# Notes" not in dumps(make_task())  # files without notes stay as they were
+
+
 def test_empty_task():
     t = Task(session_ids=["s"], project="/p", cwd="/p")
     assert loads(dumps(t)) == t

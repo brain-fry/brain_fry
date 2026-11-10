@@ -12,7 +12,7 @@ from brain_fry.app.server import start_backend
 from brain_fry.taskfile import Thread
 
 FAKE_CLAUDE = """#!/bin/bash
-echo "ARGS $*"
+echo "ARGS $* HYPERLINK=$FORCE_HYPERLINK"
 read -r line
 echo "GOT $line"
 sleep 30
@@ -61,7 +61,9 @@ def test_new_task_runs_in_a_pty_and_takes_input(backend, project):
         assert (task["status"], task["live"], task["outside"]) == ("waiting", True, False)
 
         with connect(f"ws://127.0.0.1:{port}/pty/{tid}") as pty:
-            assert f"ARGS --session-id {tid}".encode() in read_pty(pty, b"ARGS")
+            out = read_pty(pty, b"HYPERLINK=")
+            assert f"ARGS --session-id {tid}".encode() in out
+            assert b"HYPERLINK=1" in out  # Claude Code writes its links as OSC 8
             pty.send(json.dumps({"t": "in", "d": "hello\r"}))
             assert b"GOT hello" in read_pty(pty, b"GOT")
 
@@ -112,6 +114,27 @@ def test_select_resumes_a_task_without_live_session(backend, project):
         states(ctl, lambda m: m["selected"] is None)
 
 
+def test_plan_puts_a_card_on_the_board_without_a_session(backend, project):
+    """Organize mode: a new task is a card with my title, no `claude`; opening it starts one."""
+    core, port = backend
+    with connect(f"ws://127.0.0.1:{port}/ctl") as ctl:
+        ctl.recv(timeout=5)
+        tid = request(ctl, 1, cmd="plan", project=str(project), title="  Spec review mode ", prio="planning",
+                      notes="Like SourceTree.\n- stage hunks\n")["data"]["id"]  # fmt: skip
+        st = states(ctl, lambda m: tid in m.get("tasks", {}))
+        task = st["tasks"][tid]
+        assert (task["title"], task["shortTitle"], task["prio"]) == ("Spec review mode", "Spec review mode", "planning")
+        assert task["notes"] == actions.load(tid).notes == "Like SourceTree.\n- stage hunks"
+        assert (task["live"], task["pty"], task["inbox"], st["selected"]) == (False, None, False, None)
+        assert tid not in core.ptys and not actions.load(tid).opened
+        assert not request(ctl, 2, cmd="plan", project=str(project), title="  ", prio="working")["ok"]
+        assert not request(ctl, 3, cmd="plan", project=str(project), title="x", prio="soon")["ok"]
+        ctl.send(json.dumps({"cmd": "select", "id": tid, "rows": 24, "cols": 80}))
+        states(ctl, lambda m: m.get("tasks", {}).get(tid, {}).get("pty"))
+        with connect(f"ws://127.0.0.1:{port}/pty/{tid}") as pty:
+            assert f"ARGS --session-id {tid}".encode() in read_pty(pty, b"ARGS")
+
+
 def test_session_that_ends_is_marked_not_live(backend, project):
     core, port = backend
     with connect(f"ws://127.0.0.1:{port}/ctl") as ctl:
@@ -150,6 +173,10 @@ def test_file_commands(backend, project):
         assert request(ctl, 4, cmd="fs.write", id=t.id, path="notes.md", text="x", base=r["version"])["data"] == {"conflict": True}
         assert request(ctl, 5, cmd="fs.versions", id=t.id, paths=["notes.md"])["data"] == {"notes.md": w["version"]}
         bad = request(ctl, 6, cmd="fs.read", id=t.id, path="../../etc/passwd")
+        assert not bad["ok"] and "PermissionError" in bad["error"]
+        link = request(ctl, 8, cmd="fs.link", id=t.id, target="notes.md#L1")["data"]
+        assert link == {"path": "notes.md", "line": 1}
+        bad = request(ctl, 9, cmd="fs.link", id=t.id, target="../../etc/passwd")
         assert not bad["ok"] and "PermissionError" in bad["error"]
         request(ctl, 7, cmd="files.set", id=t.id, paths=["notes.md"])
         assert actions.load(t.id).open_files == ["notes.md"]
@@ -235,6 +262,15 @@ def test_static_files_are_served(backend):
     html = urllib.request.urlopen(f"http://127.0.0.1:{port}/").read().decode()
     assert "<title>Brain Fry</title>" in html
     assert urllib.request.urlopen(f"http://127.0.0.1:{port}/app.js").status == 200
+    # the photos of the empty 4a, one for each name in app.js
+    import re
+
+    js = urllib.request.urlopen(f"http://127.0.0.1:{port}/app.js").read().decode()
+    names = re.findall(r"'([a-z-]+)'", js.split("const CALM_PHOTOS = [", 1)[1].split("];", 1)[0])
+    assert len(names) == 7
+    for name in names:
+        r = urllib.request.urlopen(f"http://127.0.0.1:{port}/calm/{name}.jpg")
+        assert r.headers["Content-Type"] == "image/jpeg" and r.read(3) == b"\xff\xd8\xff"
 
 
 def test_images_and_pdfs_are_served_for_the_viewers(backend, project, monkeypatch):
@@ -383,6 +419,22 @@ def test_the_picker_gets_a_fresh_project_list(backend, project, home):
         states(ctl, lambda m: len(m["projects"]) == 2, timeout=8)  # and the state follows
 
 
+def test_a_project_removed_from_the_lists_comes_back_with_bf_init(backend, project, home):
+    from brain_fry import events, projects
+
+    core, port = backend
+    with connect(f"ws://127.0.0.1:{port}/ctl") as ctl:
+        ctl.recv(timeout=5)
+        request(ctl, 1, cmd="project.deactivate", path=str(project))
+        st = states(ctl, lambda m: m["projects"][0].get("active") is False, timeout=5)
+        assert st["projects"][0]["path"] == str(project)  # still sent: the dropdown shows it while it is current
+        assert projects.project_paths() == [project]  # still registered: its events are applied
+        assert not request(ctl, 2, cmd="project.deactivate", path=str(home / "nope"))["ok"]
+        assert projects.init(project) is True  # bf init: back in the lists
+        assert "active" not in projects.load()["projects"][0]
+        assert projects.init(project) is False
+
+
 def test_outdated_hook_is_detected(home):
     from brain_fry import install, paths
 
@@ -409,6 +461,41 @@ def test_a_prompt_event_tells_the_front_end(backend, project):
                 if m["type"] == "prompted":
                     break
             assert m == {"type": "prompted", "id": t.id, "slash": prompt.startswith("/")}
+
+
+def test_a_background_result_is_not_my_answer(backend, project):
+    """The result of a background agent starts a turn with a UserPromptSubmit too. It must not
+    advance: I may be reading that task. Then my own prompt still tells the front end."""
+    from brain_fry import paths
+
+    core, port = backend
+    t = actions.new_task(project)
+    prompts = [{"prompt": '<agent-message from="a1">\n[Subagent hand-back] ...'},
+               {"prompt": "<task-notification>\n<task-id>b1</task-id>"},
+               {"prompt": "looks like mine", "source": "system"},
+               {"prompt": "go on"}]  # fmt: skip
+    seen = []
+    with connect(f"ws://127.0.0.1:{port}/ctl") as ctl:
+        ctl.recv(timeout=5)
+        for i, fields in enumerate(prompts):
+            ev = {"session_id": t.id, "hook_event_name": "UserPromptSubmit", "cwd": str(project), "bf_ts": 1_900_000_000 + i, **fields}
+            (paths.spool_dir(project) / f"{i}.json").write_text(json.dumps(ev))
+        end = time.time() + 5
+        while time.time() < end and len(actions.load(t.id).threads) < len(prompts):  # all four applied
+            try:
+                m = json.loads(ctl.recv(timeout=0.2))
+            except TimeoutError:
+                continue
+            seen += [m] if m["type"] == "prompted" else []
+        drain = time.time() + 1  # the message of the last pass goes out after its file is saved
+        while time.time() < drain:
+            try:
+                m = json.loads(ctl.recv(timeout=0.2))
+            except TimeoutError:
+                continue
+            seen += [m] if m["type"] == "prompted" else []
+    assert [th.prompt for th in actions.load(t.id).threads][-1] == "go on"
+    assert seen == [{"type": "prompted", "id": t.id, "slash": False}]  # one: my prompt, not the three others
 
 
 def test_selection_for_the_hook(backend, project, home):
@@ -494,3 +581,32 @@ def test_digest_queue_does_turns_before_short_titles(project, monkeypatch):
     core.digest_q.put((9, 0, None))  # stops the worker after the rest
     core._digest_worker()
     assert done == [b.id, a.id] and core.queued == {}
+
+
+def test_commands_of_review_mode(backend, project, monkeypatch):
+    """git.state, git.diff, staging a hunk and a commit, for the repository of a task's folder."""
+    core, port = backend
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(project.parent / "gitconfig"))
+    for k in ("GIT_AUTHOR", "GIT_COMMITTER"):
+        monkeypatch.setenv(f"{k}_NAME", "T")
+        monkeypatch.setenv(f"{k}_EMAIL", "t@t")
+    t = actions.new_task(project)
+    with connect(f"ws://127.0.0.1:{port}/ctl") as ctl:
+        ctl.recv(timeout=5)
+        assert request(ctl, 1, cmd="git.state", id=t.id)["data"] == {"repo": False}
+        import subprocess
+
+        subprocess.run(["git", "init", "-q", "-b", "main", str(project)], check=True)
+        (project / ".gitignore").write_text(".brain_fry/\n")  # as ~/.gitignore_global does
+        (project / "a.txt").write_text("one\n")
+        st = request(ctl, 2, cmd="git.state", id=t.id)["data"]
+        assert st["repo"] and [f["path"] for f in st["unstaged"]] == [".gitignore", "a.txt"]
+        assert [x["id"] for x in st["trees"][0]["tasks"]] == [t.id]
+        assert request(ctl, 3, cmd="git.stage", id=t.id, paths=[".gitignore", "a.txt"])["ok"]
+        d = request(ctl, 4, cmd="git.diff", id=t.id, side="staged", path="a.txt")["data"]
+        assert d["hunks"][0]["lines"] == [["+", "", 1, "one"]] and not d["hunkable"]  # a new file: whole file only
+        assert request(ctl, 5, cmd="git.commit", id=t.id, message="first")["ok"]
+        rows = request(ctl, 6, cmd="git.log", id=t.id)["data"]["rows"]
+        assert [r["s"] for r in rows] == ["Uncommitted changes", "first"]
+        bad = request(ctl, 7, cmd="git.diff", id=t.id, side="unstaged", path="../x")
+        assert not bad["ok"] and "ValueError" in bad["error"]

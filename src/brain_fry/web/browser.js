@@ -367,15 +367,22 @@ document.addEventListener('click', (e) => {
 
 // Cmd+click on a URL in 4a or 3b opens it in a browser tab of the task, as Cmd+click opens a
 // link in VS Code's terminal. A plain click selects text, as before. app.js calls this for
-// every new terminal. Limits: a URL that wraps onto the next line is cut at the line end.
+// every new terminal. Limits: a URL in the text that wraps onto the next line is cut at the
+// line end (an OSC 8 link is not: its target is in the escape sequence).
+// An OSC 8 link to a file (Claude Code writes one for a Markdown link, `[x](src/x.py#L2)`,
+// since its PTY has FORCE_HYPERLINK) opens in 3a: openLink (files.js). Another scheme
+// (`mailto:`, `vscode:`) is ignored, so that a link in a reply cannot start an app.
 const URL_IN_TEXT = /https?:\/\/[^\s"'<>`]*[^\s"'<>`.,;:!?)\]}]/g;
 
 function browserTermLinks(term) {
   const open = (e, uri) => {
-    if (!e.metaKey || !/^https?:/i.test(uri)) return;
-    openWebTab(S.selected, uri, { activate: true });
+    if (!e.metaKey) return;
+    if (/^https?:/i.test(uri)) openWebTab(S.selected, uri, { activate: true });
+    else if (/^file:/i.test(uri) || !/^[a-z][a-z0-9+.-]*:/i.test(uri)) openLink(S.selected, uri);
   };
-  term.options.linkHandler = { activate: open, allowNonHttpProtocols: false }; // OSC 8 links
+  // allowNonHttpProtocols: else xterm.js drops every OSC 8 target that is not http(s),
+  // `hello.py` included (its OscLinkProvider)
+  term.options.linkHandler = { activate: open, allowNonHttpProtocols: true };
   term.registerLinkProvider({
     provideLinks(y, callback) {
       const line = term.buffer.active.getLine(y - 1);

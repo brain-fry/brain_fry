@@ -7,7 +7,7 @@ const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '
 const KINDS = new Set(['review', 'answer', 'rule', 'FYI', 'blocked']);
 const PRIOS = ['working', 'planning', 'later', 'more_later', 'never'];
 const HIDDEN_PRIOS = new Set(['later', 'more_later', 'never']);
-const OUR_KEYS = new Set(['arrowdown', 'arrowup', 'n', 'p', 'd', 'e', 'b', '1', '2', 'j']);
+const OUR_KEYS = new Set(['arrowdown', 'arrowup', 'n', 'p', 'd', 'e', 'b', '1', '2', 'j', 'g', '4']);
 
 function stored(key, fallback) {
   try { const v = localStorage.getItem(key); return v === null ? fallback : JSON.parse(v); } catch { return fallback; }
@@ -18,7 +18,7 @@ function store(key, value) {
 
 const S = {
   state: null,
-  mode: 'dev', // or 'organize'
+  mode: 'dev', // or 'organize', or 'review' (review.js)
   selected: null, // the task in Dev mode (4a)
   boardSel: null, // the card under the cursor in Organize mode
   showHidden: stored('showHidden', false),
@@ -29,14 +29,16 @@ const S = {
   othersOpen: stored('othersOpen', true), // the region of other sessions under the board
   otherSel: null, // the other session under the mouse cursor (click)
   adopting: null, // {id, open}: adopt sent, waiting for the task in the state
+  plan: null, // {project, prio}: the dialog of a new task in Organize mode (a card, no session)
+  planDraft: null, // {title, notes}: what that dialog held when it was closed without creating: back at the next N
+  planned: null, // task id: plan answered, the cursor goes to its card when it is in the state
   dragging: false, // no re-render of the board while a card is dragged
-  autoAdvance: stored('autoAdvance', true), // after an answer, select the next inbox item
   advance: null, // {from, order, at, timer}: an advance waiting for its second
   lastAnswered: null, // the task that the last advance (answer or archive) left: Cmd+Up from the first item goes back
   project: null, // the project picked in the dropdown when it had no task to land on (path)
 };
 
-// the task that the header and the actions apply to
+// the task that the header's actions apply to
 const targetId = () => (S.mode === 'organize' ? S.boardSel : S.selected);
 
 // ------------------------------------------------------------------ control channel
@@ -121,6 +123,7 @@ function onState(st) {
     S.boardSel = id;
     if (open) return openInDev(id);
   }
+  if (S.planned && st.tasks[S.planned]) { S.boardSel = S.planned; S.planned = null; } // a new card (Organize mode)
   render();
 }
 
@@ -160,12 +163,14 @@ function ensureTerm(id, container = $('#terms'), shell = false) {
     term.loadAddon(gl);
   } catch (e) { window.__errors.push('webgl: ' + e); }
   t = { id, el, term, fit, search, gen: null, ws: null, shell };
-  // a hidden terminal (Organize mode) must never type into Claude: drop its input
-  term.onData((d) => { if (S.mode === 'dev') { t.lastInput = Date.now(); wsSend(t, { t: 'in', d }); } });
-  term.onBinary((d) => { if (S.mode === 'dev') wsSend(t, { t: 'bin', d }); });
+  // a hidden terminal (Organize mode) must never type into Claude: drop its input. In Review
+  // mode, 4a types while it is on screen (Cmd+4); the shells of 3b are hidden there
+  const live = () => S.mode === 'dev' || (!shell && S.mode === 'review' && S.reviewAgent);
+  term.onData((d) => { if (live()) { t.lastInput = Date.now(); wsSend(t, { t: 'in', d }); } });
+  term.onBinary((d) => { if (live()) wsSend(t, { t: 'bin', d }); });
   term.onResize(({ cols, rows }) => wsSend(t, { t: 'resize', cols, rows }));
   term.attachCustomKeyEventHandler((e) => {
-    if (S.mode !== 'dev') return false;
+    if (!live()) return false;
     if (e.metaKey && OUR_KEYS.has(e.key.toLowerCase())) return false;
     if (!shell && e.key === 'Enter' && e.shiftKey && !e.metaKey) { // new line in Claude Code: ESC CR
       if (e.type === 'keydown') wsSend(t, { t: 'in', d: '\x1b\r' });
@@ -204,7 +209,7 @@ function fitSafely(t) {
 function showTerm(id) {
   for (const x of S.terms.values()) if (!x.shell) x.el.style.display = x.id === id ? '' : 'none';
   const t = S.terms.get(id);
-  if (t && S.mode === 'dev') requestAnimationFrame(() => { fitSafely(t); t.term.focus(); });
+  if (t && (S.mode === 'dev' || (S.mode === 'review' && S.reviewAgent))) requestAnimationFrame(() => { fitSafely(t); t.term.focus(); });
 }
 
 new ResizeObserver(() => {
@@ -216,13 +221,22 @@ new ResizeObserver(() => {
 
 function setMode(mode, doRender = true) {
   if (mode === S.mode) return;
+  const prev = S.mode;
+  if (prev === 'dev') { // 4a keeps this width in Review mode, so that its PTY keeps its size
+    const w = $('#agent').getBoundingClientRect().width;
+    if (w > 100) S.agentWidth = Math.round(w);
+  }
   S.mode = mode;
-  $('#dev').hidden = mode !== 'dev';
+  $('#dev').hidden = mode === 'organize'; // Review mode shows its panels in #dev, beside 4a
   $('#board').hidden = mode !== 'organize';
+  if (prev === 'review') leaveReview();
+  applyReviewLayout(); // review.js
   if (mode === 'organize') {
     if (document.activeElement) document.activeElement.blur(); // out of the terminal
     S.boardSel = S.boardSel && S.state && S.state.tasks[S.boardSel] ? S.boardSel : S.selected;
     $('#board').focus();
+  } else if (mode === 'review') {
+    enterReview(prev);
   } else if (S.selected) {
     showTerm(S.selected);
   }
@@ -269,16 +283,24 @@ function openProject(path) {
   render();
 }
 
+// the projects of the dropdown, Cmd+P and Cmd+N: without the ones removed with the x of Cmd+P
+// (`"active": false` in projects.json; bf init in the folder puts one back)
+function activeProjects(projects) {
+  return projects.filter((p) => p.active !== false);
+}
+
 function renderProjectSelect(st) {
   const el = $('#project-select');
   if (document.activeElement === el) return; // its menu may be open
   const cur = currentProject() || '';
+  // a removed project stays in the dropdown while it is the current one, so that it shows
+  const shown = st.projects.filter((p) => p.active !== false || p.path === cur);
   const count = {};
-  for (const p of st.projects) count[p.name] = (count[p.name] || 0) + 1;
+  for (const p of shown) count[p.name] = (count[p.name] || 0) + 1;
   // two folders with one name: add the parent folder
   const label = (p) => (count[p.name] > 1 ? `${p.name} (${p.path.split('/').slice(-2, -1)[0]})` : p.name);
   const html = (cur ? '' : '<option value="" disabled selected>Project</option>')
-    + st.projects.map((p) => `<option value="${esc(p.path)}" ${p.path === cur ? 'selected' : ''}>${esc(label(p))}</option>`).join('');
+    + shown.map((p) => `<option value="${esc(p.path)}" ${p.path === cur ? 'selected' : ''}>${esc(label(p))}</option>`).join('');
   if (el.dataset.html !== html) { el.innerHTML = html; el.dataset.html = html; }
   if (cur) el.value = cur;
   else el.selectedIndex = 0; // the placeholder
@@ -333,8 +355,6 @@ function uiLog(msg) { send('log', { level: 'info', msg }); }
 
 function onPrompted(m) {
   if (m.id !== S.selected || S.mode !== 'dev') return;
-  const title = (S.state.tasks[m.id] || {}).title || m.id;
-  if (!S.autoAdvance) return uiLog(`auto-advance off: stays on ${m.id.slice(0, 8)} ${JSON.stringify(title)}`);
   if (m.slash) return uiLog(`auto-advance: no advance for a slash command in ${m.id.slice(0, 8)}`);
   cancelAdvance();
   // the inbox order before the answer: the "next" item is the one after it
@@ -358,14 +378,26 @@ function nextAfter(from, order) {
 function doAdvance() {
   const a = S.advance;
   S.advance = null;
-  if (!a || S.mode !== 'dev' || S.selected !== a.from || !S.autoAdvance) return;
+  if (!a || S.mode !== 'dev' || S.selected !== a.from) return;
   const t = S.terms.get(a.from);
   if (t && t.lastInput > a.at) return uiLog(`auto-advance: stays on ${a.from.slice(0, 8)}, I am typing in it`);
   const next = nextAfter(a.from, a.order);
-  if (!next) return uiLog(`auto-advance: stays on ${a.from.slice(0, 8)}, nothing else needs me`);
-  uiLog(`auto-advance${a.why ? ` (${a.why})` : ''}: ${a.from.slice(0, 8)} --> ${next.slice(0, 8)} ${JSON.stringify(S.state.tasks[next].title)}`);
+  uiLog(`auto-advance${a.why ? ` (${a.why})` : ''}: ${a.from.slice(0, 8)} --> ${next ? `${next.slice(0, 8)} ${JSON.stringify(S.state.tasks[next].title)}` : 'nothing needs me'}`);
   S.lastAnswered = a.from;
-  select(next);
+  if (next) return select(next);
+  selectNone(); // the answered task leaves 4a also when nothing else needs me (Renaud, 2026-11-10)
+}
+
+// Nothing needs me, after an answer or an archive: no task is selected, 4a shows a calm photo.
+// Cmd+Up goes back to the task that I left.
+function selectNone() {
+  cancelAdvance();
+  S.selected = null;
+  S.starting = null;
+  S.project = null;
+  showTerm(null);
+  send('select', { id: null });
+  render();
 }
 
 function act(cmd) {
@@ -380,21 +412,14 @@ function act(cmd) {
 }
 
 // Archiving the selected task (Dev mode): it is done, so it leaves 1a at once and the next
-// item that needs me is selected, whatever the auto-advance switch (that switch is about
-// watching an agent after an answer). Nothing needs me: 4a empties. Cmd+Up goes back to the
-// archived task, to unarchive it.
+// item that needs me is selected, with no second to wait. Nothing needs me: 4a empties.
+// Cmd+Up goes back to the archived task, to unarchive it.
 function afterArchive(id, next) {
   S.lastAnswered = id;
   S.state.inbox = S.state.inbox.filter((x) => x !== id); // no flash of its row before the state push
   uiLog(`archive: ${id.slice(0, 8)} --> ${next ? `${next.slice(0, 8)} ${JSON.stringify(S.state.tasks[next].title)}` : 'nothing needs me'}`);
   if (next) return select(next);
-  cancelAdvance();
-  S.selected = null;
-  S.starting = null;
-  S.project = null;
-  showTerm(null);
-  send('select', { id: null });
-  render();
+  selectNone();
 }
 
 // ------------------------------------------------------------------ board (Organize mode)
@@ -413,13 +438,14 @@ function boardColumns(st) {
   }));
 }
 
-function card(t) {
+// pos: the card's position in the working column (1 to 9), the digit that opens it; 0 for none
+function card(t, pos = 0) {
   const cls = ['card', t.id === S.boardSel ? 'sel' : '', t.status === 'done' ? 'archived' : '', t.unread ? 'unread' : ''].join(' ');
   return `<div class="${cls}" data-card="${t.id}" draggable="true">
-    <div class="top"><span class="dot ${t.status}" title="${t.status}"></span>
+    <div class="top">${pos ? `<span class="pos" title="press ${pos} to open">${pos}</span>` : ''}<span class="dot ${t.status}" title="${t.status}"></span>
       ${t.inbox ? '<span class="inbox-badge">inbox</span>' : ''}${t.pinned ? '<span class="pin-badge">pinned</span>' : ''}${runBadge(t.elsewhere)}<span class="proj" style="--h:${hue(t.project)}">${esc(t.project)}</span></div>
     <div class="title" title="${esc(t.title)}">${esc(t.shortTitle || t.title)}</div>
-    ${t.digest ? `<div class="desc" title="${esc(t.digest)}">${esc(t.digest)}</div>` : ''}
+    ${t.digest || t.notes ? `<div class="desc" title="${esc(t.digest || t.notes)}">${esc(t.digest || t.notes)}</div>` : ''}
     ${t.inbox && t.line ? `<div class="line need">${esc(t.line)}</div>` : ''}
   </div>`;
 }
@@ -486,11 +512,20 @@ function renderBoard(st) {
   $('#columns').innerHTML = cols.map((c) => `
     <div class="column" data-prio="${c.prio}">
       <h3>${c.prio.replace('_', ' ')} <span>${c.ids.length || ''}</span></h3>
-      <div class="cards">${c.ids.length ? c.ids.map((id) => card(st.tasks[id])).join('') : '<div class="empty">Empty.</div>'}</div>
+      <div class="cards">${c.ids.length ? c.ids.map((id, i) => card(st.tasks[id], c.prio === 'working' && i < 9 ? i + 1 : 0)).join('') : '<div class="empty">Empty.</div>'}</div>
     </div>`).join('');
   renderOthers(st);
   const sel = document.querySelector('#columns .card.sel');
   if (sel) sel.scrollIntoView({ block: 'nearest' });
+}
+
+// 1 to 9 in Organize mode: the card at that position in the working column, as shown now
+function openWorking(n) {
+  const col = boardColumns(S.state).find((c) => c.prio === 'working');
+  const id = col && col.ids[n - 1];
+  if (!id) return;
+  S.boardSel = id; // as Enter: the cursor is on it when I come back to the board
+  openInDev(id);
 }
 
 function setShowHidden(on) {
@@ -546,12 +581,12 @@ function render() {
   if (!st) return;
   if (S.dragging && S.mode === 'organize') return; // replacing the dragged card would end the drag; dragend renders
   for (const b of document.querySelectorAll('.mode')) b.classList.toggle('on', b.dataset.mode === S.mode);
-  $('#auto-advance').checked = S.autoAdvance;
   if (S.mode === 'organize') ensureBoardSel(boardColumns(st));
   renderBanner(st);
   renderProjectSelect(st);
   renderHead(st);
   if (S.mode === 'organize') return renderBoard(st);
+  if (S.mode === 'review') { renderAgent(st); return renderReview(st); } // review.js
   renderInbox(st);
   renderThreads(st);
   renderArchive(st);
@@ -580,15 +615,9 @@ function renderHead(st) {
   const task = st.tasks[targetId()];
   const head = $('#task-head');
   if (!task) { head.innerHTML = ''; return; }
-  const editing = head.querySelector('input.rename');
-  if (editing) return; // do not clobber a rename in progress
+  // only the actions: the task itself is on its row in 1a or its card (Renaud, 2026-11-10)
   head.innerHTML = `
-    <span class="dot ${task.status}" title="${task.status}"></span>
-    <span class="title" title="Double-click to rename">${esc(task.title)}</span>
-    <span class="meta">${esc(task.project)} · ${task.status}${task.parent ? ' · fork' : ''}${task.elsewhere ? ' · runs in ' + esc(task.elsewhere.where) : ''}</span>
-    <select class="prio" title="Prio column">${PRIOS.map((p) => `<option value="${p}" ${p === task.prio ? 'selected' : ''}>${p.replace('_', ' ')}</option>`).join('')}</select>
     <span class="actions">
-      <button data-act="dismiss" ${task.inbox ? '' : 'disabled'} title="Out of the inbox, nothing to do (Cmd+D)">Dismiss</button>
       ${task.pinned
         ? '<button data-act="pin" title="Leaves the inbox when nothing waits for me">Unpin</button>'
         : `<button data-act="pin" ${task.status === 'done' ? 'disabled title="Unarchive it first"' : 'title="Stays in the inbox until I unpin it"'}>Pin</button>`}
@@ -630,6 +659,7 @@ function renderThreads(st) {
       const txt = th.digest || th.prompt || '(no prompt)';
       return `<div class="thread" data-n="${th.n}" title="${esc(th.prompt)} (click: open in 3a)"><span class="n">${th.n}</span>${kind}<span class="txt">${esc(txt)}</span></div>`;
     }).join('')
+    : task && task.notes ? `<div class="notes"><div class="label">My notes (no thread yet)</div>${esc(task.notes)}</div>`
     : '<div class="empty">No threads yet.</div>';
 }
 
@@ -643,11 +673,12 @@ function renderArchive(st) {
 
 function renderAgent(st) {
   const task = st.tasks[S.selected];
+  calm(!S.selected && !S.project);
   if (!S.selected && S.project) {
     const name = S.project.split('/').pop();
     return overlay(`<div class="big">No open task in ${esc(name)}.</div><button data-new-in="${esc(S.project)}">New task in ${esc(name)}</button>`);
   }
-  if (!S.selected) return overlay('<div class="big">Select a task in the inbox, or start one with Cmd+N.</div>');
+  if (!S.selected) return overlay(null);
   if (!task) return overlay('<div class="big">This task is gone.</div>');
   const t = S.terms.get(task.id);
   if (task.pty) {
@@ -663,6 +694,21 @@ function renderAgent(st) {
   }
   if (S.starting === task.id) return overlay('<div>Starting...</div>');
   overlay(`<div class="big">No live session.</div><button data-act="resume">Resume</button>`);
+}
+
+// The empty 4a (no task selected): a calm photo, no text, nothing to watch or start (Renaud,
+// 2026-11-10). A different photo each time it appears. Credits: web/calm/CREDITS.md.
+const CALM_PHOTOS = ['beech-forest-fog', 'lone-tree-fog', 'tree-mist-reflection', 'snowy-lake-fog',
+  'snowfield-mist', 'misty-hills', 'peak-in-cloud'];
+
+function calm(on) {
+  const el = $('#calm');
+  if (on && el.hidden) {
+    const others = CALM_PHOTOS.filter((p) => p !== el.dataset.photo);
+    el.dataset.photo = others[Math.floor(Math.random() * others.length)];
+    el.style.backgroundImage = `url(calm/${el.dataset.photo}.jpg)`;
+  }
+  el.hidden = !on;
 }
 
 function overlay(html) {
@@ -693,7 +739,7 @@ function toast(msg, action = null) { // action: { label, run }, a button in the 
 // Cmd+P the first one that is not the current one: the current project is usually first, so
 // Cmd+P, Enter goes back to the project before it.
 function openPicker(mode = 'new') {
-  S.picker = { mode, items: S.state ? S.state.projects : [], index: 0, moved: false };
+  S.picker = { mode, items: S.state ? activeProjects(S.state.projects) : [], index: 0, moved: false };
   S.picker.index = pickerStart(S.picker);
   renderPicker();
   $('#picker').hidden = false;
@@ -702,7 +748,7 @@ function openPicker(mode = 'new') {
     const p = S.picker;
     if (!p || p.mode !== mode) return; // closed, or the other picker opened since
     const current = p.items[p.index];
-    p.items = items;
+    p.items = activeProjects(items);
     p.index = p.moved && current ? Math.max(0, items.findIndex((it) => it.path === current.path)) : pickerStart(p);
     renderPicker();
   }).catch((e) => toast(`Could not read the projects: ${e.message}`));
@@ -714,8 +760,13 @@ function pickerStart(p) {
 }
 
 function closePicker() {
+  if (S.plan) { // Esc or a click outside: the text comes back at the next N, a long note is not lost
+    const title = $('#picker .plan-title').value, notes = $('#picker .plan-notes').value;
+    S.planDraft = title.trim() || notes.trim() ? { title, notes } : null;
+  }
   $('#picker').hidden = true;
   S.picker = null;
+  S.plan = null;
   const t = S.selected && S.terms.get(S.selected);
   if (S.mode === 'organize') $('#board').focus();
   else if (t) t.term.focus();
@@ -724,15 +775,29 @@ function closePicker() {
 function renderPicker() {
   const p = S.picker;
   const key = (i) => (i === p.index ? 'Enter' : i < 9 ? String(i + 1) : '');
-  const head = `${p.mode === 'open' ? 'Switch to project...' : 'New task in project...'} <span class="hint">most recently used first</span>`;
+  // Cmd+P only: the x removes the project from the lists (shown on hover and on the highlighted row, as in VS Code)
+  const remove = (i) => (p.mode === 'open'
+    ? `<button class="remove" data-remove="${i}" title="Remove from this list (bf init in the folder puts it back)">×</button>` : '');
+  const planned = p.mode === 'new' && S.mode === 'organize' ? 'on the board, not started · ' : '';
+  const head = `${p.mode === 'open' ? 'Switch to project...' : 'New task in project...'} <span class="hint">${planned}most recently used first</span>`;
   const use = (it) => (it.path === currentProject() ? '<span class="recent">current</span>' : '')
     + (it.last ? `<span class="recent" title="last opened task of this project">${ago(it.last)}</span>` : '');
   $('#picker').innerHTML = `<div class="box"><h3>${head}</h3>${p.items.length
     ? p.items.map((it, i) => `<div class="item ${i === p.index ? 'sel' : ''}" data-i="${i}">
         <div class="main"><div>${esc(it.name)}</div><div class="path">${esc(it.path)}</div></div>
         ${use(it)}
-        ${key(i) ? `<kbd>${key(i)}</kbd>` : ''}</div>`).join('')
+        ${key(i) ? `<kbd>${key(i)}</kbd>` : ''}${remove(i)}</div>`).join('')
     : '<div class="empty">No project yet. Run <code>bf init</code> in a project folder.</div>'}</div>`;
+}
+
+function removeProject(i) {
+  const p = S.picker;
+  const it = p && p.items[i];
+  if (!it) return;
+  p.items.splice(i, 1);
+  if (i < p.index || p.index >= p.items.length) p.index = Math.max(0, p.index - 1);
+  renderPicker();
+  request('project.deactivate', { path: it.path }).catch((e) => toast(`Could not remove ${it.name}: ${e.message}`));
 }
 
 function pick(i) {
@@ -740,7 +805,52 @@ function pick(i) {
   const mode = S.picker && S.picker.mode;
   closePicker();
   if (it && mode === 'open') openProject(it.path);
+  else if (it && S.mode === 'organize') openPlan(it.path);
   else if (it) newTask(it.path);
+}
+
+// ------------------------------------------------------------------ new task in Organize mode
+// Organize mode is for organizing: a new task is only a card, no session (Renaud, 2026-11-10).
+// After the project, a title and notes. The card lands in the column of the card under the
+// cursor (working on an empty board) and the cursor moves to it. Opening it in Dev mode starts
+// its session (`claude --session-id`, as for any task that was never prompted).
+function openPlan(projectPath) {
+  const cur = S.state.tasks[S.boardSel];
+  S.plan = { project: projectPath, prio: cur ? cur.prio : 'working' };
+  const d = S.planDraft || { title: '', notes: '' };
+  $('#picker').innerHTML = `<div class="box"><h3>New task in ${esc(projectPath.split('/').pop())} · ${esc(S.plan.prio.replace('_', ' '))}
+    <span class="hint">on the board, not started</span></h3>
+    <input class="plan-title" placeholder="Title" spellcheck="false" value="${esc(d.title)}">
+    <textarea class="plan-notes" placeholder="Notes" rows="8">${esc(d.notes)}</textarea>
+    <div class="plan-keys">Enter: to the notes · Cmd+Enter: create · Esc: close (the text is kept)</div></div>`;
+  $('#picker').hidden = false;
+  const title = $('#picker .plan-title'), notes = $('#picker .plan-notes');
+  const onKey = (e) => { // the document's handler leaves a text field its keys
+    if (e.isComposing) return;
+    if (e.key === 'Enter' && e.metaKey) { e.preventDefault(); submitPlan(); }
+    else if (e.key === 'Enter' && e.target === title) { e.preventDefault(); notes.focus(); }
+    else if (e.key === 'Escape') { e.preventDefault(); closePicker(); }
+  };
+  title.addEventListener('keydown', onKey);
+  notes.addEventListener('keydown', onKey);
+  title.focus();
+}
+
+function submitPlan() {
+  const p = S.plan;
+  if (!p) return;
+  const titleEl = $('#picker .plan-title');
+  const title = titleEl.value.trim(), notes = $('#picker .plan-notes').value.trim();
+  if (!title) return titleEl.focus(); // the card needs a heading
+  S.plan = null; // created: no draft to keep
+  S.planDraft = null;
+  closePicker();
+  request('plan', { project: p.project, title, prio: p.prio, notes }).then((r) => {
+    if (S.state.tasks[r.id]) { S.boardSel = r.id; render(); } else S.planned = r.id; // else onState moves the cursor
+  }).catch((e) => {
+    S.planDraft = { title, notes }; // back at the next N
+    toast(`Could not create the task: ${e.message}`);
+  });
 }
 
 // ------------------------------------------------------------------ events
@@ -768,22 +878,24 @@ document.addEventListener('keydown', (e) => {
     else if (k === 'ArrowUp') boardMove(0, -1);
     else if (k === 'ArrowDown') boardMove(0, 1);
     else if (k === 'Enter') { if (S.boardSel) openInDev(S.boardSel); }
+    else if (/^[1-9]$/.test(k)) openWorking(Number(k));
     else if (k === 'Escape') setMode('dev');
     else if (k === 'h' || k === 'H') setShowHidden(!S.showHidden);
     else if (k === 'o' || k === 'O') setOthersOpen(!S.othersOpen);
     else if (k === 'e') act('archive');
-    else if (k === 'd') act('dismiss');
     else if (k === 'f') act('fork');
     else if (k === 'n') openPicker();
     // any other key is swallowed too: nothing typed in Organize mode may reach a terminal
     e.preventDefault(); e.stopPropagation();
     return;
   }
+  if (S.mode === 'review' && reviewKey(e)) { e.preventDefault(); e.stopPropagation(); return; } // review.js
   if (!e.metaKey) return;
   const k = e.key.toLowerCase();
   // in a code editor, the editor keeps Cmd+D (next occurrence) and Cmd+Up/Down (start/end)
   if (e.target.closest && e.target.closest('.cm-editor') && ['d', 'arrowup', 'arrowdown'].includes(k)) return;
-  if (k === 'b') setMode(S.mode === 'dev' ? 'organize' : 'dev');
+  if (k === 'g' && e.shiftKey) setMode(S.mode === 'review' ? R.from : 'review'); // Review mode, and back
+  else if (k === 'b') setMode(S.mode === 'organize' ? 'dev' : 'organize');
   else if (k === '1' && S.mode === 'dev') toggleLayout('explorer');
   else if (k === '2' && S.mode === 'dev') toggleLayout('middle');
   else if (k === 'j' && S.mode === 'dev') toggleLayout('shells');
@@ -792,7 +904,6 @@ document.addEventListener('keydown', (e) => {
   else if (k === 'n') openPicker();
   else if (k === 'p') openPicker('open');
   else if (k === 'd' && e.shiftKey) act('fork');
-  else if (k === 'd') act('dismiss');
   else if (k === 'e') act('archive');
   else return;
   e.preventDefault(); e.stopPropagation();
@@ -817,6 +928,8 @@ document.addEventListener('click', (e) => {
   if (newIn) return newTask(newIn.dataset.newIn);
   const btn = e.target.closest('[data-act]');
   if (btn && !btn.disabled) return act(btn.dataset.act);
+  const removeBtn = e.target.closest('#picker [data-remove]');
+  if (removeBtn) return removeProject(Number(removeBtn.dataset.remove));
   const item = e.target.closest('#picker .item');
   if (item) return pick(Number(item.dataset.i));
   if (e.target.id === 'picker') return closePicker();
@@ -826,19 +939,10 @@ document.addEventListener('click', (e) => {
 $('#new-btn').addEventListener('click', () => openPicker());
 
 document.addEventListener('change', (e) => {
-  if (e.target.matches('#task-head select.prio') && targetId()) send('prio', { id: targetId(), prio: e.target.value });
   if (e.target.id === 'show-hidden') { setShowHidden(e.target.checked); $('#board').focus(); }
   if (e.target.id === 'project-select') {
     e.target.blur(); // the selected task's terminal takes the focus
     if (e.target.value) openProject(e.target.value);
-  }
-  if (e.target.id === 'auto-advance') {
-    S.autoAdvance = e.target.checked;
-    store('autoAdvance', S.autoAdvance);
-    if (!S.autoAdvance) cancelAdvance();
-    uiLog(`auto-advance switched ${S.autoAdvance ? 'on' : 'off'}`);
-    const t = S.selected && S.terms.get(S.selected);
-    if (S.mode === 'dev' && t) t.term.focus(); // back to the terminal, not the checkbox
   }
 });
 
@@ -879,30 +983,6 @@ document.addEventListener('drop', (e) => {
   S.boardSel = id;
   send('prio', { id, prio: col.dataset.prio });
   render();
-});
-
-// double-click on a card: see the click listener
-document.addEventListener('dblclick', (e) => {
-  const title = e.target.closest('#task-head .title');
-  const id = targetId();
-  if (!title || !id) return;
-  const input = document.createElement('input');
-  input.className = 'rename';
-  input.value = S.state.tasks[id].title;
-  title.replaceWith(input);
-  input.focus();
-  input.select();
-  const done = (save) => {
-    if (save && input.value.trim()) send('rename', { id, title: input.value.trim() });
-    input.remove();
-    render();
-  };
-  input.addEventListener('keydown', (ev) => {
-    if (ev.key === 'Enter') done(true);
-    if (ev.key === 'Escape') done(false);
-    ev.stopPropagation();
-  });
-  input.addEventListener('blur', () => done(false));
 });
 
 connectCtl();

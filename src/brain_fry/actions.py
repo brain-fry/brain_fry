@@ -81,11 +81,6 @@ def mark_opened(task_id: str) -> Task:
     return task
 
 
-def dismiss(task_id: str) -> Task:
-    """Out of the inbox, nothing to do (an FYI)."""
-    return _update(task_id, inbox=False, unread=False)
-
-
 def archive(task_id: str) -> Task:
     """Archive, or bring back an archived task. Does not end the process. Archiving unpins:
     the task is done, and an unarchived task comes back unpinned."""
@@ -181,6 +176,29 @@ def new_task(project: Path, like: str | None = None) -> Task:
     copied = (f", with the tabs of {short(src.id)}: {len(task.open_files)} files, {len(task.browser_tabs)} browser,"
               f" {len(task.terminal_tabs)} terminals" if src else "")  # fmt: skip
     log.info("task %s created in %s (new session%s)", short(task.id), project.name, copied)
+    return task
+
+
+def plan_task(project: Path, title: str, prio: str, notes: str = "") -> Task:
+    """A task created in Organize mode: a card on the board, no session yet. Selecting it
+    later starts `claude --session-id <id>` (core._resume_argv: a task without a thread).
+    My title is the card's heading, as after a rename: the digest keeps it. My notes are
+    the card's text until the first digest, and stay in the file. Not `opened`, not
+    selected, no tabs copied (they would come from whatever task was open when I planned it)."""
+    title, notes = title.strip(), notes.strip()
+    if not title:
+        raise ValueError("a planned task needs a title")
+    if prio not in PRIOS:
+        raise ValueError(prio)
+    project = Path(project)
+    now = iso()
+    task = Task(session_ids=[str(uuid.uuid4())], project=str(project), cwd=str(project), title=title,
+                short_title=title, prio=prio, status="waiting", live=False, notes=notes,
+                created=now, updated=now)  # fmt: skip
+    with taskfile.LOCK:
+        taskfile.save(task)
+    log.info("task %s planned in %s, %s: %r, notes of %d chars (no session yet)", short(task.id), project.name, prio,
+             title[:50], len(notes))  # fmt: skip
     return task
 
 

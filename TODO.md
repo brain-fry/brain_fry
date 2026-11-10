@@ -14,14 +14,6 @@ remove the region "Other Claude Code sessions" under the board, and adopt (decid
 
 
 
-### 3rd mode: review
-
-- view similar to SourceTree
-- what i use and like:
-    - I like the panel at the top with a graph, a column with the Git graph, and the Git messages, commit hash, author, and date. I need a panel like that at the top. The panel on the left, I don't use it much, but maybe it could still be there for the work trees, etc., and it varies.
-    - I don't need to stash anything. You just need to have the branches, maybe, or the work tree, like a little panel on the left. The main panels at the bottom are the pending files that have a state, like the staged files and the unstaged files. This is really all I need.
-    - On the right, I have a diff of the staged versus unstaged file. I like to work that way. The diff is read-only, and I can stage or unstage different hunks. I like that.
-- support worktrees
 
 ## V3
 

@@ -277,3 +277,64 @@ def test_mark_without_close_prompt_goes_to_the_inbox(project):
     put(project, "Stop", last_assistant_message="Done.\nclosed :-)")
     events.consume(project)
     assert (task(project).status, task(project).inbox) == ("waiting", True)
+
+
+def _bg(kind="subagent", status="running", **more):
+    return {"id": "a1", "type": kind, "status": status, "description": "Find calm portrait photos", **more}
+
+
+def test_stop_while_a_background_agent_runs_stays_out_of_the_inbox(project):
+    """The sequence seen on 2026-11-10: the reply says "I'll wait for the photos", the agent's
+    result comes back as a prompt that Claude Code writes, and that turn's Stop is the end."""
+    put(project, "UserPromptSubmit", prompt="find photos")
+    put(project, "Stop", last_assistant_message="I'll wait for the photos.", background_tasks=[_bg()])
+    events.consume(project)
+    t = task(project)
+    assert (t.status, t.live, t.inbox, t.unread) == ("working", True, False, False)
+    assert (t.threads[0].kind, t.threads[0].reply) == ("pending", "I'll wait for the photos.")  # digested as usual
+
+    put(project, "UserPromptSubmit", prompt='<agent-message from="a1">\n[Subagent hand-back] ...')
+    put(project, "Stop", last_assistant_message="Here are 3 photos.", background_tasks=[])
+    events.consume(project)
+    t = task(project)
+    assert (t.status, t.inbox, t.unread) == ("waiting", True, True)
+    assert [th.kind for th in t.threads] == ["pending", "pending"]
+
+
+def test_stop_while_a_workflow_runs_stays_out_of_the_inbox(project):
+    put(project, "UserPromptSubmit", prompt="review it")
+    put(project, "Stop", last_assistant_message="Started.", background_tasks=[_bg("workflow", "pending")])
+    events.consume(project)
+    assert (task(project).status, task(project).inbox) == ("working", False)
+
+
+def test_stop_after_a_block_while_an_agent_runs_leaves_the_inbox(project):
+    put(project, "UserPromptSubmit", prompt="a")
+    put(project, "Notification", notification_type="permission_prompt", message="needs Bash")
+    put(project, "Stop", last_assistant_message="Waiting for the agent.", background_tasks=[_bg()])
+    events.consume(project)
+    t = task(project)
+    assert (t.status, t.inbox, t.notification) == ("working", False, None)
+
+
+def test_background_shell_or_monitor_does_not_hold_the_inbox(project):
+    """A dev server in a background shell may never end: the reply goes to the inbox."""
+    put(project, "UserPromptSubmit", prompt="start the server")
+    put(project, "Stop", last_assistant_message="It runs on :8000.",
+        background_tasks=[_bg("shell", command="npm run dev"), _bg("monitor")])  # fmt: skip
+    events.consume(project)
+    assert (task(project).status, task(project).inbox) == ("waiting", True)
+
+
+def test_finished_or_odd_background_entries_do_not_hold_the_inbox(project):
+    put(project, "UserPromptSubmit", prompt="a")
+    put(project, "Stop", last_assistant_message="done", background_tasks=[_bg(status="completed"), "junk", {}])
+    events.consume(project)
+    assert task(project).inbox is True
+
+
+def test_close_while_an_agent_runs_still_archives(project):
+    put(project, "UserPromptSubmit", prompt="close")
+    put(project, "Stop", last_assistant_message="Notes written.\nclosed :-)", background_tasks=[_bg()])
+    events.consume(project)
+    assert task(project).status == "done"

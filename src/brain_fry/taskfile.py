@@ -69,6 +69,7 @@ class Task:
     open_files: list[str] = field(default_factory=list)
     terminal_tabs: list[str] = field(default_factory=list)
     browser_tabs: list[str] = field(default_factory=list)  # URLs of the browser tabs of 3a
+    notes: str = ""  # what I wrote when I created the task in Organize mode (actions.plan_task)
     digest: str = ""
     threads: list[Thread] = field(default_factory=list)
 
@@ -88,7 +89,7 @@ class Task:
         return "(untitled)"
 
 
-BODY_FIELDS = ("digest", "threads")
+BODY_FIELDS = ("notes", "digest", "threads")
 META_FIELDS = tuple(f.name for f in fields(Task) if f.name not in BODY_FIELDS)
 
 
@@ -101,6 +102,8 @@ def _quote(text: str | None) -> list[str]:
 def dumps(task: Task) -> str:
     meta = {k: getattr(task, k) for k in META_FIELDS}
     out = ["---", yaml.safe_dump(meta, sort_keys=False, allow_unicode=True, width=10_000).rstrip(), "---"]
+    if task.notes:  # only planned tasks have notes: the other files stay as they were
+        out += ["", "# Notes", ""] + _quote(task.notes)
     out += ["", "# Digest", ""] + _quote(task.digest)
     out += ["", "# Threads"]
     for t in task.threads:
@@ -121,6 +124,7 @@ def loads(text: str) -> Task:
         if isinstance(v, (datetime, date)):
             meta[k] = v.isoformat()
 
+    notes: list[str] = []
     digest: list[str] = []
     threads: list[dict] = []
     target: list[str] | None = None
@@ -128,6 +132,8 @@ def loads(text: str) -> Task:
         if line.startswith(">"):
             if target is not None:
                 target.append(line[2:] if line.startswith("> ") else line[1:])
+        elif line == "# Notes":
+            target = notes
         elif line == "# Digest":
             target = digest
         elif line == "# Threads":
@@ -141,6 +147,7 @@ def loads(text: str) -> Task:
 
     known = {f.name for f in fields(Task)}
     task = Task(**{k: v for k, v in meta.items() if k in known})
+    task.notes = "\n".join(notes)
     task.digest = "\n".join(digest)
     for t in threads:
         parts = {p: "\n".join(t.pop(p)) for p in PARTS if p in t}

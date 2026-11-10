@@ -28,6 +28,7 @@ TYPES = {
     "mjs": "text/javascript; charset=utf-8",  # PDF.js
     "css": "text/css; charset=utf-8",
     "png": "image/png",
+    "jpg": "image/jpeg",  # the photos of the empty 4a (web/calm/)
     "gif": "image/gif",
     "svg": "image/svg+xml",
     "wasm": "application/wasm",

@@ -45,7 +45,7 @@ WEB_SCHEMES = {"http", "https", "about", "data", "blob", "file", "webkit-extensi
 KVO_KEYS = ("URL", "title", "loading", "canGoBack", "canGoForward")
 # Cmd keys that go to Brain Fry's page while a browser page has the focus: Brain Fry's own
 # (app.js) and the browser's that live in the page (browser.js: address, new tab, find, close)
-FORWARD = {"arrowup", "arrowdown", "n", "p", "d", "e", "b", "1", "2", "j", "l", "t", "f", "w"}
+FORWARD = {"arrowup", "arrowdown", "n", "p", "d", "e", "b", "1", "2", "j", "l", "t", "f", "w", "g", "4"}
 ARROWS = {0xF700: "arrowup", 0xF701: "arrowdown", 0xF702: "arrowleft", 0xF703: "arrowright"}
 KEY_NAMES = {"arrowup": "ArrowUp", "arrowdown": "ArrowDown"}
 CMD, SHIFT = AppKit.NSEventModifierFlagCommand, AppKit.NSEventModifierFlagShift

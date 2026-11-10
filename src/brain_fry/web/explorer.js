@@ -1,6 +1,6 @@
 'use strict';
 // The right-click menu of the explorer (2a) and its keys, as in VS Code on macOS: Enter (or F2)
-// renames the selected entry, Cmd+Backspace moves it to the Trash. Cut / Copy / Paste move or copy
+// renames the selected entry, Cmd+Backspace moves it to the Trash, Ctrl+C copies its relative path. Cut / Copy / Paste move or copy
 // files and folders, also between projects. See DESIGN.md "2a, 3a, 3b".
 // Uses S, $, esc, request, send, toast, store (app.js) and work, refreshTree, renderExplorer,
 // renderFiles, saveOpenFiles, closeFile (files.js).
@@ -49,7 +49,7 @@ function ctxItems(tid, path, dir) {
     paste,
     '-',
     { label: 'Copy path', run: () => copyPath(tid, path, false) },
-    { label: 'Copy relative path', run: () => copyPath(tid, path, true) },
+    { label: 'Copy relative path', key: '⌃C', run: () => copyPath(tid, path, true) },
     '-',
     { label: 'Rename', key: 'Enter', run: () => startRename(tid, path) },
     { label: 'Delete', key: '⌘⌫', run: () => deletePath(tid, path, dir) },
@@ -168,6 +168,10 @@ function movedPaths(project, pairs) {
       if (to === null) continue;
       if (w.active === tab.path) { w.active = to; store(`active:${id}`, to); }
       if (tab.langC) tab.view.dispatch({ effects: tab.langC.reconfigure(CM.languageFor(to)) });
+      if (tab.wrap) { // remembered under the new path (files.js, setWrap)
+        try { localStorage.removeItem(wrapKey(id, tab.path)); } catch { /* not remembered */ }
+        store(wrapKey(id, to), true);
+      }
       tab.path = to;
       moved = true;
     }
@@ -243,6 +247,7 @@ $('#tree').addEventListener('keydown', (e) => {
   const plain = !e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey;
   if ((e.key === 'Enter' || e.key === 'F2') && plain) startRename(S.selected, path);
   else if (e.key === 'Backspace' && e.metaKey) deletePath(S.selected, path, row.dataset.dir === '1');
+  else if (e.key.toLowerCase() === 'c' && e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) copyPath(S.selected, path, true);
   else return;
   e.preventDefault(); e.stopPropagation();
 });

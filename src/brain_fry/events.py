@@ -102,6 +102,12 @@ def _apply(project: Path, ev: dict) -> str | None:
         if closes(thread):  # archived (and unpinned), as by my key; the digest still runs on the thread
             _set(task, status="done", live=True, inbox=False, unread=False, pinned=False, notification=None)
             log.info("task %s: closed by my `close` prompt: archived", short(task.id))
+        elif waiting_for := background_work(ev):
+            # The turn is over, but the agent is not done: it waits for its background agents,
+            # and their results start the next turn. Out of the inbox until a Stop without any.
+            _set(task, status="working", live=True, inbox=False, unread=False, notification=None)
+            log.info("task %s: not in the inbox: waits for %d background task(s) (%s)", short(task.id),
+                     len(waiting_for), ", ".join(sorted({str(b.get("type")) for b in waiting_for})))  # fmt: skip
         else:
             _set(task, status="waiting", live=True, inbox=True, unread=True, notification=None)
 
@@ -119,6 +125,42 @@ def _apply(project: Path, ev: dict) -> str | None:
     taskfile.save(task)
     _log(name, ev, project, task, before)
     return sid
+
+
+# Prompts that Claude Code writes itself to start a turn: the result of a background agent,
+# or of a background shell. Seen in events.jsonl, 2026-11-09 and 10.
+MACHINE_PROMPTS = ("<agent-message", "<task-notification")
+
+
+def typed_by_me(ev: dict) -> bool:
+    """A UserPromptSubmit whose prompt I wrote, not one with which Claude Code starts a turn
+    by itself. The payload's `source` tells (`user`; or `sdk`, `system`, `loop_wakeup`, ...:
+    the schema in the binary of 2.1.322), but no payload has had it yet: it is rolling out.
+    Without it, the start of the prompt tells."""
+    source = ev.get("source")
+    if source is not None:
+        return source == "user"
+    return not (ev.get("prompt") or "").lstrip().startswith(MACHINE_PROMPTS)
+
+
+IN_FLIGHT = {"running", "pending"}
+
+
+def background_work(ev: dict) -> list[dict]:
+    """The background agents and workflows that still run at this Stop: the agent will go on
+    when they finish. Stop's `background_tasks` lists all background work in flight. Claude
+    Code's own "Waiting for N background agents and M dynamic workflows to finish" counts
+    agents and workflows only, and so does this: a background shell or monitor (a dev server,
+    a watch) may never end, and would keep its task out of the inbox for ever. Types seen:
+    subagent, shell; the schema also names monitor and workflow (Claude Code 2.1.322)."""
+    out = []
+    for b in ev.get("background_tasks") or []:
+        if not isinstance(b, dict) or b.get("status") not in IN_FLIGHT:
+            continue
+        kind = str(b.get("type") or "")
+        if kind == "workflow" or "agent" in kind:
+            out.append(b)
+    return out
 
 
 CLOSED_MARK = "closed :-)"

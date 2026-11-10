@@ -14,7 +14,7 @@ import threading
 import time
 from pathlib import Path
 
-from .. import actions, digest, events, files, firefox, install, paths, projects, selection, sessions, views
+from .. import actions, digest, events, files, firefox, git, install, paths, projects, selection, sessions, views
 from ..logs import short
 from ..util import child_env, claude_bin, write_atomic
 from .ptys import PtySession
@@ -32,7 +32,8 @@ OTHERS_EVERY = 3  # s: other sessions, and which tasks run elsewhere
 # Browser commands too: placements come at every frame of a drag, and URLs are browsing history.
 QUIET = {"fs.list", "fs.read", "fs.versions", "thread.get", "log", "projects", "selection.set",
          "browser.place", "browser.open", "browser.go", "browser.nav", "browser.find", "browser.snapshot",
-         "browser.focus", "browser.tabs.set", "browser.cookies.info"}  # fmt: skip
+         "browser.focus", "browser.tabs.set", "browser.cookies.info",
+         "git.state", "git.log", "git.diff", "git.commit_info"}  # fmt: skip
 
 
 def owned_file() -> Path:
@@ -212,7 +213,8 @@ class Core:
         prompted: list[dict] = []
 
         def on_event(tid: str, ev: dict) -> None:
-            if ev.get("hook_event_name") == "UserPromptSubmit":
+            # my answer, not the result of a background agent that starts the next turn
+            if ev.get("hook_event_name") == "UserPromptSubmit" and events.typed_by_me(ev):
                 prompted.append({"type": "prompted", "id": tid, "slash": (ev.get("prompt") or "").lstrip().startswith("/")})
 
         for p in projects.project_paths():
@@ -372,6 +374,8 @@ class Core:
         gen = self.gens.get(key, 0) + 1
         self.gens[key] = gen
         env = child_env(TERM="xterm-256color", COLORTERM="truecolor")
+        if kind == "claude":  # Claude Code writes its links as OSC 8 (DESIGN_DETAILS.md "Browser (3a)")
+            env["FORCE_HYPERLINK"] = "1"
         if not Path(cwd).is_dir():
             cwd = str(Path.home())
         s = PtySession(key, gen, argv, cwd, env, rows, cols, self._on_pty_exit)
@@ -452,6 +456,10 @@ class Core:
             return None
         if cmd == "projects":  # the picker asks each time it opens: projects.json may have changed
             return views.project_order((await run(projects.load))["projects"], await run(actions.all_tasks))
+        if cmd == "project.deactivate":  # the x of a row of Cmd+P; bf init in the folder undoes it
+            await run(projects.deactivate, str(msg.get("path")))
+            self.request_broadcast()
+            return None
 
         # ---- files (2a, 3a): replies only, no state change
         if cmd == "fs.list":
@@ -475,6 +483,9 @@ class Core:
             return None
         if cmd == "fs.versions":
             return await run(files.versions, await run(self._project_of, tid), list(msg.get("paths") or []))
+        if cmd == "fs.link":  # Cmd+click on a file link in a terminal: the target as it was written
+            task = await run(actions.load, tid)
+            return await run(files.link_target, task.project, task.cwd, str(msg.get("target") or ""))
         # the right-click menu of 2a: they change files, so they are logged
         if cmd == "fs.rename":
             project = await run(self._project_of, tid)
@@ -530,6 +541,15 @@ class Core:
                 return None  # placements, navigation: nobody waits, errors go to the log
             return await asyncio.wrap_future(fut)
 
+        # ---- Review mode (git.py): the repository of the task's folder; replies only
+        if cmd.startswith("git."):
+            task = await run(actions.load, tid)
+            tasks = None
+            if cmd == "git.state":  # the tasks of panel 1, under the worktree that holds their folder
+                tasks = [{"id": t.id, "cwd": t.cwd, "status": t.status, "title": t.display_title}
+                         for t in await run(actions.all_tasks) if t.project == task.project and t.status != "done"]  # fmt: skip
+            return await run(git.command, cmd, task.cwd or task.project, task.project, msg, tasks)
+
         if cmd == "select":
             self.selected = tid
             if tid:
@@ -561,14 +581,17 @@ class Core:
             self._start_pty(task.id, [claude_bin(), "--session-id", task.id], task.cwd, rows, cols)
             self._start_copied_shells(task, msg, cols)
             self.selected = task.id
+        elif cmd == "plan":  # Organize mode: a card on the board, no session, the selection stays
+            task = await run(actions.plan_task, Path(msg["project"]), str(msg.get("title", "")),
+                             str(msg.get("prio") or "working"), str(msg.get("notes") or ""))  # fmt: skip
+            self.request_broadcast()
+            return {"id": task.id}
         elif cmd == "fork":
             task = await run(actions.fork_task, tid)
             argv = [claude_bin(), "--resume", tid, "--fork-session", "--session-id", task.id]
             self._start_pty(task.id, argv, task.cwd, rows, cols)
             self._start_copied_shells(task, msg, cols)
             self.selected = task.id
-        elif cmd == "dismiss":
-            await run(actions.dismiss, tid)
         elif cmd == "archive":
             await run(actions.archive, tid)
         elif cmd == "pin":  # or unpin a pinned task
@@ -597,8 +620,8 @@ def _describe(msg: dict) -> str:
     for k, v in msg.items():
         if k in ("cmd", "req", "rows", "cols", "shellRows", "shellCols"):
             continue
-        if k == "text":
-            out.append(f"text=<{len(str(v))} chars>")
+        if k in ("text", "notes", "message"):  # free text, as a prompt: never logged
+            out.append(f"{k}=<{len(str(v))} chars>")
         elif k in ("id", "session", "from") and isinstance(v, str):
             out.append(f"{k}={short(v)}")
         else:

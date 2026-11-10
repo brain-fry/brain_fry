@@ -28,11 +28,10 @@ def test_new_task_starts_with_the_tabs_of_the_previous_task(project, home):
         assert (t.open_files, t.browser_tabs, t.terminal_tabs) == ([], [], [])
 
 
-def test_dismiss_archive_and_back(project):
+def test_archive_and_back(project):
     t = actions.new_task(project)
     actions._update(t.id, inbox=True, unread=True)
     assert actions.mark_read(t.id).inbox is True
-    assert actions.dismiss(t.id).inbox is False
     a = actions.archive(t.id)
     assert (a.status, a.inbox) == ("done", False)
     assert actions.archive(t.id).status == "waiting"
@@ -127,8 +126,6 @@ def test_pin_keeps_a_task_in_the_inbox_until_unpinned(project):
     events.apply(project, {"session_id": t.id, "hook_event_name": "UserPromptSubmit", "prompt": "go", "bf_ts": 1})
     answered = actions.load(t.id)
     assert (answered.inbox, answered.pinned) == (False, True) and views.in_inbox(answered)  # answering keeps it
-    events.apply(project, {"session_id": t.id, "hook_event_name": "Stop", "last_assistant_message": "done", "bf_ts": 2})
-    assert views.in_inbox(actions.dismiss(t.id))  # dismiss clears the flag, the pin keeps it
     u = actions.pin(t.id)
     assert not u.pinned and not views.in_inbox(u)
 
