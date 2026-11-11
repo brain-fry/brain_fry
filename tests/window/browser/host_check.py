@@ -162,7 +162,6 @@ check("Cmd+W from Brain Fry's page, a tab on screen: Brain Fry", [m["key"] for m
 key("d", code=2)
 check("Cmd+D from Brain Fry's page: not touched", [m["key"] for m in msgs("key")] == ["w"])
 win.makeFirstResponder_(page.wv)
-before = page.wv.estimatedProgress()
 key("r", code=15)  # Cmd+R: reloads, handled here
 pump(3, lambda: not page.wv.isLoading())
 check("Cmd+R reloads, nothing forwarded", [m["key"] for m in msgs("key")] == ["w"])

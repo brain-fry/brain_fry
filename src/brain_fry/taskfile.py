@@ -21,11 +21,11 @@ from . import paths
 from .util import write_atomic
 
 PRIOS = ("working", "planning", "later", "more_later", "never")
-STATUSES = ("working", "blocked", "waiting", "done")
 # working: turn in progress. interrupted: a new prompt came before any Stop (Esc).
-# pending: the turn is over, the digest is not there yet. imported: a past turn of a session
-# that started elsewhere (sessions.adopt), never digested. The rest is set by the digest.
-KINDS = ("working", "interrupted", "pending", "imported", "review", "answer", "rule", "FYI", "blocked")
+# pending: the turn is over, the digest is not there yet. imported: a turn from before the
+# session became a task (events._import_history), never digested. The rest is set by the digest
+# (wait: the agent waits for its background shell or monitor, and will go on by itself).
+KINDS = ("working", "interrupted", "pending", "imported", "review", "answer", "rule", "FYI", "wait", "blocked")
 PARTS = ("digest", "question", "prompt", "reply")
 
 # Held around every load-modify-save of a task file: the reader, the digest worker and
@@ -61,6 +61,9 @@ class Task:
     inbox: bool = False
     unread: bool = False
     pinned: bool = False  # stays in the inbox until I unpin it (or archive it)
+    # a Stop that left a background shell or monitor running: out of the inbox until the
+    # digest tells whether the agent waits for it (events.py, actions.settle_hold)
+    held: bool = False
     notification: str | None = None
     parent: str | None = None
     created: str = ""
@@ -69,6 +72,7 @@ class Task:
     open_files: list[str] = field(default_factory=list)
     terminal_tabs: list[str] = field(default_factory=list)
     browser_tabs: list[str] = field(default_factory=list)  # URLs of the browser tabs of 3a
+    finder_tabs: list[dict] = field(default_factory=list)  # Finder tabs of column 3: {root, path} (absolute)
     notes: str = ""  # what I wrote when I created the task in Organize mode (actions.plan_task)
     digest: str = ""
     threads: list[Thread] = field(default_factory=list)

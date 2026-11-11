@@ -12,7 +12,7 @@ import logging
 import time
 from pathlib import Path
 
-from . import paths, sessions, taskfile
+from . import actions, paths, sessions, taskfile
 from .taskfile import Task, Thread
 from .logs import short
 from .util import iso
@@ -89,7 +89,7 @@ def _apply(project: Path, ev: dict) -> str | None:
         if task.threads and task.threads[-1].kind == "working":
             task.threads[-1].kind = "interrupted"
         task.threads.append(Thread(n=len(task.threads) + 1, ts=ts, prompt=ev.get("prompt") or ""))
-        _set(task, status="working", live=True, inbox=False, unread=False, notification=None)
+        _set(task, status="working", live=True, inbox=False, unread=False, notification=None, held=False)
 
     elif name == "Stop":
         # A turn can start without a prompt: a background task that finishes, or hooks
@@ -99,6 +99,7 @@ def _apply(project: Path, ev: dict) -> str | None:
         thread = task.threads[-1]
         thread.reply = ev.get("last_assistant_message") or ""
         thread.kind = "pending"
+        task.held = False
         if closes(thread):  # archived (and unpinned), as by my key; the digest still runs on the thread
             _set(task, status="done", live=True, inbox=False, unread=False, pinned=False, notification=None)
             log.info("task %s: closed by my `close` prompt: archived", short(task.id))
@@ -108,19 +109,24 @@ def _apply(project: Path, ev: dict) -> str | None:
             _set(task, status="working", live=True, inbox=False, unread=False, notification=None)
             log.info("task %s: not in the inbox: waits for %d background task(s) (%s)", short(task.id),
                      len(waiting_for), ", ".join(sorted({str(b.get("type")) for b in waiting_for})))  # fmt: skip
+        elif running := background_shells(ev):
+            # A background shell or monitor runs. The agent may wait for it (a loop that waits for
+            # another session, then goes on) or not (a dev server). The digest tells (kind `wait`):
+            # out of the inbox until then (actions.settle_hold).
+            _set(task, status="working", live=True, inbox=False, unread=False, notification=None, held=True)
+            log.info("task %s: out of the inbox until the digest: %d background %s run(s)", short(task.id),
+                     len(running), "/".join(sorted({str(b.get("type")) for b in running})))  # fmt: skip
         else:
             _set(task, status="waiting", live=True, inbox=True, unread=True, notification=None)
 
     elif name == "Notification":
         if ev.get("notification_type") in BLOCKING:
-            _set(task, status="blocked", live=True, inbox=True, unread=True, notification=ev.get("message"))
+            _set(task, status="blocked", live=True, inbox=True, unread=True, notification=ev.get("message"), held=False)
         else:
             task.live = True
 
-    elif name == "SessionEnd":
-        task.live = False
-        if task.status in ("working", "blocked"):
-            task.status = "waiting"
+    elif name == "SessionEnd":  # a turn cut off goes to the inbox; the same rule as the app's quit
+        actions.end_session(task)
 
     taskfile.save(task)
     _log(name, ev, project, task, before)
@@ -146,33 +152,42 @@ def typed_by_me(ev: dict) -> bool:
 IN_FLIGHT = {"running", "pending"}
 
 
+def _in_flight(ev: dict) -> list[dict]:
+    return [b for b in ev.get("background_tasks") or [] if isinstance(b, dict) and b.get("status") in IN_FLIGHT]
+
+
+def _is_agent(b: dict) -> bool:
+    kind = str(b.get("type") or "")
+    return kind == "workflow" or "agent" in kind
+
+
 def background_work(ev: dict) -> list[dict]:
     """The background agents and workflows that still run at this Stop: the agent will go on
     when they finish. Stop's `background_tasks` lists all background work in flight. Claude
     Code's own "Waiting for N background agents and M dynamic workflows to finish" counts
     agents and workflows only, and so does this: a background shell or monitor (a dev server,
     a watch) may never end, and would keep its task out of the inbox for ever. Types seen:
-    subagent, shell; the schema also names monitor and workflow (Claude Code 2.1.322)."""
-    out = []
-    for b in ev.get("background_tasks") or []:
-        if not isinstance(b, dict) or b.get("status") not in IN_FLIGHT:
-            continue
-        kind = str(b.get("type") or "")
-        if kind == "workflow" or "agent" in kind:
-            out.append(b)
-    return out
+    subagent, shell, monitor; the schema also names workflow (Claude Code 2.1.322)."""
+    return [b for b in _in_flight(ev) if _is_agent(b)]
+
+
+def background_shells(ev: dict) -> list[dict]:
+    """The rest of the background work in flight at this Stop: shells, monitors, unknown
+    types. The agent may wait for one of them, or not: the digest tells (kind `wait`)."""
+    return [b for b in _in_flight(ev) if not _is_agent(b)]
 
 
 CLOSED_MARK = "closed :-)"
+CLOSE_PROMPTS = ("close", "x")
 
 
 def closes(thread: Thread) -> bool:
-    """The turn of my `close` prompt, when the agent confirmed with "closed :-)": it wrote down
-    what the conversation found (~/.claude/CLAUDE.md, "close") and the task is over. Without the
-    mark (the agent asked something back, or was interrupted), the task goes to the inbox as
-    usual. The mark may be in the last line or, when the reply ends with a trailer
-    (`[needs: fyi] ...`), in the line before it."""
-    if thread.prompt.strip().rstrip(".!").strip().lower() != "close":
+    """The turn of my `close` prompt (or just `x`), when the agent confirmed with "closed :-)":
+    it wrote down what the conversation found (~/.claude/CLAUDE.md, "close") and the task is
+    over. Without the mark (the agent asked something back, or was interrupted), the task goes
+    to the inbox as usual. The mark may be in the last line or, when the reply ends with a
+    trailer (`[needs: fyi] ...`), in the line before it."""
+    if thread.prompt.strip().rstrip(".!").strip().lower() not in CLOSE_PROMPTS:
         return False
     lines = [line for line in thread.reply.splitlines() if line.strip()]
     return any(CLOSED_MARK in line.lower() for line in lines[-2:])
@@ -180,8 +195,8 @@ def closes(thread: Thread) -> bool:
 
 def _import_history(task: Task, name: str, ev: dict) -> None:
     """A session that becomes a task at this event may have turns before it: its project was
-    registered in the middle of the session. They come from its transcript, as when I drag
-    a session onto the board (sessions.read_turns). The turn of this event is told apart by
+    registered in the middle of the session, or it started before `bf install` and was resumed
+    since. They come from its transcript (sessions.read_turns). The turn of this event is told apart by
     prompt_id (the promptId of its prompt in the transcript), else by the prompt's text."""
     path = Path(ev.get("transcript_path") or "")
     if not path.is_file():

@@ -121,17 +121,59 @@ def set_browser_tabs(task_id: str, urls: list[str]) -> Task:
     return _update(task_id, browser_tabs=[str(u) for u in urls])
 
 
+def set_finder_tabs(task_id: str, tabs: list[dict]) -> Task:
+    """The Finder tabs of column 3: for each, the folder of its first column (`root`) and the
+    selected entry (`path`, or None), both absolute."""
+    clean = []
+    for t in tabs:
+        root, path = (t or {}).get("root"), (t or {}).get("path")
+        if not isinstance(root, str) or not root.startswith("/"):
+            raise ValueError(f"not a Finder tab: {t!r}")
+        clean.append({"root": root, "path": path if isinstance(path, str) and path.startswith("/") else None})
+    return _update(task_id, finder_tabs=clean)
+
+
 def set_live(task_id: str, live: bool) -> Task:
     with taskfile.LOCK:
         task = load(task_id)
-        changes = {"live": (task.live, live)} if task.live != live else {}
-        task.live = live
-        if not live and task.status in ("working", "blocked"):
-            changes["status"] = (task.status, "waiting")
-            task.status = "waiting"
+        if live:
+            changes = {"live": (task.live, live)} if task.live != live else {}
+            task.live = live
+        else:
+            changes = end_session(task)
         taskfile.save(task)
     log_changes(task, changes)
     return task
+
+
+ENDED = ("live", "status", "inbox", "unread", "notification")
+
+
+def end_session(task: Task) -> dict:
+    """The task's `claude` is gone: SessionEnd, the app quit or crashed, or the process list
+    no longer has it. Nothing runs any more, so working or blocked --> waiting. Its turn was
+    cut off (the reply never came, or its background agents died with it), so it goes to the
+    inbox, where I resume it ("Continue"). Before 2026-11-10 it only turned green, and my
+    prompt had cleared `inbox`: the task left my sight after every restart of the app.
+    Changes the task in memory; returns the changes, old -> new."""
+    old = {k: getattr(task, k) for k in ENDED}
+    task.live = False
+    task.held = False  # its background shell died with it: the agent cannot go on by itself
+    if task.status in ("working", "blocked"):
+        task.status, task.inbox, task.unread, task.notification = "waiting", True, True, None
+        if task.threads and task.threads[-1].kind == "working":
+            task.threads[-1].kind = "interrupted"
+    return {k: (v, getattr(task, k)) for k, v in old.items() if getattr(task, k) != v}
+
+
+def settle_hold(task: Task, waits: bool) -> None:
+    """The verdict on a held Stop (`held`: it left a background shell or monitor running).
+    The agent waits for it and will go on by itself (the digest's kind `wait`): the task stays
+    working and out of the inbox. Else the reply goes to the inbox, as the Stop would have
+    done, unless I archived the task in the meantime. Changes the task in memory."""
+    task.held = False
+    if not waits and task.status == "working":
+        task.status, task.inbox, task.unread = "waiting", True, True
 
 
 def end_block(task_id: str, process_status: str, since: float) -> Task | None:
@@ -171,10 +213,11 @@ def new_task(project: Path, like: str | None = None) -> Task:
     if src:
         task.open_files, task.browser_tabs = list(src.open_files), list(src.browser_tabs)
         task.terminal_tabs = list(src.terminal_tabs)
+        task.finder_tabs = [dict(t) for t in src.finder_tabs]
     with taskfile.LOCK:
         taskfile.save(task)
     copied = (f", with the tabs of {short(src.id)}: {len(task.open_files)} files, {len(task.browser_tabs)} browser,"
-              f" {len(task.terminal_tabs)} terminals" if src else "")  # fmt: skip
+              f" {len(task.terminal_tabs)} terminals, {len(task.finder_tabs)} Finder" if src else "")  # fmt: skip
     log.info("task %s created in %s (new session%s)", short(task.id), project.name, copied)
     return task
 
@@ -226,11 +269,11 @@ def fork_task(parent_id: str) -> Task:
         prio=parent.prio, status="waiting", live=True, parent=parent.id,
         digest=parent.digest, title="", created=now, updated=now, opened=now,  # opened: as new_task
         open_files=list(parent.open_files), browser_tabs=list(parent.browser_tabs),
-        terminal_tabs=list(parent.terminal_tabs),
+        terminal_tabs=list(parent.terminal_tabs), finder_tabs=[dict(t) for t in parent.finder_tabs],
     )  # fmt: skip
     with taskfile.LOCK:
         taskfile.save(task)
-    log.info("task %s created in %s: fork of %s %r, with its tabs: %d files, %d browser, %d terminals", short(task.id),
-             Path(task.project).name, short(parent.id), parent.display_title[:50], len(task.open_files),
-             len(task.browser_tabs), len(task.terminal_tabs))  # fmt: skip
+    log.info("task %s created in %s: fork of %s %r, with its tabs: %d files, %d browser, %d terminals, %d Finder",
+             short(task.id), Path(task.project).name, short(parent.id), parent.display_title[:50], len(task.open_files),
+             len(task.browser_tabs), len(task.terminal_tabs), len(task.finder_tabs))  # fmt: skip
     return task

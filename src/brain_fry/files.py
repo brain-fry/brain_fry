@@ -1,4 +1,4 @@
-"""Files of a project, for the explorer (2a) and the file tabs (3a). See DESIGN_DETAILS.md "App".
+"""Files of a project, for the explorer (2a) and the file tabs (3a). See DESIGN_DETAILS.md "2a, 3a, 3b: files and terminals".
 
 Every path is relative to the project and must stay inside it. A file's `version` is
 "<mtime_ns>-<size>": cheap to poll, and enough to notice that the agent changed it.
@@ -37,6 +37,16 @@ def resolve(project: str | Path, rel: str) -> Path:
     if p != root and root not in p.parents:
         raise PermissionError(f"outside the project: {rel}")
     return p
+
+
+def relative_in(project: str | Path, path: str | Path) -> str:
+    """An absolute path (the save panel's choice) as a path relative to the project, which it
+    must be inside of (3a shows files of the project only)."""
+    root = Path(project).resolve()
+    p = Path(path).resolve()
+    if p == root or root not in p.parents:
+        raise PermissionError(f"Not saved: {p} is outside the project {root.name}. 3a saves files of the project only.")
+    return p.relative_to(root).as_posix()
 
 
 LINE_FRAGMENT = re.compile(r"L(\d+)(?:-L?\d+)?")  # #L2, #L2-5, #L2-L5: line 2

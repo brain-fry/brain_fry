@@ -21,8 +21,10 @@ log = logging.getLogger(__name__)
 
 
 def _mac_identity() -> None:
-    """Dock icon and app menu name ("Python" otherwise). pywebview's `icon` option is
-    GTK/Qt only; on macOS it comes from AppKit. Main thread, before webview.start()."""
+    """Dock icon and app menu name ("Python" otherwise), through AppKit. Main thread, before
+    webview.start(). The app must be a regular app before its icon is set: an icon set earlier
+    never reaches the Dock or Cmd+Tab, which show the blank document of the bare python binary
+    (pywebview makes the app regular only when it loads its Cocoa module, after this call)."""
     try:
         from AppKit import NSApplication, NSImage  # noqa: PLC0415 (pyobjc, a pywebview dependency)
         from Foundation import NSBundle  # noqa: PLC0415
@@ -31,7 +33,9 @@ def _mac_identity() -> None:
         icon = resources.files("brain_fry") / "web" / "dock_icon.png"  # transparent, see frontend/dock_icon.py
         image = NSImage.alloc().initWithContentsOfFile_(str(icon))
         if image is not None:
-            NSApplication.sharedApplication().setApplicationIconImage_(image)
+            app = NSApplication.sharedApplication()
+            app.setActivationPolicy_(0)  # NSApplicationActivationPolicyRegular, as pywebview does
+            app.setApplicationIconImage_(image)
     except Exception:
         log.debug("could not set the Dock icon", exc_info=True)
 
@@ -72,6 +76,31 @@ def _file_menu_first() -> None:
         BrowserView._recreate_menus = recreate
     except Exception:
         log.debug("could not move the File menu", exc_info=True)
+
+
+def _dark_titlebar(window) -> None:
+    """The title bar in the header's color (--panel of app.css), so that the two join; macOS
+    paints it light gray while the system is in light mode. The dark appearance goes on the
+    title bar's view only: the page, the dialogs and the browser of 3a keep the system's. pywebview
+    paints that view with the system's window color: internal to pywebview 6.2 (its view
+    hierarchy); if it changes, the bar stays gray. Runs from `before_show`, in a thread."""
+    from AppKit import NSAppearance, NSAppearanceNameDarkAqua, NSColor  # noqa: PLC0415
+    from PyObjCTools import AppHelper  # noqa: PLC0415
+
+    def apply():  # main thread: AppKit
+        try:
+            w = window.native
+            bar = w.contentView().superview().subviews().lastObject()  # NSTitlebarContainerView
+            if bar.className() != "NSTitlebarContainerView":
+                log.debug("title bar: unexpected view %s", bar.className())
+                return
+            bar.setAppearance_(NSAppearance.appearanceNamed_(NSAppearanceNameDarkAqua))
+            w.setTitlebarAppearsTransparent_(True)
+            bar.setBackgroundColor_(NSColor.colorWithSRGBRed_green_blue_alpha_(0x23 / 255, 0x24 / 255, 0x28 / 255, 1))
+        except Exception:
+            log.debug("could not darken the title bar", exc_info=True)
+
+    AppHelper.callAfter(apply)
 
 
 def _menu_titles() -> str:
@@ -237,6 +266,7 @@ def run(debug: bool = False, browser: bool = False, selftest: float | None = Non
         _file_menu_first()
         window = webview.create_window(
             "Brain Fry", url, width=1600, height=1000, min_size=(900, 500),
+            fullscreen=selftest is None,  # macOS full screen (own Space); 1600x1000 after leaving it
             background_color="#040510",  # the splash color: no white flash before the page paints
             menu=_file_menu(lambda: window),
         )  # fmt: skip
@@ -251,9 +281,11 @@ def run(debug: bool = False, browser: bool = False, selftest: float | None = Non
             return True
 
         window.events.closing += on_closing
+        window.events.before_show += lambda: _dark_titlebar(window)
         from .browser import BrowserHost  # noqa: PLC0415 (WebKit: only in the window)
 
         core.browser = BrowserHost(core, window)  # the browser of 3a; sets itself up at its first command
+        core.window = window  # the save panel of an untitled tab
         if selftest is not None:
             webview.start(_selftest, (window, selftest, selftest_new, selftest_shots, selftest_js), debug=debug)
         else:

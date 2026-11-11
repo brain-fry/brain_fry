@@ -70,11 +70,20 @@ def test_rename_sets_the_short_title_too(project):
     assert (got.title, got.short_title) == ("My own name for it", "My own name for it")
 
 
-def test_set_live_false_while_working_becomes_waiting(project):
+def test_set_live_false_while_working_goes_to_the_inbox(project):
+    """The app quits or crashed in the middle of a turn: the turn was cut off."""
     t = actions.new_task(project)
-    actions._update(t.id, status="working")
+    actions._update(t.id, status="working", threads=[Thread(n=1, ts="x", prompt="fix it")])
     got = actions.set_live(t.id, False)
-    assert (got.live, got.status) == (False, "waiting")
+    assert (got.live, got.status, got.inbox, got.unread) == (False, "waiting", True, True)
+    assert got.threads[0].kind == "interrupted"
+    assert views.inbox_line(got) == "interrupted: fix it"
+
+
+def test_set_live_false_while_idle_stays_out_of_the_inbox(project):
+    t = actions.new_task(project)  # never prompted: waiting, not in the inbox
+    got = actions.set_live(t.id, False)
+    assert (got.live, got.status, got.inbox, got.unread) == (False, "waiting", False, False)
 
 
 def test_unknown_task_and_bad_prio(project):

@@ -48,7 +48,7 @@ def setup(role: str, debug: bool = False) -> Path:
     root.setLevel(logging.DEBUG if debug else logging.INFO)
     root.addHandler(handler)
     root.addHandler(console)
-    for noisy in ("websockets", "asyncio", "urllib3"):
+    for noisy in ("websockets", "asyncio"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
     return f
 

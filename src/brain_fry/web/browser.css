@@ -1,15 +1,12 @@
 /* The browser of 3a (browser.js). The page is a native view laid over .web-page; the
    placeholder shows a snapshot of it while an HTML dialog covers the panel. */
 .editor.web-page { background: #fff center top / 100% 100% no-repeat; }
-#file-bar .web-tools { display: flex; align-items: center; gap: 4px; flex: 1; min-width: 0; }
-#file-bar .web-tools button { min-width: 24px; }
-#file-bar .web-tools input { font: inherit; font-size: 12px; color: var(--text); background: var(--panel-2);
+.pane-bar .web-tools { display: flex; align-items: center; gap: 4px; flex: 1; min-width: 0; }
+.pane-bar .web-tools button { min-width: 24px; }
+.pane-bar .web-tools input { font: inherit; font-size: 12px; color: var(--text); background: var(--panel-2);
   border: 1px solid var(--line); border-radius: 3px; padding: 2px 6px; }
-#file-bar .web-url { flex: 1; min-width: 80px; }
-#file-bar .web-url.error { border-color: #a5484e; }
-#file-bar .web-find-box { display: flex; align-items: center; gap: 4px; flex: none; }
-#file-bar .web-find-box[hidden] { display: none; }
-#file-bar .web-find { width: 11em; }
-#file-bar .web-count { white-space: nowrap; }
-.tabs .tab.new-web { color: var(--dim); }
-.tabs .tab.new-web:hover { color: var(--text); }
+.pane-bar .web-url { flex: 1; min-width: 80px; }
+.pane-bar .web-url.error { border-color: #a5484e; }
+.pane-bar .web-find-box { display: flex; align-items: center; gap: 4px; flex: none; }
+.pane-bar .web-find { width: 11em; }
+.pane-bar .web-count { white-space: nowrap; }

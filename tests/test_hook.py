@@ -60,7 +60,7 @@ def test_garbage_input_is_harmless(home):
 
 def write_selection(home: Path, **over) -> dict:
     sel = {"session_id": "s1", "pid": os.getpid(), "path": "src/x.py", "from": 51, "to": 52,
-           "text": "a = 1\nb = 2", "cut": False, "dirty": False, "ts": 0}  # fmt: skip
+           "text": "a = 1\nb = 2", "cut": False, "dirty": False}  # fmt: skip
     sel.update(over)
     (home / ".brain_fry").mkdir(exist_ok=True)
     (home / ".brain_fry" / "selection.json").write_text(json.dumps(sel))

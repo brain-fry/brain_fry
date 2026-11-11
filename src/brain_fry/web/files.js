@@ -1,18 +1,112 @@
 'use strict';
-// 2a (explorer) and 3a (file tabs: CodeMirror for text, viewers for images and PDFs). Everything
-// belongs to the selected task: each task has its own tree state and its own open files,
-// restored when it is selected. A tab's `kind`: text, image, pdf, or thread (1b).
-// Uses S, $, esc, request, send, toast, store, stored from app.js, which loads first.
+// 2a (explorer) and the tabs of column 3 (CodeMirror for text, viewers for images and PDFs), in
+// the panes of grid.js. Everything belongs to the selected task: each task has its own tree state
+// and its own tabs, restored when it is selected. With no task selected, the idle screen shows the
+// tabs of the task that I left (S.idle: a tab opened there has `idle`), and a project picked in the
+// dropdown has its own (`wsId`, app.js: file tabs only, kept in memory). A tab's `kind`: text, image, pdf, thread (1b),
+// web (browser.js), shell (shells.js) or finder (finder.js); an untitled text tab has `untitled` (Cmd+N F).
+// Uses S, $, esc, request, send, toast, store, stored from app.js, which loads first, and the
+// panes of grid.js (PANES, paneTabs, paneActive, addTab, showTab, dropTab, openPane...).
 
 const POLL_MS = 2000; // checks the open files for changes on disk (the agent edits them too)
 
 function work(tid) {
   S.work = S.work || {};
   if (!S.work[tid]) {
-    S.work[tid] = { open: new Set(), kids: new Map(), loading: new Set(), tabs: [], active: null,
-      restored: false, lastUpdated: null, shell: null, treeSel: null }; // treeSel: the explorer's selected entry
+    S.work[tid] = { open: new Set(), kids: new Map(), loading: new Set(), tabs: [], restored: false, lastUpdated: null,
+      treeSel: null, // the explorer's selected entry
+      act: {}, // pane -> the path of the tab on screen in it
+      pane: 1, mru: [...PANES], // the pane that I used last, and the panes from the most recently used
+      want: {}, // pane -> the id of the tab to show in it once it exists (restored: tabId, grid.js)
+      grid: null, // the remembered grid (loadGrid), read at the first restore or shell
+      nextShells: [] }; // [{pane, focus}]: terminals asked for, not in the state yet (shells.js, copytab.js)
   }
   return S.work[tid];
+}
+
+// a tab that shows a file of the project (the poll, the explorer, files.set)
+const isFileTab = (t) => !t.thread && !t.web && !t.shell && !t.untitled && !t.finder;
+
+// ------------------------------------------------------------------ one text per file
+// The text tabs of one file, in all the tasks of a project, show one text (VS Code: one model per
+// file, shown by all its editors). Each tab keeps its own pane, cursor, scroll, Diff and history;
+// the text and the state of the file are shared: `tab.file` holds that state, which the tab reads
+// and writes through the properties of FILE_STATE (so `tab.dirty = false` sets it for all of them).
+// An edit in one tab is applied at once to the others (docChanged). An untitled tab has its own.
+const FILE_STATE = ['version', 'head', 'dirty', 'diskChanged', 'gone'];
+let syncing = false; // the other tabs of a file are taking a change: it is not a new edit
+
+function shareFile(tab, file) {
+  tab.file = file;
+  for (const k of FILE_STATE) {
+    Object.defineProperty(tab, k, { get() { return this.file[k]; }, set(v) { this.file[k] = v; }, enumerable: true });
+  }
+}
+
+// a text tab of `path` in another task (or the same) of the project of `tid`
+function peerTab(tid, path, except = null) {
+  const project = wsProject(tid);
+  for (const w of Object.values(S.work || {})) {
+    for (const t of w.tabs) if (t !== except && t.file && !t.untitled && t.path === path && wsProject(t.tid) === project) return t;
+  }
+  return null;
+}
+
+// the tabs that show the same text as `tab`, itself included
+function sameText(tab) {
+  if (!tab.file) return [tab];
+  const out = [];
+  for (const w of Object.values(S.work || {})) for (const t of w.tabs) if (t.file === tab.file) out.push(t);
+  return out;
+}
+
+// closing this tab loses unsaved edits: no other tab holds them
+const losesEdits = (tab) => tab.dirty && sameText(tab).length === 1;
+
+// `text` replaces the whole text of these tabs (a reload, a Save As), each cursor kept where it can be
+function replaceText(tabs, text) {
+  syncing = true;
+  try {
+    for (const t of tabs) {
+      const anchor = Math.min(t.view.state.selection.main.anchor, text.length);
+      t.view.dispatch({ changes: { from: 0, to: t.view.state.doc.length, insert: text }, selection: { anchor } });
+    }
+  } finally {
+    syncing = false;
+  }
+}
+
+// An edit in a tab (typing, undo, replace...): the other tabs of the file take the same changes,
+// and the first edit marks the file unsaved in all of them.
+function docChanged(tab, changes) {
+  syncing = true;
+  try {
+    for (const t of sameText(tab)) {
+      if (t === tab) continue;
+      if (t.view.state.doc.length === changes.length) t.view.dispatch({ changes });
+      else t.view.dispatch({ changes: { from: 0, to: t.view.state.doc.length, insert: tab.view.state.doc } }); // not expected: they differ
+    }
+  } finally {
+    syncing = false;
+  }
+  if (!tab.dirty) { tab.dirty = true; renderFileTabs(); }
+}
+
+function tabName(t) {
+  if (t.thread) return `Thread ${t.thread.n}`;
+  if (t.web) return webTabName(t);
+  if (t.finder) return finderName(t);
+  if (t.shell || t.untitled) return t.name;
+  return t.path.split('/').pop();
+}
+
+// the file on screen in the pane that I used last: marked in 2a
+function fileOnScreen(w) {
+  for (const n of w.mru) {
+    const t = paneActive(w, n);
+    if (t && isFileTab(t)) return t.path;
+  }
+  return null;
 }
 
 // ------------------------------------------------------------------ explorer (2a)
@@ -29,7 +123,7 @@ async function loadDir(tid, path) {
   } finally {
     w.loading.delete(path);
   }
-  if (tid === S.selected) renderExplorer();
+  if (tid === wsId()) renderExplorer();
 }
 
 function refreshTree(tid) {
@@ -39,24 +133,26 @@ function refreshTree(tid) {
 
 function renderExplorer() {
   if (S.treeRename) return; // a redraw would take the name field away (explorer.js redraws after it)
-  const tid = S.selected;
+  const tid = wsId(); // the selected task, or the project picked while it has no open task
   const task = tid && S.state.tasks[tid];
+  const project = tid && wsProject(tid);
   const el = $('#tree');
-  if (!task) { el.innerHTML = '<div class="empty">No task selected.</div>'; return; }
+  if (!project) { el.innerHTML = '<div class="empty">No task selected.</div>'; return; }
   const w = work(tid);
-  if (task.updated !== w.lastUpdated) { // an event arrived: the agent may have added files
+  if (task && task.updated !== w.lastUpdated) { // an event arrived: the agent may have added files
     const first = w.lastUpdated === null;
     w.lastUpdated = task.updated;
     if (!first) refreshTree(tid);
   }
   if (!w.kids.has('')) { loadDir(tid, ''); el.innerHTML = '<div class="empty">Loading...</div>'; return; }
   const rows = [];
+  const shown = fileOnScreen(w);
   const walk = (path, depth) => {
     for (const e of w.kids.get(path) || []) {
       const pad = 8 + depth * 14;
       const open = e.dir && w.open.has(e.path);
-      const cls = ['node', e.dir ? 'dir' : 'file', !e.dir && e.path === w.active ? 'active' : '',
-        e.path === w.treeSel ? 'sel' : '', isCut(task, e.path) ? 'cut' : ''].join(' ');
+      const cls = ['node', e.dir ? 'dir' : 'file', !e.dir && e.path === shown ? 'active' : '',
+        e.path === w.treeSel ? 'sel' : '', isCut(project, e.path) ? 'cut' : ''].join(' ');
       rows.push(`<div class="${cls}" data-node="${esc(e.path)}" data-dir="${e.dir ? 1 : 0}" style="padding-left:${pad}px">`
         + `<span class="caret">${e.dir ? (open ? '▾' : '▸') : ''}</span><span class="name">${esc(e.name)}${e.dir ? '/' : ''}</span></div>`);
       if (open) {
@@ -67,31 +163,57 @@ function renderExplorer() {
   };
   walk('', 0);
   el.innerHTML = rows.join('') || '<div class="empty">Empty folder.</div>';
+  if (G.chord && G.chord.kind === 'tree') drawTreeHints(); // Cmd+J E: the labels follow the new rows (explorer.js)
+}
+
+// A click on a row of 2a, or its key after Cmd+J E (explorer.js). double: the second click.
+function clickTreeNode(path, dir, double) {
+  const w = work(wsId());
+  w.treeSel = path;
+  if (dir) {
+    if (double) return;
+    if (w.open.has(path)) w.open.delete(path); else w.open.add(path);
+    renderExplorer();
+  } else if (double) {
+    openFile(wsId(), path, true);
+  } else {
+    openFile(wsId(), path, false);
+    renderExplorer();
+  }
 }
 
 // ------------------------------------------------------------------ file tabs (3a)
 
-function makeTab(tid, path, r) {
+// Cmd+G: every occurrence selected, to edit them all at once (selectAllOccurrences, in
+// frontend/codemirror.js). Above basicSetup, whose Cmd+G is find next. In a thread tab
+// (read-only) it does nothing.
+const SELECT_ALL_KEYS = CM.Prec.high(CM.keymap.of([
+  { key: 'Mod-g', run: CM.selectAllOccurrences, scope: 'editor search-panel', preventDefault: true },
+]));
+
+// The element joins its pane in addTab (grid.js). `peer`: a tab of the file in another task,
+// whose text and state this one shares (its unsaved edits included), rather than the disk's.
+function makeTab(tid, path, r, peer = null) {
   const el = document.createElement('div');
   el.className = 'editor';
-  $('#editors').appendChild(el);
-  const tab = { tid, path, el, kind: 'text', version: r.version, head: r.head, dirty: false, diskChanged: false,
-    gone: false, diff: false, diffC: new CM.Compartment(), langC: new CM.Compartment(), quiet: false,
-    wrap: stored(wrapKey(tid, path), false), wrapC: new CM.Compartment() };
+  const tab = { tid, path, el, kind: 'text', diff: false, diffC: new CM.Compartment(), langC: new CM.Compartment(),
+    wrap: stored(wrapKey(tid, path), false), wrapC: new CM.Compartment(), crlf: peer ? peer.crlf : r.text.includes('\r\n') };
+  shareFile(tab, peer ? peer.file : { version: r.version, head: r.head, dirty: false, diskChanged: false, gone: false });
   tab.view = new CM.EditorView({
     parent: el,
     state: CM.EditorState.create({
-      doc: r.text,
+      doc: peer ? peer.view.state.doc : r.text,
       extensions: [
         CM.basicSetup,
+        SELECT_ALL_KEYS,
         CM.keymap.of([CM.indentWithTab, { key: 'Mod-s', run: () => { saveTab(tab); return true; } }]),
         CM.oneDark,
         tab.langC.of(CM.languageFor(path)), // a rename may change the language (explorer.js)
         tab.diffC.of([]),
         tab.wrapC.of(tab.wrap ? CM.EditorView.lineWrapping : []),
-        r.text.includes('\r\n') ? CM.EditorState.lineSeparator.of('\r\n') : [], // save CRLF files as CRLF
+        tab.crlf ? CM.EditorState.lineSeparator.of('\r\n') : [], // save CRLF files as CRLF
         CM.EditorView.updateListener.of((u) => {
-          if (u.docChanged && !tab.quiet && !tab.dirty) { tab.dirty = true; renderFileTabs(); }
+          if (u.docChanged && !syncing) docChanged(tab, u.changes);
           if (u.selectionSet || u.docChanged) syncSelection();
         }),
         CM.EditorView.theme({
@@ -125,7 +247,6 @@ function makeViewer(tid, path, r, cls) {
   const el = document.createElement('div');
   el.className = `editor viewer ${cls}`;
   el.tabIndex = -1; // focusable: arrows and Page Up/Down scroll it
-  $('#editors').appendChild(el);
   return { tid, path, el, kind: r.kind, version: r.version, size: sizeOf(r.version), tried: null, error: null,
     dirty: false, diskChanged: false, gone: false };
 }
@@ -139,9 +260,9 @@ function makeImageTab(tid, path, r) {
   tab.img.addEventListener('load', () => {
     tab.dims = `${tab.img.naturalWidth} × ${tab.img.naturalHeight}`;
     tab.error = null;
-    if (tab.tid === S.selected) renderFiles();
+    if (tab.tid === wsId()) renderFiles();
   });
-  tab.img.addEventListener('error', () => { tab.error = 'WebKit cannot show this image.'; if (tab.tid === S.selected) renderFiles(); });
+  tab.img.addEventListener('error', () => { tab.error = 'WebKit cannot show this image.'; if (tab.tid === wsId()) renderFiles(); });
   tab.img.addEventListener('click', () => setFit(tab, !tab.fit));
   tab.el.appendChild(tab.img);
   tab.img.src = fileUrl(tid, path, r.version);
@@ -296,7 +417,7 @@ async function loadPdf(tab, version, first = false) {
   tab.link.setDocument(doc, null);
   if (old) old.destroy().catch(() => {});
   Object.assign(tab, { version, size: sizeOf(version), gone: false, error: null });
-  if (tab.tid === S.selected) renderFiles();
+  if (tab.tid === wsId()) renderFiles();
 }
 
 function pdfGoTo(tab, loc) {
@@ -341,15 +462,21 @@ function reloadViewer(tab, version) {
 
 function focusTab(tab) {
   if (tab.focus) { tab.focus(); return; } // a browser tab: its native page (browser.js)
+  if (tab.shell) { tab.term.term.focus(); return; }
   (tab.view || tab.container || tab.el).focus();
 }
 
-async function openFile(tid, path, focus = true) {
+// A file already open, in any pane, shows there. Else it opens in `pane`, or in the pane that I
+// used last (openPane). `show` false: only added (a restore), not put on screen. `external`: a
+// file that 3a cannot show opens in its default app at once (a double-click in a Finder tab).
+// A text file open in another task of the project shows that tab's text (peerTab), not the disk's.
+async function openFile(tid, path, focus = true, pane = null, show = true, external = false) {
   const w = work(tid);
   let tab = w.tabs.find((t) => t.path === path);
   if (!tab) {
     let r;
     try { r = await request('fs.read', { id: tid, path }); } catch (e) { toast(e.message); return; }
+    if ((r.binary || r.tooLarge) && external) { send('fs.open', { id: tid, path }); return; }
     if (r.binary || r.tooLarge) {
       toast(`${path}: ${r.binary ? 'not a text file' : 'too large for the editor'}.`,
         { label: 'Open in default app', run: () => send('fs.open', { id: tid, path }) });
@@ -357,18 +484,23 @@ async function openFile(tid, path, focus = true) {
     }
     tab = w.tabs.find((t) => t.path === path); // opened meanwhile by another click
     if (!tab) {
-      tab = r.kind === 'image' ? makeImageTab(tid, path, r) : r.kind === 'pdf' ? makePdfTab(tid, path, r) : makeTab(tid, path, r);
-      w.tabs.push(tab);
+      tab = r.kind === 'image' ? makeImageTab(tid, path, r) : r.kind === 'pdf' ? makePdfTab(tid, path, r) : makeTab(tid, path, r, peerTab(tid, path));
+      if (tid === S.idle && !w.restoring) tab.idle = true; // opened while nothing is selected: not the task's (dropIdleTabs)
+      addTab(w, tab, pane || openPane(w));
       saveOpenFiles(tid);
     }
   }
-  w.active = path;
-  store(`active:${tid}`, path);
-  if (tid === S.selected) {
-    renderFiles();
-    renderExplorer();
-    if (focus) focusTab(tab);
-  }
+  if (show) showTab(tab, focus);
+}
+
+// Cmd+N F: an empty text tab, "Untitled-1". The first save asks where to save it (saveAs).
+// It is not kept in the task file: it has no path.
+function newUntitled(tid, pane) {
+  const n = ++G.untitled;
+  const tab = makeTab(tid, `untitled:${n}`, { text: '', version: null, head: null });
+  Object.assign(tab, { untitled: true, name: `Untitled-${n}`, idle: tid === S.idle });
+  addTab(work(tid), tab, pane);
+  showTab(tab, true);
 }
 
 // Cmd+click on a file link in a terminal (browser.js): the backend resolves the target
@@ -376,7 +508,6 @@ async function openFile(tid, path, focus = true) {
 async function openLink(tid, target) {
   let r;
   try { r = await request('fs.link', { id: tid, target }); } catch (e) { toast(e.message); return; }
-  if (!S.layout.middle_on) toggleLayout('middle');
   await openFile(tid, r.path);
   if (r.line) goToLine(work(tid).tabs.find((t) => t.path === r.path), r.line);
 }
@@ -389,7 +520,8 @@ function goToLine(tab, n) {
 }
 
 function saveOpenFiles(tid) { // thread tabs are not kept: they are one click away in 1b. Browser tabs: browser.js
-  send('files.set', { id: tid, paths: work(tid).tabs.filter((t) => !t.thread && !t.web).map((t) => t.path) });
+  if (tid.startsWith('project:')) return; // a project without a task (wsId): no task file to keep them
+  send('files.set', { id: tid, paths: work(tid).tabs.filter((t) => isFileTab(t) && !t.idle).map((t) => t.path) });
 }
 
 // ------------------------------------------------------------------ thread tabs (1b --> 3a)
@@ -412,24 +544,22 @@ async function openThread(tid, n) {
     try { th = await request('thread.get', { id: tid, n }); } catch (e) { toast(e.message); return; }
     const el = document.createElement('div');
     el.className = 'editor';
-    $('#editors').appendChild(el);
     tab = { tid, path, el, kind: 'thread', thread: th, dirty: false, diskChanged: false, gone: false, diff: false };
     tab.view = new CM.EditorView({
       parent: el,
       state: CM.EditorState.create({
         doc: threadDoc(th),
         extensions: [
-          CM.basicSetup, CM.oneDark, CM.languageFor('thread.md'), CM.EditorView.lineWrapping,
+          CM.basicSetup, SELECT_ALL_KEYS, CM.oneDark, CM.languageFor('thread.md'), CM.EditorView.lineWrapping,
           CM.EditorState.readOnly.of(true),
           CM.EditorView.theme({ '&': { height: '100%' }, '.cm-scroller': { fontFamily: 'Menlo, Monaco, monospace', fontSize: '12.5px' } }),
         ],
       }),
     });
-    w.tabs.push(tab);
+    const dup = w.tabs.find((t) => t.path === path); // opened meanwhile by another click
+    if (dup) { tab.view.destroy(); tab = dup; } else addTab(w, tab, openPane(w));
   }
-  w.active = path;
-  if (!S.layout.middle_on) toggleLayout('middle');
-  if (tid === S.selected) renderFiles();
+  showTab(tab);
 }
 
 // Scroll 4a to where the thread's prompt appears in the conversation. A short snippet:
@@ -446,53 +576,116 @@ function findInConversation(tid, th) {
   }
 }
 
+// The tabs of the task's last session, each in its pane (the grid that the window remembers,
+// grid.js). The terminals come from the backend, which starts them at the select (shells.js).
 async function restoreFiles(tid) {
   const w = work(tid);
   const task = S.state.tasks[tid];
   if (w.restored || !task) return;
-  w.restored = true;
-  const active = w.activeHint || stored(`active:${tid}`, null); // before openFile overwrites it
-  for (const path of task.openFiles || []) await openFile(tid, path, false);
-  await restoreBrowserTabs(tid); // browser.js
-  const web = /^web#(\d+)$/.exec(active || '');
-  const tab = web ? w.tabs.filter((t) => t.web)[+web[1]] : w.tabs.find((t) => t.path === active);
-  if (tab) { w.active = tab.path; store(`active:${tid}`, tab.path); }
-  if (tid === S.selected) renderFiles();
+  w.restored = w.restoring = true;
+  const g = w.grid = w.grid || loadGrid(tid);
+  w.want = { ...g.act };
+  try {
+    for (const path of task.openFiles || []) await openFile(tid, path, false, g.at[path] || 1, false);
+    await restoreBrowserTabs(tid, g); // browser.js
+    await restoreFinderTabs(tid, g); // finder.js
+  } finally {
+    w.restoring = false;
+  }
+  if (PANES.includes(g.pane) && paneTabs(w, g.pane).length) usePane(w, g.pane); // its tabs may not have come (a page not saved)
+  applyWant(w);
+  for (const n of Object.keys(w.want)) if (!w.want[n].startsWith('shell#')) delete w.want[n]; // gone since
+  if (tid === wsId()) { renderFiles(); renderExplorer(); }
 }
 
 // A new task starts with the tabs of the previous one (newTask in app.js). The backend copied
-// the lists (files, browser URLs, terminals); here, the view: the open folders of 2a and the tab
-// on screen. A browser tab is found by its position among the saved ones (restoreBrowserTabs
-// opens them in that order): its key is new. A thread tab is not copied (the new task has none).
+// the lists (files, browser URLs, terminals); here, the view: the open folders of 2a and the grid
+// (each tab's pane, the tab on screen in each). A thread tab is not copied (the new task has none).
 function copyView(from, to) {
+  copyGrid(from, to); // grid.js
   const src = S.work && S.work[from];
-  if (!src) return; // not shown since the start: restoreFiles picks the tab, as for any task
+  if (!src) return;
   const w = work(to);
   for (const p of src.open) w.open.add(p);
-  const tab = src.tabs.find((t) => t.path === src.active);
-  const saved = src.tabs.filter((t) => t.web && t.url && t.url !== 'about:blank'); // as saveWebTabs
-  if (tab && tab.web && saved.includes(tab)) w.activeHint = `web#${saved.indexOf(tab)}`;
-  else if (tab && !tab.web && !tab.thread) w.activeHint = tab.path;
 }
 
-function closeFile(tid, path) {
+// × or Cmd+W. A terminal ends its shell; the tab goes when the state no longer lists it.
+// ask false: the caller has asked already (closePane, grid.js). Unsaved edits that a tab of
+// another task holds too are not lost: no question.
+function closeFile(tid, path, ask = true) {
   const w = work(tid);
   const tab = w.tabs.find((t) => t.path === path);
   if (!tab) return;
-  if (tab.dirty && !confirm(`Discard the unsaved changes to ${path}?`)) return;
+  if (ask && losesEdits(tab) && !confirm(`Discard the unsaved changes to ${tab.untitled ? tab.name : path}?`)) return;
+  if (tab.shell) {
+    leavePane(w, tab);
+    tab.closing = true;
+    send('shell.close', { key: tab.key });
+  } else {
+    destroyTab(w, tab);
+  }
+  if (isFileTab(tab)) saveOpenFiles(tid);
+  if (tab.finder) saveFinderTabs(tid);
+  saveGrid(tid);
+  renderFiles();
+  renderExplorer();
+}
+
+function destroyTab(w, tab) { // any tab but a terminal
   if (tab.view) tab.view.destroy();
   if (tab.task) tab.task.destroy().catch(() => {});
   if (tab.close) tab.close(); // a browser tab: its native page (browser.js)
-  tab.el.remove();
-  const i = w.tabs.indexOf(tab);
-  w.tabs.splice(i, 1);
-  if (w.active === path) w.active = w.tabs.length ? w.tabs[Math.min(i, w.tabs.length - 1)].path : null;
+  dropTab(w, tab);
+}
+
+// A task is selected after the idle screen (showIdle, app.js): the file tabs opened there were
+// not added to the task whose tabs it showed, so they go. One with unsaved changes that no other
+// tab holds stays, as a tab of that task, rather than lose them; a tab of that file that opens
+// later in any task of the project shows them (peerTab).
+function dropIdleTabs(tid) {
+  const w = S.work && S.work[tid];
+  const idle = w ? w.tabs.filter((t) => t.idle) : [];
+  if (!idle.length) return;
+  for (const tab of idle) {
+    delete tab.idle;
+    if (!losesEdits(tab)) destroyTab(w, tab);
+  }
   saveOpenFiles(tid);
+  saveGrid(tid);
+}
+
+// An untitled tab: the save panel of macOS, in the project folder. A file outside the project
+// is refused (3a shows files of the project only); the tab stays untitled. The panel asks before
+// it replaces a file, so the write is forced; a tab of that file is replaced by this one.
+async function saveAs(tab) {
+  const w = work(tab.tid);
+  let r;
+  try {
+    const where = await request('fs.saveas', { id: tab.tid, name: tab.name });
+    if (!where) return; // cancelled
+    r = await request('fs.write', { id: tab.tid, path: where.path, text: tab.view.state.sliceDoc(), base: null, force: true });
+    r = { ...r, ...(await request('fs.read', { id: tab.tid, path: where.path })) }; // its HEAD, for Diff
+  } catch (e) { toast(e.message); return; }
+  const old = w.tabs.find((t) => t.path === r.path && t !== tab);
+  if (old) { if (old.view) old.view.destroy(); if (old.task) old.task.destroy().catch(() => {}); dropTab(w, old); }
+  for (const n of PANES) if (w.act[n] === tab.path) w.act[n] = r.path;
+  const peer = peerTab(tab.tid, r.path, tab); // the file is open in another task: its tabs take this text
+  if (peer) {
+    tab.file = peer.file;
+    replaceText(sameText(tab).filter((t) => t !== tab), tab.view.state.doc);
+  }
+  Object.assign(tab, { path: r.path, untitled: false, name: null, version: r.version, head: r.head, dirty: false, diskChanged: false, gone: false });
+  tab.view.dispatch({ effects: tab.langC.reconfigure(CM.languageFor(r.path)) });
+  if (tab.wrap) store(wrapKey(tab.tid, r.path), true);
+  saveOpenFiles(tab.tid);
+  saveGrid(tab.tid);
+  refreshTree(tab.tid);
   renderFiles();
   renderExplorer();
 }
 
 async function saveTab(tab, force = false) {
+  if (tab.untitled) return saveAs(tab);
   const text = tab.view.state.sliceDoc(); // joined with the file's own line separator
   let r;
   try { r = await request('fs.write', { id: tab.tid, path: tab.path, text, base: tab.version, force }); } catch (e) { toast(e.message); return; }
@@ -508,16 +701,16 @@ async function saveTab(tab, force = false) {
   renderFiles();
 }
 
+// The disk's text, in every tab of the file (sameText). saveTab needs no such loop: the state
+// that it sets is shared.
 async function reloadTab(tab) {
   let r;
   try { r = await request('fs.read', { id: tab.tid, path: tab.path }); } catch (e) { toast(e.message); return; }
   if (r.text === undefined) { toast(`${tab.path} can no longer be shown.`); return; }
-  const anchor = Math.min(tab.view.state.selection.main.anchor, r.text.length);
-  tab.quiet = true;
-  tab.view.dispatch({ changes: { from: 0, to: tab.view.state.doc.length, insert: r.text }, selection: { anchor } });
-  tab.quiet = false;
+  const tabs = sameText(tab);
+  replaceText(tabs, r.text);
   Object.assign(tab, { version: r.version, head: r.head, dirty: false, diskChanged: false, gone: false });
-  if (tab.diff) setDiff(tab, true); // against the new HEAD
+  for (const t of tabs) if (t.diff) setDiff(t, true); // against the new HEAD
   renderFiles();
 }
 
@@ -531,8 +724,7 @@ function setDiff(tab, on) {
 // Wrap belongs to the file, as VS Code's Option+Z: every tab of the file follows, in every task of
 // the project (they share its files), and it is remembered by the window (localStorage).
 function wrapKey(tid, path) {
-  const t = S.state && S.state.tasks[tid];
-  return `wrap:${t ? t.projectPath : ''}:${path}`;
+  return `wrap:${wsProject(tid) || ''}:${path}`;
 }
 
 function setWrap(tab, on) {
@@ -548,26 +740,38 @@ function setWrap(tab, on) {
   renderFiles();
 }
 
+// the tab on screen in the pane that I used last: Cmd+L, Cmd+W, Cmd+F act on it
 function activeTab() {
-  const w = S.selected && work(S.selected);
-  return w ? w.tabs.find((t) => t.path === w.active) : null;
+  const w = wsId() && work(wsId());
+  return w ? paneActive(w, w.pane) : null;
 }
 
 function renderFileTabs() {
-  const tid = S.selected;
+  const tid = wsId();
   const w = tid && work(tid);
-  $('#file-tabs').innerHTML = w ? w.tabs.map((t) => {
-    const name = t.thread ? `Thread ${t.thread.n}` : t.web ? webTabName(t) : t.path.split('/').pop();
-    return `<div class="tab ${t.path === w.active ? 'on' : ''} ${t.gone ? 'gone' : ''}" data-file="${esc(t.path)}" title="${esc(t.web ? t.url : t.path)}">`
-      + `${esc(name)}${t.dirty ? '<span class="dirty">●</span>' : ''}<span class="x" data-close-file="${esc(t.path)}">×</span></div>`;
-  }).join('') + '<div class="tab new-web" data-new-web title="New browser tab (Cmd+T)">+ Browser</div>' : '';
+  for (const n of PANES) {
+    const task = S.state.tasks[tid];
+    const tabs = w ? paneTabs(w, n) : [];
+    G.els[n].tabs.innerHTML = tabs.map((t) => {
+      // a terminal: the folder where its shell is now (bash tells it, shell_init.bash), else where it started
+      const shell = t.shell && task && task.shells.find((s) => s.key === t.key);
+      const title = t.web ? t.url : t.shell ? `Terminal in ${shell && shell.cwd ? shell.cwd : 'the task folder'}` : t.untitled ? 'Not saved yet' : t.finder ? finderTitle(t) : t.path;
+      return `<div class="tab ${t.path === w.act[n] ? 'on' : ''} ${t.gone ? 'gone' : ''}" data-file="${esc(t.path)}" title="${esc(title)}">`
+        + `${t.finder ? `<img class="tab-icon" src="${fdIcon('folder')}" alt="" draggable="false">` : ''}${esc(tabName(t))}${t.dirty ? '<span class="dirty">●</span>' : ''}<span class="x" data-close-file="${esc(t.path)}">×</span></div>`;
+    }).join('') + (tabs.length ? PANE_X : '');
+  }
 }
 
+// at the right end of a pane's tab bar: closes all its tabs (closePane, grid.js)
+const PANE_X = '<button class="pane-x" data-close-pane title="Close all tabs in this pane">'
+  + '<svg viewBox="0 0 16 16" width="12" height="12" stroke="currentColor" stroke-width="1.4" aria-hidden="true">'
+  + '<path d="M4 4l8 8M12 4l-8 8"/></svg></button>';
+
 // The bar is rebuilt only when its content changes: render() runs at every state push, and a
-// rebuild would take the focus out of the PDF's find field. `tools` (a PDF's) takes the place of
-// the bar-slot element.
-function setBar(html, tools = null) {
-  const bar = $('#file-bar');
+// rebuild would take the focus out of the PDF's find field. `tools` (a PDF's, a page's) takes the
+// place of the bar-slot element. One bar per pane.
+function setBar(n, html, tools = null) {
+  const bar = G.els[n].bar;
   if (bar.html === html && bar.tools === tools) return;
   bar.innerHTML = html;
   if (tools) bar.querySelector('.bar-slot').replaceWith(tools);
@@ -575,32 +779,47 @@ function setBar(html, tools = null) {
 }
 
 function renderFiles() {
-  const tid = S.selected;
+  const tid = wsId();
   const w = tid && work(tid);
-  for (const ws of Object.values(S.work || {})) {
-    for (const t of ws.tabs) t.el.style.display = w && t.tid === tid && t.path === w.active ? '' : 'none';
+  if (w) {
+    applyWant(w);
+    for (const n of PANES) { // no tab on screen in a pane that has tabs: its last one
+      const tabs = paneTabs(w, n);
+      if (tabs.length && !paneActive(w, n)) w.act[n] = tabs[tabs.length - 1].path;
+    }
   }
+  for (const ws of Object.values(S.work || {})) {
+    for (const t of ws.tabs) t.el.style.display = w && t.tid === tid && !t.closing && t.path === w.act[t.pane] ? '' : 'none';
+  }
+  layoutPanes(w); // grid.js
   renderFileTabs();
-  syncSelection(); // the active tab, the task or its session may have changed
-  const tab = activeTab();
-  $('#file-empty').hidden = Boolean(tab);
-  if (!tab) return setBar('');
+  syncSelection(); // the tab on screen, the task or its session may have changed
+  for (const n of PANES) {
+    const tab = w && paneActive(w, n);
+    renderBar(n, tab);
+    if (tab && tab.shell) fitPaneShell(n);
+  }
+}
+
+function renderBar(n, tab) {
+  const setBarN = (html, tools) => setBar(n, html, tools);
+  if (!tab || tab.shell || tab.finder) return setBarN(''); // a Finder tab has its own bars (finder.js)
   if (tab.thread) {
-    return setBar(`<span class="path">Thread ${tab.thread.n} of this task (read-only)</span>
+    return setBarN(`<span class="path">Thread ${tab.thread.n} of this task (read-only)</span>
       <button data-file-act="find" title="Scroll the conversation (4a) to this thread's prompt">Find in conversation</button>`);
   }
-  if (tab.web) return setBar('<span class="bar-slot"></span>', tab.tools); // browser.js keeps its toolbar up to date
+  if (tab.web) return setBarN('<span class="bar-slot"></span>', tab.tools); // browser.js keeps its toolbar up to date
   const notes = [];
   if (tab.gone) notes.push('<span class="note">Deleted on disk.</span>');
   if (tab.error) notes.push(`<span class="note">${esc(tab.error)}</span>`);
   const external = '<button data-file-act="external" title="Open the file with its default app of macOS">Open in default app</button>';
   if (tab.kind === 'image') {
     const meta = [tab.dims, fmtBytes(tab.size)].filter(Boolean).join(' · ');
-    return setBar(`<span class="path">${esc(tab.path)}</span>${notes.join('')}<span class="meta">${meta}</span>
+    return setBarN(`<span class="path">${esc(tab.path)}</span>${notes.join('')}<span class="meta">${meta}</span>
       <button data-file-act="fit" class="${tab.fit ? '' : 'on'}" title="Show the image at its size (a click on the image does the same)">100%</button>${external}`);
   }
   if (tab.kind === 'pdf') {
-    return setBar(`<span class="path">${esc(tab.path)}</span>${notes.join('')}<span class="meta">${fmtBytes(tab.size)}</span>
+    return setBarN(`<span class="path">${esc(tab.path)}</span>${notes.join('')}<span class="meta">${fmtBytes(tab.size)}</span>
       <span class="bar-slot"></span>${external}`, tab.tools);
   }
   if (tab.diskChanged) {
@@ -608,17 +827,20 @@ function renderFiles() {
       + '<button data-file-act="overwrite">Overwrite with mine</button>');
   }
   const canDiff = typeof tab.head === 'string';
-  setBar(`<span class="path">${esc(tab.path)}</span>${notes.join('')}
+  setBarN(`<span class="path">${tab.untitled ? `${esc(tab.name)} (not saved yet)` : esc(tab.path)}</span>${notes.join('')}
     <button data-file-act="wrap" class="${tab.wrap ? 'on' : ''}" title="Wrap long lines (this file, in every task)">Wrap</button>
     <button data-file-act="diff" class="${tab.diff ? 'on' : ''}" ${canDiff ? '' : 'disabled'}
       title="${canDiff ? 'Show the changes against git HEAD' : 'Not in git HEAD (new, untracked, or no repository)'}">Diff vs HEAD</button>
-    <button data-file-act="save" ${tab.dirty || tab.diskChanged ? '' : 'disabled'} title="Cmd+S">Save</button>`);
+    <button data-file-act="save" ${tab.dirty || tab.diskChanged || tab.untitled ? '' : 'disabled'} title="Cmd+S${tab.untitled ? ': asks where to save it' : ''}">Save</button>
+    ${!tab.untitled && tab.path.endsWith('.py') ? `<button data-file-act="run" class="run" title="Run Python file: python ${esc(tab.path)}, in a new terminal of pane 3 at the root of the project (saves it first)">${PLAY_SVG}</button>` : ''}`);
 }
 
+const PLAY_SVG = '<svg viewBox="0 0 16 16" width="11" height="11" aria-hidden="true"><path d="M4.5 2.5v11l9-5.5z" fill="currentColor"/></svg>';
+
 setInterval(async () => {
-  const tid = S.selected;
+  const tid = wsId();
   const w = tid && S.mode === 'dev' && S.work && S.work[tid];
-  const fileTabs = w ? w.tabs.filter((t) => !t.thread && !t.web) : [];
+  const fileTabs = w ? w.tabs.filter(isFileTab) : [];
   if (!fileTabs.length) return;
   let v;
   try { v = await request('fs.versions', { id: tid, paths: fileTabs.map((t) => t.path) }); } catch { return; }
@@ -647,10 +869,22 @@ const SEL_WAIT_MS = 120; // a drag selects many times per second
 let selSent; // undefined: the first sync always sends (a reloaded page clears a stale selection)
 let selTimer = null;
 
+// The text tab on screen in the pane that I used last among those that show one: as VS Code's
+// active editor, it stays the same while I type in a terminal.
+function editorTab() {
+  const w = wsId() && S.work && S.work[wsId()];
+  if (!w) return null;
+  for (const n of w.mru) {
+    const t = paneActive(w, n);
+    if (t && t.kind === 'text' && !t.untitled && t.view) return t;
+  }
+  return null;
+}
+
 function currentSelection() {
   const task = S.selected && S.state && S.state.tasks[S.selected];
-  const tab = activeTab();
-  if (!task || !task.pty || !S.layout.middle_on || !tab || tab.kind !== 'text' || !tab.view) return null;
+  const tab = editorTab();
+  if (!task || !task.pty || !tab) return null;
   const st = tab.view.state;
   const r = st.selection.main;
   if (r.empty) return null;
@@ -688,43 +922,35 @@ function renderSelChip(sel) {
 
 document.addEventListener('click', (e) => {
   if (e.target.closest('[data-sel-clear]')) {
-    const tab = activeTab();
+    const tab = editorTab();
     if (tab && tab.view) tab.view.dispatch({ selection: { anchor: tab.view.state.selection.main.head } });
     return;
   }
   // As in VS Code: a click opens the file and leaves the keyboard in the explorer (Enter renames,
-  // explorer.js); a double-click, handled as the second click (see DESIGN.md "Modes"), moves it to the file.
+  // explorer.js); a double-click, handled as the second click (see DESIGN_DETAILS.md "Modes"), moves it to the file.
   if (e.target.closest('#tree .tree-rename')) return; // a click in the name field (explorer.js)
   const node = e.target.closest('#tree .node[data-node]');
-  if (node && S.selected) {
-    const w = work(S.selected);
-    const path = node.dataset.node;
-    w.treeSel = path;
-    if (node.dataset.dir === '1') {
-      if (e.detail === 2) return;
-      if (w.open.has(path)) w.open.delete(path); else w.open.add(path);
-      renderExplorer();
-    } else if (e.detail === 2) {
-      openFile(S.selected, path, true);
-    } else {
-      openFile(S.selected, path, false);
-      renderExplorer();
-    }
-    return;
-  }
+  if (node && wsId()) { clickTreeNode(node.dataset.node, node.dataset.dir === '1', e.detail === 2); return; }
   const threadEl = e.target.closest('#threads .thread[data-n]');
   if (threadEl && S.selected) { openThread(S.selected, Number(threadEl.dataset.n)); return; }
   const close = e.target.closest('[data-close-file]');
-  if (close && S.selected) { e.stopPropagation(); closeFile(S.selected, close.dataset.closeFile); return; }
-  const tabEl = e.target.closest('#file-tabs .tab[data-file]');
-  if (tabEl && S.selected) { openFile(S.selected, tabEl.dataset.file); return; }
+  if (close && wsId()) { e.stopPropagation(); closeFile(wsId(), close.dataset.closeFile); return; }
+  const closeAll = e.target.closest('#middle [data-close-pane]');
+  if (closeAll) { closePane(paneOf(closeAll)); return; }
+  const tabEl = e.target.closest('#middle .pane-tabs .tab[data-file]');
+  if (tabEl && wsId()) {
+    const t = work(wsId()).tabs.find((x) => x.path === tabEl.dataset.file);
+    if (t) showTab(t, true);
+    return;
+  }
   const act = e.target.closest('[data-file-act]');
-  const tab = activeTab();
+  const tab = act && wsId() && paneActive(work(wsId()), paneOf(act)); // the tab of that pane's bar
   if (act && tab && !act.disabled) {
     const a = act.dataset.fileAct;
     if (a === 'find') findInConversation(tab.tid, tab.thread);
     else if (a === 'diff') setDiff(tab, !tab.diff);
     else if (a === 'wrap') setWrap(tab, !tab.wrap);
+    else if (a === 'run') runPython(tab);
     else if (a === 'save') saveTab(tab);
     else if (a === 'reload') reloadTab(tab);
     else if (a === 'overwrite') saveTab(tab, true);
@@ -734,16 +960,42 @@ document.addEventListener('click', (e) => {
   }
 }, true);
 
-// Cmd+F in a PDF goes to its find field. Elsewhere it stays with its owner: CodeMirror has its
-// own search, and a terminal does not get Cmd keys.
+// Cmd+F: the find of the tab on screen in the pane that I used last, wherever the keyboard is
+// (the explorer, a tab bar, nothing focused): a PDF's find field, CodeMirror's find panel in a
+// text or thread tab (asked by Renaud on 2026-11-11). Not from a text field nor a terminal
+// (xterm.js's textarea): they keep their keys. A CodeMirror editor that has the keyboard opens
+// its own panel. Browser pages: browser.js.
 document.addEventListener('keydown', (e) => {
-  if (!e.metaKey || e.key.toLowerCase() !== 'f' || S.mode !== 'dev') return;
+  if (!e.metaKey || e.key.toLowerCase() !== 'f' || S.mode !== 'dev' || S.picker) return;
   const tab = activeTab();
+  if (!tab || !(tab.kind === 'pdf' || tab.view)) return;
   const a = document.activeElement;
-  if (!tab || tab.kind !== 'pdf' || !(a === document.body || tab.el.contains(a) || tab.tools.contains(a))) return;
+  if (a && a.closest && a.closest('.cm-editor')) return;
+  const pdfField = tab.kind === 'pdf' && tab.tools.contains(a);
+  if (!pdfField && a && a.matches && a.matches('input, select, textarea, [contenteditable]')) return;
   e.preventDefault();
   e.stopPropagation();
+  if (tab.view) { CM.openSearchPanel(tab.view); return; }
   const f = tab.tools.querySelector('.pdf-find');
   f.focus();
   f.select();
+}, true);
+
+// Cmd+W: closes the tab on screen in the pane that I used last, of any kind, wherever the
+// keyboard is, as the tab's × does (asked by Renaud on 2026-11-11). Never the window: pywebview's
+// view closes it on a Cmd+W that the page leaves unhandled, so the key is always taken, also
+// with nothing to close (no tab, Organize or Review mode, a picker open). The keyboard follows to
+// the tab that takes the place, if it was in the closed tab or nowhere; not from 4a or 2a.
+// After app.js's listener: a Cmd+N or Cmd+J chord that waits takes the key first.
+document.addEventListener('keydown', (e) => {
+  if (!e.metaKey || e.shiftKey || e.altKey || e.ctrlKey || e.key.toLowerCase() !== 'w') return;
+  e.preventDefault();
+  e.stopPropagation();
+  const tab = S.mode === 'dev' && !S.picker ? activeTab() : null;
+  if (!tab) return;
+  const a = document.activeElement;
+  const follow = !a || a === document.body || tab.el.contains(a);
+  closeFile(tab.tid, tab.path);
+  const next = follow && activeTab();
+  if (next && next !== tab) focusTab(next);
 }, true);

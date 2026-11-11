@@ -1,0 +1,47 @@
+/* Finder tabs of column 3 (finder.js): macOS Finder's column view in dark mode, chosen by Renaud
+   from a mockup on 2026-11-11 (look 1, the path bar and the status bar, columns of 170 px). */
+.finder { --f-bg: #1e1e1e; --f-text: rgba(255, 255, 255, .86); --f-dim: rgba(255, 255, 255, .5); --f-sep: rgba(255, 255, 255, .1);
+  --f-sel: #0a5ad4; --f-sel-off: rgba(255, 255, 255, .14); --f-bar: #262626; --f-bar-sep: rgba(255, 255, 255, .08);
+  display: flex; flex-direction: column; background: var(--f-bg); color: var(--f-text); outline: none;
+  font: 13px -apple-system, BlinkMacSystemFont, sans-serif; -webkit-font-smoothing: antialiased; cursor: default; user-select: none; }
+.finder .fd-cols { flex: 1; min-height: 0; display: flex; overflow-x: auto; overflow-y: hidden; }
+.finder .fd-col { flex: none; position: relative; border-right: 1px solid var(--f-sep); }
+.finder .fd-rows { position: absolute; inset: 0; overflow-y: auto; padding: 4px 0 16px; }
+/* the grip at the bottom of a divider: drag it to resize the column (Option: every column) */
+.finder .fd-grip { position: absolute; right: -6px; bottom: 0; width: 11px; height: 15px; z-index: 1; display: flex; gap: 2px;
+  justify-content: center; align-items: center; cursor: col-resize; }
+.finder .fd-grip i { width: 1px; height: 8px; background: var(--f-dim); }
+.finder .fd-row { display: flex; align-items: center; height: 22px; margin: 0 5px; padding: 0 6px 0 5px; border-radius: 5px; gap: 6px; white-space: nowrap; }
+.finder .fd-row img { width: 16px; height: 16px; flex: none; }
+.finder .fd-row .n { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.finder .fd-row.hid > img, .finder .fd-row.hid > .n, .finder .fd-row.cut > img, .finder .fd-row.cut > .n { opacity: .5; }
+.finder .fd-chev { flex: none; color: var(--f-dim); }
+/* the folders of the selection are grey; the last selection is blue while the tab has the keyboard */
+.finder .fd-row.sel { background: var(--f-sel-off); }
+.finder:focus-within .fd-row.sel.cur { background: var(--f-sel); color: #fff; }
+.finder:focus-within .fd-row.sel.cur .fd-chev { color: #fff; }
+.finder .fd-rename { flex: 1; min-width: 0; font: inherit; color: var(--f-text); background: var(--f-bg); border: none; border-radius: 2px;
+  outline: 3px solid rgba(10, 132, 255, .55); padding: 0 2px; margin-left: -2px; }
+/* the preview column of a file: Quick Look's thumbnail (or the big icon), the kind, the dates */
+.finder .fd-preview { flex: 1 0 240px; padding: 18px 14px; overflow-y: auto; min-width: 240px;
+  contain: inline-size; }  /* its width never comes from the thumbnail, which decodes after the columns scrolled */
+.finder .fd-big { display: flex; justify-content: center; align-items: center; height: 170px; margin-bottom: 12px; }
+.finder .fd-big img { max-width: 100%; max-height: 170px; }
+.finder .fd-bigicon { width: 128px; height: 128px; }
+.finder .fd-title { font-weight: 600; text-align: center; word-break: break-all; }
+.finder .fd-sub { color: var(--f-dim); text-align: center; font-size: 11px; margin-top: 2px; }
+.finder .fd-preview h5 { margin: 18px 0 6px; font-size: 12px; font-weight: 700; }
+.finder .fd-kv { display: flex; justify-content: space-between; gap: 10px; font-size: 11px; padding: 3px 0; border-bottom: 1px solid var(--f-sep); }
+.finder .fd-kv span:first-child { color: var(--f-dim); white-space: nowrap; }
+.finder .fd-kv span:last-child { text-align: right; }
+/* the path bar (a double-click on a folder: it becomes the first column) and the status bar */
+.finder .fd-pathbar { flex: none; display: flex; align-items: center; height: 22px; padding: 0 8px; font-size: 11px; background: var(--f-bar);
+  border-top: 1px solid var(--f-bar-sep); white-space: nowrap; overflow: hidden; }
+.finder .fd-seg { display: flex; align-items: center; gap: 3px; min-width: 0; flex: 0 1 auto; overflow: hidden; }
+.finder .fd-seg.last { flex-shrink: 0 !important; max-width: 100%; }
+.finder .fd-seg img { width: 14px; height: 14px; flex: none; }
+.finder .fd-seg .fd-name { overflow: hidden; text-overflow: ellipsis; }
+.finder .fd-sep { color: var(--f-dim); margin: 0 3px 0 4px; font-size: 10px; flex: none; }
+.finder .fd-status { flex: none; height: 22px; display: flex; align-items: center; justify-content: center; font-size: 11px; color: var(--f-dim);
+  background: var(--f-bar); border-top: 1px solid var(--f-bar-sep); }
+#middle .pane-tabs .tab .tab-icon { width: 14px; height: 14px; margin-right: -2px; }

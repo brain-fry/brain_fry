@@ -34,7 +34,7 @@ def board_order(t: Task):
 
 
 def project_order(projects: list[dict], tasks: list[Task]) -> list[dict]:
-    """The projects of the dropdown, Cmd+P and Cmd+N, the most recently used first: by the
+    """The projects of the dropdown, Cmd+P and Cmd+T, the most recently used first: by the
     last `opened` of their tasks (archived ones too), then, for projects whose tasks were
     never opened, by their last `updated`; projects without tasks keep the order of
     projects.json. Each project gets `last`: that time, as ISO text, or None."""
@@ -54,13 +54,17 @@ def project_order(projects: list[dict], tasks: list[Task]) -> list[dict]:
 
 def inbox_line(t: Task, width: int = 160) -> str:
     """The blocked message, else the last thread's digest, else (placeholder until the
-    digest arrives) the start of the reply."""
+    digest arrives) the start of the reply. A turn cut off before its reply (the session
+    ended, see actions.end_session) shows its prompt."""
     if t.status == "blocked" and t.notification:
         return f"blocked: {t.notification}"
     if not t.threads:
         return ""
     last = t.threads[-1]
-    line = " ".join((last.digest or last.reply).split())
+    if last.kind == "interrupted" and not (last.digest or last.reply):
+        line = "interrupted: " + " ".join(last.prompt.split())
+    else:
+        line = " ".join((last.digest or last.reply).split())
     return line if len(line) <= width else line[: width - 3] + "..."
 
 
@@ -85,7 +89,6 @@ def task_json(t: Task, pty_gen: int | None, shells: list[dict] | None = None, el
         "inbox": t.inbox,
         "unread": t.unread,
         "pinned": t.pinned,
-        "notification": t.notification,
         "updated": t.updated,
         "opened": t.opened,
         "parent": t.parent,
@@ -95,7 +98,7 @@ def task_json(t: Task, pty_gen: int | None, shells: list[dict] | None = None, el
         "kind": last.kind if last else None,
         "question": last.question if last else None,
         "threads": [
-            {"n": th.n, "ts": th.ts, "kind": th.kind, "digest": th.digest, "prompt": first_line(th.prompt)}
+            {"n": th.n, "kind": th.kind, "digest": th.digest, "prompt": first_line(th.prompt)}
             for th in t.threads
         ],
         "pty": pty_gen,
@@ -105,5 +108,7 @@ def task_json(t: Task, pty_gen: int | None, shells: list[dict] | None = None, el
         "elsewhere": elsewhere,
         "openFiles": t.open_files,
         "browserTabs": t.browser_tabs,
+        "finderTabs": t.finder_tabs,
         "shells": shells or [],  # terminal tabs (3b) that run now: {key, gen, title}
+        "terminalTabs": len(t.terminal_tabs),  # the shells that the select starts: veil.js waits for them
     }

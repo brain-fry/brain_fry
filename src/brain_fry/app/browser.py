@@ -44,9 +44,10 @@ log = logging.getLogger(__name__)
 WEB_SCHEMES = {"http", "https", "about", "data", "blob", "file", "webkit-extension", "javascript"}
 KVO_KEYS = ("URL", "title", "loading", "canGoBack", "canGoForward")
 # Cmd keys that go to Brain Fry's page while a browser page has the focus: Brain Fry's own
-# (app.js) and the browser's that live in the page (browser.js: address, new tab, find, close)
-FORWARD = {"arrowup", "arrowdown", "n", "p", "d", "e", "b", "1", "2", "j", "l", "t", "f", "w", "g", "4"}
-ARROWS = {0xF700: "arrowup", 0xF701: "arrowdown", 0xF702: "arrowleft", 0xF703: "arrowright"}
+# (app.js: N and J start the chords of grid.js, T a new task) and the browser's that live in the page
+# (browser.js: address, find, close)
+FORWARD = {"arrowup", "arrowdown", "n", "j", "p", "d", "e", "b", "1", "2", "3", "4", "5", "6", "7", "8", "9", "l", "t", "f", "w", "g"}
+ARROWS = {0xF700: "arrowup", 0xF701: "arrowdown"}
 KEY_NAMES = {"arrowup": "ArrowUp", "arrowdown": "ArrowDown"}
 CMD, SHIFT = AppKit.NSEventModifierFlagCommand, AppKit.NSEventModifierFlagShift
 ALT, CTRL = AppKit.NSEventModifierFlagOption, AppKit.NSEventModifierFlagControl
@@ -196,13 +197,13 @@ class _ExtDelegate(NSObject):  # WKWebExtensionControllerDelegate
 
     def webExtensionController_openNewTabUsingConfiguration_forExtensionContext_completionHandler_(self, c, conf, ctx, done):
         url = conf.url()
-        page = self.host.open_native(str(url.absoluteString()) if url else "about:blank", None, bool(conf.shouldBeActive()))
+        page = self.host.open_native(str(url.absoluteString()) if url else "about:blank", bool(conf.shouldBeActive()))
         done(page.ext, None)
 
     def webExtensionController_openOptionsPageForExtensionContext_completionHandler_(self, c, ctx, done):
         url = ctx.optionsPageURL()
         if url is not None:
-            self.host.open_native(str(url.absoluteString()), None, True)
+            self.host.open_native(str(url.absoluteString()), True)
         done(None)
 
     def webExtensionController_presentActionPopup_forExtensionContext_completionHandler_(self, c, action, ctx, done):
@@ -487,8 +488,6 @@ class BrowserHost:
             {"back": page.wv.goBack, "forward": page.wv.goForward, "reload": page.wv.reload, "stop": page.wv.stopLoading}[a]()
         elif cmd == "browser.close":
             self._close(page)
-        elif cmd == "browser.focus":
-            self.nswindow.makeFirstResponder_(page.wv)
         elif cmd == "browser.find":
             return self._find(page, str(msg.get("query") or ""), bool(msg.get("backwards")))
         elif cmd == "browser.snapshot":
@@ -543,22 +542,24 @@ class BrowserHost:
         task = opener.task if opener else self._active_task()
         page = self.open(self._new_key(), task, "about:blank", cfg=cfg)
         url = action.request().URL()
-        self._announce(page, str(url.absoluteString()) if url else "", True)
+        self._announce(page, str(url.absoluteString()) if url else "", True, opener)
         return page.wv
 
     def open_child(self, opener_wv, url) -> None:
         opener = self.page_of(opener_wv)
         page = self.open(self._new_key(), opener.task if opener else self._active_task(), str(url.absoluteString()))
-        self._announce(page, str(url.absoluteString()), False)
+        self._announce(page, str(url.absoluteString()), False, opener)
 
-    def open_native(self, url: str, task: str | None, activate: bool) -> Page:
+    def open_native(self, url: str, activate: bool) -> Page:
         """A tab that uBlock opens (its dashboard): for the task on screen."""
-        page = self.open(self._new_key(), task or self._active_task(), url)
+        page = self.open(self._new_key(), self._active_task(), url)
         self._announce(page, url, activate)
         return page
 
-    def _announce(self, page: Page, url: str, activate: bool) -> None:
-        self.core.notify({"type": "browser", "ev": "opened", "tab": page.key, "task": page.task, "url": url, "activate": activate})
+    def _announce(self, page: Page, url: str, activate: bool, opener: Page | None = None) -> None:
+        """opener: the page that opened it; the new tab goes to its pane (browser.js)."""
+        self.core.notify({"type": "browser", "ev": "opened", "tab": page.key, "task": page.task, "url": url, "activate": activate,
+                          "opener": opener.key if opener else None})  # fmt: skip
 
     def _active_task(self) -> str | None:
         p = self.pages.get(self.active)
@@ -583,6 +584,7 @@ class BrowserHost:
             x, y, w, h = (float(msg[k]) for k in ("x", "y", "w", "h"))
             fy = y if self.ui.isFlipped() else self.ui.bounds().size.height - y - h
             page.wv.setFrame_(NSMakeRect(x, fy, w, h))
+            self._fade(page.wv, float(msg.get("alpha", 1.0)), float(msg.get("fade") or 0))
             page.wv.setHidden_(False)
             if page.pending:
                 url, page.pending = page.pending, None
@@ -600,6 +602,20 @@ class BrowserHost:
                 page.wv.setHidden_(True)
             if self.visible == page.key:
                 self.visible = None
+
+    @staticmethod
+    def _fade(view, alpha: float, ms: float) -> None:
+        """A native page ignores the CSS opacity of the page under it: while its task's tabs are
+        built it has alpha 0, then it fades in with 2a and column 3 (web/veil.js)."""
+        if view.alphaValue() == alpha:
+            return
+        if ms <= 0:
+            view.setAlphaValue_(alpha)
+            return
+        AppKit.NSAnimationContext.beginGrouping()
+        AppKit.NSAnimationContext.currentContext().setDuration_(ms / 1000)
+        view.animator().setAlphaValue_(alpha)
+        AppKit.NSAnimationContext.endGrouping()
 
     def _has_focus(self, page: Page) -> bool:
         r = self.nswindow.firstResponder()
@@ -703,7 +719,7 @@ class BrowserHost:
             k = ARROWS.get(ord(chars[0]), chars.lower()) if chars else ""
             page = self._focused_page()
             if k == "w" and (page is not None or self.visible is not None):
-                self._forward(k, flags)  # closes the browser tab on screen (browser.js)
+                self._forward(k, flags, page)  # closes the browser tab on screen (browser.js)
                 return None
             if page is None:
                 return event
@@ -721,8 +737,8 @@ class BrowserHost:
             elif k == "0":
                 wv.setPageZoom_(1.0)
             elif k in FORWARD:
-                self.nswindow.makeFirstResponder_(self.ui)
-                self._forward(k, flags)
+                self.nswindow.makeFirstResponder_(self.ui)  # Cmd+N: the keys after it go to Brain Fry's page
+                self._forward(k, flags, page)
             else:
                 return event  # copy, paste, select all, undo...: the page's
             return None
@@ -730,8 +746,9 @@ class BrowserHost:
             log.exception("browser: key monitor")
             return event
 
-    def _forward(self, k: str, flags: int) -> None:
-        self.core.notify({"type": "browser", "ev": "key", "key": KEY_NAMES.get(k, k),
+    def _forward(self, k: str, flags: int, page: Page | None = None) -> None:
+        """page: the one that had the focus; its pane becomes the one in use (browser.js)."""
+        self.core.notify({"type": "browser", "ev": "key", "key": KEY_NAMES.get(k, k), "tab": page.key if page else None,
                           "shift": bool(flags & SHIFT), "alt": bool(flags & ALT), "ctrl": bool(flags & CTRL)})  # fmt: skip
 
     # ---- uBlock Origin Lite

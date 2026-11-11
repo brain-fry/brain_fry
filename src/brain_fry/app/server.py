@@ -16,8 +16,8 @@ from websockets.asyncio.server import serve
 from websockets.datastructures import Headers
 from websockets.http11 import Response
 
-from .. import actions, files, selection
-from .core import Core
+from .. import actions, files, finder, selection
+from .core import PROJECT_WS, Core
 
 log = logging.getLogger(__name__)
 
@@ -39,6 +39,11 @@ TYPES = {
 }
 LOCAL_HOSTS = ("127.0.0.1", "localhost")
 TASK_ID = re.compile(r"[0-9A-Za-z-]{1,64}")
+ICON_KEY = re.compile(r"[0-9a-z_+-]{1,40}")
+# Slow commands (Quick Look, Spotlight, a big folder): they run beside the others, which would
+# wait for them otherwise (a connection's commands run one after the other). Their order does
+# not matter: each reply carries its request number.
+CONCURRENT = {"finder.list", "finder.info", "finder.thumb"}
 
 
 def _refused(headers: Headers, port: int) -> str | None:
@@ -65,12 +70,15 @@ def _response(status: int, body: bytes, ctype: str, extra: tuple = ()) -> Respon
 def _file(core: Core, path: str) -> Response:
     """GET /file/<task id>/<path in the task's project>: an image or a PDF for 3a. The page asks
     with `?v=<version>`, so that a file that changed on disk is never an old copy."""
-    parts = urlsplit(path).path.split("/", 3)  # '', 'file', task id, path
-    if len(parts) < 4 or not TASK_ID.fullmatch(parts[2]):
+    parts = urlsplit(path).path.split("/", 3)  # '', 'file', task id (or `project:<path>`, encoded), path
+    if len(parts) < 4:
+        return _response(404, b"not found\n", "text/plain")
+    tid = unquote(parts[2])
+    if not (TASK_ID.fullmatch(tid) or tid.startswith(PROJECT_WS)):
         return _response(404, b"not found\n", "text/plain")
     rel = unquote(parts[3])
     try:
-        p, ctype = core.viewable(parts[2], rel)
+        p, ctype = core.viewable(tid, rel)
         size = p.stat().st_size
         if size > files.MAX_VIEW_BYTES:
             return _response(413, b"too large\n", "text/plain")
@@ -83,6 +91,27 @@ def _file(core: Core, path: str) -> Response:
     log.debug("file %s: %d bytes", rel, len(body))
     # nosniff and sandbox: the bytes are shown as what their extension says, never run as a page
     return _response(200, body, ctype, (("X-Content-Type-Options", "nosniff"), ("Content-Security-Policy", "sandbox")))
+
+
+def _icon(path: str) -> Response:
+    """GET /icon/<key>.png?s=<pixels>: a file icon of macOS for the Finder tabs (finder.icon_png).
+    Only icons whose key a listing gave out: no path comes in. Cached by WebKit: a column draws
+    the same icon on many rows, at every redraw."""
+    u = urlsplit(path)
+    name = u.path[len("/icon/") :]
+    key = name[:-4] if name.endswith(".png") else ""
+    size = u.query[2:] if u.query.startswith("s=") else ""
+    if not ICON_KEY.fullmatch(key) or not size.isdigit():
+        return _response(404, b"not found\n", "text/plain")
+    try:
+        body = finder.icon_png(key, int(size))
+    except Exception:
+        log.exception("icon %s", key)
+        body = None
+    if body is None:
+        return _response(404, b"not found\n", "text/plain")
+    headers = Headers([("Content-Type", "image/png"), ("Content-Length", str(len(body))), ("Cache-Control", "max-age=86400")])
+    return Response(200, "OK", headers, body)
 
 
 def _static(path: str) -> Response | None:
@@ -114,6 +143,8 @@ def make_handlers(core: Core):
             return None  # websocket handshake
         if request.path.startswith("/file/"):
             return await asyncio.to_thread(_file, core, request.path)
+        if request.path.startswith("/icon/"):
+            return await asyncio.to_thread(_icon, request.path)
         return _static(request.path) or connection.respond(404, "not found\n")
 
     async def ctl(ws) -> None:
@@ -123,8 +154,9 @@ def make_handlers(core: Core):
         log.info("front end connected (%d connection(s))", len(core.clients))
         try:
             await ws.send(json.dumps(await asyncio.to_thread(core.snapshot)))
-            async for raw in ws:
-                msg = json.loads(raw)
+            beside: set[asyncio.Task] = set()  # the CONCURRENT commands that run (kept: a task needs a reference)
+
+            async def handle(msg: dict, raw) -> None:
                 req = msg.get("req")
                 try:
                     data = await core.command(msg)
@@ -140,6 +172,15 @@ def make_handlers(core: Core):
                         await ws.send(json.dumps({"type": "reply", "req": req, "ok": False, "error": error}))
                     else:
                         await ws.send(json.dumps({"type": "error", "message": error}))
+
+            async for raw in ws:
+                msg = json.loads(raw)
+                if msg.get("cmd") in CONCURRENT:
+                    task = asyncio.create_task(handle(msg, raw))
+                    beside.add(task)
+                    task.add_done_callback(beside.discard)
+                else:
+                    await handle(msg, raw)
         finally:
             core.clients.discard(ws)
             log.info("front end disconnected (%d connection(s) left)", len(core.clients))

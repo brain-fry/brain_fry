@@ -11,3 +11,12 @@ Shown in 4a when no task is selected (DESIGN_DETAILS.md, "Auto-advance"). All fr
 | snowfield-mist.jpg | [Mist and snow](https://commons.wikimedia.org/wiki/File:Mist_and_snow_(1e40011d343c46369ce5dbf85437527a).JPG) | Steve Redman (MORA) | Public domain |
 | misty-hills.jpg | [Chasing the mist](https://commons.wikimedia.org/wiki/File:Chasing_the_mist.jpg) | Ronnakorn 1982 | CC BY-SA 4.0 |
 | peak-in-cloud.jpg | [Mountain mist at Chiang Mai, Thailand](https://commons.wikimedia.org/wiki/File:Mountain_mist_at_Chiang_Mai_Thailand.jpg) | Tnppic | CC BY-SA 4.0 |
+
+Added by Renaud on 2026-11-11, from files on his Desktop. Author, source and license unknown. The first three were WebP files named `.jpg`, converted to JPEG (quality 85, not otherwise edited); the last one is copied as is. They are landscape, so 4a shows a centered portrait crop of each.
+
+| File | Original file name | Author | License |
+|---|---|---|---|
+| argentine-ridge.jpg | arete-de-largentine-horizons-infinis-202304_dsf7859.jpg | unknown | unknown |
+| diablerets-summit.jpg | sommet-des-diablerets-202002_dsc0758.jpg | unknown | unknown |
+| diablerets-rampart.jpg | les-diablerets-rempart-alpin-202401_dsf0927-modifier.jpg | unknown | unknown |
+| creux-de-champ.jpg | creux_de_champs.jpg | unknown | unknown |

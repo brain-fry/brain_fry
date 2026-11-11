@@ -10,16 +10,18 @@ import json
 import logging
 import os
 import queue
+import shlex
 import threading
 import time
 from pathlib import Path
 
-from .. import actions, digest, events, files, firefox, git, install, paths, projects, selection, sessions, views
+from .. import actions, digest, events, files, finder, firefox, git, install, paths, projects, selection, sessions, views
 from ..logs import short
 from ..util import child_env, claude_bin, write_atomic
 from .ptys import PtySession
 
 log = logging.getLogger(__name__)
+SAVE_DIALOG = 30  # pywebview's FileDialog.SAVE (webview is imported only in the window)
 ui_log = logging.getLogger("brain_fry.ui")
 
 CONSUME_EVERY = 0.5  # s
@@ -27,12 +29,15 @@ SWEEP_EVERY = 60  # s: retry failed digests, close idle sessions
 DIGEST_RETRY = 120  # s after a failure
 DIGEST_NOW, DIGEST_LATER = 0, 1  # priorities in the digest queue: turns first, then short titles of older tasks
 IDLE_CLOSE = 4 * 3600  # s without events and output, see DESIGN_DETAILS.md "App"
-OTHERS_EVERY = 3  # s: other sessions, and which tasks run elsewhere
+OUTSIDE_EVERY = 3  # s: which tasks run elsewhere, the end of a block, projects.json
+PROJECT_WS = "project:"  # the id of a project's files with no task selected (fs.* commands, /file/)
+SHELL_INIT = Path(__file__).resolve().parent.parent / "shell_init.bash"  # the bash of terminal tabs runs it
 # commands that the front end sends all the time (polling, file reads): logged at DEBUG only.
 # Browser commands too: placements come at every frame of a drag, and URLs are browsing history.
 QUIET = {"fs.list", "fs.read", "fs.versions", "thread.get", "log", "projects", "selection.set",
+         "finder.list", "finder.info", "finder.thumb", "finder.tabs.set",
          "browser.place", "browser.open", "browser.go", "browser.nav", "browser.find", "browser.snapshot",
-         "browser.focus", "browser.tabs.set", "browser.cookies.info",
+         "browser.tabs.set", "browser.cookies.info",
          "git.state", "git.log", "git.diff", "git.commit_info"}  # fmt: skip
 
 
@@ -58,11 +63,11 @@ class Core:
         self.shell_seq = 0
         self.restored: set[str] = set()  # tasks whose terminal tabs were restored since start
         self.shutting_down = False
-        self.others: list[dict] = []  # sessions of my projects that are not tasks
         self.running: dict[str, dict] | None = None  # session id -> its process, from Claude Code
         self._projects_version: int | None = None
         self._distrust_logged = False
         self.browser = None  # app.browser.BrowserHost: the browser of 3a, in the window only (main.py)
+        self.window = None  # pywebview's window (main.py): the save panel of an untitled tab (fs.saveas)
 
     # ---------------------------------------------------------------- lifecycle
 
@@ -73,7 +78,7 @@ class Core:
         threading.Thread(target=self._digest_worker, name="digest", daemon=True).start()
         self.loop.create_task(self._consume_loop())
         self.loop.create_task(self._sweep_loop())
-        self.loop.create_task(self._others_loop())
+        self.loop.create_task(self._outside_loop())
 
     def _reset_leftover_owned(self) -> None:
         f = owned_file()
@@ -127,26 +132,22 @@ class Core:
         tasks = actions.all_tasks()
         shells: dict[str, list[dict]] = {}
         for s in list(self.ptys.values()):
-            if s.kind == "shell" and s.alive:
-                shells.setdefault(s.task, []).append({"key": s.key, "gen": s.gen, "title": s.title})
+            if s.kind == "shell" and s.alive:  # cmd, cwd: from bash (shell_init.bash), for Cmd+N O
+                shells.setdefault(s.task, []).append({"key": s.key, "gen": s.gen, "title": s.title,
+                                                      "cmd": s.command, "cwd": s.folder})  # fmt: skip
         running = self.running or {}
         by_id = {t.id: views.task_json(t, gen := self._live_gen(t.id), shells.get(t.id),
                                        running.get(t.id) if gen is None else None) for t in tasks}  # fmt: skip
         inbox = [t.id for t in sorted(filter(views.in_inbox, tasks), key=views.inbox_order)]
-        archive = [t.id for t in sorted((t for t in tasks if t.status == "done"), key=lambda t: -views.epoch(t.updated))]
-        board = [t.id for t in sorted((t for t in tasks if t.status != "done"), key=views.board_order)]
         return {
             "type": "state",
             "tasks": by_id,
             "inbox": inbox,
-            "archive": archive,
-            "board": board,
             "projects": views.project_order(projects.load()["projects"], tasks),
             "selected": self.selected,
             "hookInstalled": (hook := self._hook_state())[0],
             "hookOutdated": hook[1],
             "digestError": self.digest_error,
-            "others": self.others,
         }
 
     @staticmethod
@@ -257,35 +258,32 @@ class Core:
                 self.queued[tid] = prio
                 self.digest_q.put((prio, next(self._digest_seq), tid))
 
-    async def _others_loop(self) -> None:
+    async def _outside_loop(self) -> None:
         while not self.shutting_down:
             try:
-                if await asyncio.to_thread(self._refresh_others):
+                if await asyncio.to_thread(self._refresh_outside):
                     self.request_broadcast()
             except Exception:
-                log.exception("other sessions")
-            await asyncio.sleep(OTHERS_EVERY)
+                log.exception("Claude Code's process files")
+            await asyncio.sleep(OUTSIDE_EVERY)
 
-    def _refresh_others(self) -> bool:
+    def _refresh_outside(self) -> bool:
         """Which sessions run now (Claude Code's files), the tasks whose process started or
-        ended outside the app, and the other sessions of my projects. True if any changed."""
+        ended outside the app, the blocks whose dialog closed, and projects.json. True if any changed."""
         running = sessions.running()
         if running is not None and not self._trust(running):
             running = None
         tasks = actions.all_tasks()
         changed = self._sync_outside(tasks, running)
         changed |= self._end_blocks(tasks, running)
-        others = sessions.scan({sid for t in tasks for sid in t.session_ids}, running)
-        if [o["id"] for o in others] != [o["id"] for o in self.others]:
-            log.info("other sessions: %d (%s)", len(others), ", ".join(short(o["id"]) for o in others[:12]))
         try:
             version = paths.projects_file().stat().st_mtime_ns
         except OSError:
             version = None
         if version != self._projects_version and self._projects_version is not None:
             log.info("projects.json changed: %s", ", ".join(str(p) for p in projects.project_paths()))
-        changed |= others != self.others or running != self.running or version != self._projects_version
-        self.others, self.running, self._projects_version = others, running, version
+        changed |= running != self.running or version != self._projects_version
+        self.running, self._projects_version = running, version
         return changed
 
     def _trust(self, running: dict[str, dict]) -> bool:
@@ -352,7 +350,12 @@ class Core:
             try:
                 task = actions.load(tid)
                 if digest.needs_call(task):
-                    digest.digest_task(task)
+                    held = task.held
+                    try:
+                        digest.digest_task(task)
+                    finally:  # a held reply that reaches the inbox while I look at it: read at once
+                        if held and tid == self.selected and actions.load(tid).unread:
+                            actions.mark_read(tid)
                     self.failed.pop(tid, None)
                     self.digest_error = None
                     self.request_broadcast()
@@ -368,18 +371,22 @@ class Core:
     # ---------------------------------------------------------------- PTYs
 
     def _start_pty(self, key: str, argv: list[str], cwd: str, rows: int, cols: int,
-                   kind: str = "claude", task: str | None = None, title: str = "") -> PtySession:  # fmt: skip
+                   kind: str = "claude", task: str | None = None, title: str = "",
+                   extra_env: dict[str, str] | None = None) -> PtySession:  # fmt: skip
         """kind "claude": a task's session in 4a, key = task id. kind "shell": a terminal
         tab (3b) of `task`, key = "shell:<task>:<n>"."""
         gen = self.gens.get(key, 0) + 1
         self.gens[key] = gen
-        env = child_env(TERM="xterm-256color", COLORTERM="truecolor")
+        env = child_env(TERM="xterm-256color", COLORTERM="truecolor", **(extra_env or {}))
         if kind == "claude":  # Claude Code writes its links as OSC 8 (DESIGN_DETAILS.md "Browser (3a)")
             env["FORCE_HYPERLINK"] = "1"
         if not Path(cwd).is_dir():
             cwd = str(Path.home())
         s = PtySession(key, gen, argv, cwd, env, rows, cols, self._on_pty_exit)
         s.kind, s.task, s.title = kind, task or key, title or kind
+        if kind == "shell":  # its last command and its folder, for the list of Cmd+N O
+            s.scan = True
+            s.on_info = lambda _s: self.request_broadcast()
         s.attach(self.loop)
         self.ptys[key] = s
         if kind == "claude":
@@ -414,11 +421,72 @@ class Core:
         except actions.NotFound:
             pass
 
-    def _new_shell(self, task, rows: int, cols: int) -> PtySession:
+    def _new_shell(self, task, rows: int, cols: int, cwd: str | None = None) -> PtySession:
+        """bash runs shell_init.bash, which reads what a login shell reads and then tells the app
+        its commands and its folder (ptys.scan_info). Other shells: `-l`, and they tell nothing."""
         self.shell_seq += 1
         shell = os.environ.get("SHELL") or "/bin/zsh"
-        return self._start_pty(f"shell:{task.id}:{self.shell_seq}", [shell, "-l"], task.cwd, rows, cols,
-                               kind="shell", task=task.id, title=Path(shell).name)  # fmt: skip
+        argv, extra = [shell, "-l"], None
+        if Path(shell).name == "bash" and SHELL_INIT.is_file():
+            argv, extra = [shell, "--init-file", str(SHELL_INIT)], {"BF_SHELL_LOGIN": "1"}
+        s = self._start_pty(f"shell:{task.id}:{self.shell_seq}", argv, cwd or task.cwd, rows, cols,
+                            kind="shell", task=task.id, title=Path(shell).name, extra_env=extra)  # fmt: skip
+        s.tells = extra is not None
+        return s
+
+    @staticmethod
+    def _python_line(project: str, rel: str) -> str:
+        """Blocking: the play button of a Python file. The command line that runs the file `rel`
+        from the project's root: with the project's `.venv` when it has one (VS Code picks it
+        too), else with the `python` of the shell's PATH."""
+        p = files.entry(project, rel)
+        if not p.is_file() or p.suffix != ".py":
+            raise ValueError(f"Not a Python file: {rel}")
+        venv = files.resolve(project, "") / ".venv" / "bin" / "python"
+        return shlex.join([".venv/bin/python" if venv.exists() else "python", rel.strip("/")])
+
+    def _type_when_ready(self, s: PtySession, line: str, start: float | None = None) -> None:
+        """Types `line` and Enter into a new shell once it waits for a command, so that the line
+        shows after its first prompt, as if I had typed it: when the prompt comes (bash with
+        shell_init.bash tells it), else when its output has been quiet for 0.3 s; after 5 s
+        anyway. Typed earlier, the terminal would echo the line once before the prompt."""
+        now = time.time()
+        start = start or now
+        if not s.alive:
+            return
+        if s.prompts if s.tells else (s.bytes_out and now - s.last_output > 0.3):
+            s.write(line.encode() + b"\r")
+        elif now - start > 5:
+            log.info("shell %s: no prompt after 5 s, typed anyway", s.key)
+            s.write(line.encode() + b"\r")
+        else:
+            self.loop.call_later(0.05, self._type_when_ready, s, line, start)
+
+    @staticmethod
+    def _shell_folder(project: str, rel: str) -> str:
+        """Blocking: "Open a terminal here" in 2a. The folder `rel` of the project, as the tree
+        shows it (a symlink is not followed), or the folder of the file `rel`; "" is the project."""
+        p = files.entry(project, rel) if rel.strip("/") else files.resolve(project, "")
+        return str(p if p.is_dir() else p.parent)
+
+    @staticmethod
+    def _finder_folder(path: str) -> str:
+        """Blocking: "Open a terminal here" in a Finder tab: the folder, or the folder of the file,
+        anywhere on the disk."""
+        p = finder.absolute(path)
+        folder = p if p.is_dir() else p.parent
+        if not folder.is_dir():
+            raise NotADirectoryError(f"no such folder: {folder}")
+        return str(folder)
+
+    def _restore_shells(self, task, msg: dict, cols: int) -> None:
+        """The terminal tabs of the task's last run, as fresh shells, once per run of the app:
+        at its first select, or when its tabs show while nothing is selected (`idle`)."""
+        if task.id in self.restored:
+            return
+        self.restored.add(task.id)
+        for _ in range(len(task.terminal_tabs) - len(self._shells_of(task.id))):
+            self._new_shell(task, int(msg.get("shellRows") or 12), int(msg.get("shellCols") or cols))
 
     def _start_copied_shells(self, task, msg: dict, cols: int) -> None:
         """A new or forked task copied the terminal tabs of another task: fresh shells, now."""
@@ -427,7 +495,22 @@ class Core:
             self._new_shell(task, int(msg.get("shellRows") or 12), int(msg.get("shellCols") or cols))
 
     def _project_of(self, tid: str) -> str:
+        """The project folder of a task, or of `project:<path>`: 2a and the file tabs of a project
+        picked while it has no open task (the front end's `wsId`). Only a registered project."""
+        if tid.startswith(PROJECT_WS):
+            path = tid[len(PROJECT_WS) :]
+            if path not in {p["path"] for p in projects.load()["projects"]}:
+                raise actions.NotFound(f"no project {path}")
+            return path
         return actions.load(tid).project
+
+    def _save_panel(self, folder: str, name: str) -> str | None:
+        """Blocking: macOS's save panel, modal, starting in `folder`. It asks itself before it
+        replaces a file. The chosen path, or None."""
+        r = self.window.create_file_dialog(SAVE_DIALOG, directory=folder, save_filename=name)
+        if isinstance(r, (list, tuple)):
+            r = r[0] if r else None
+        return str(r) if r else None
 
     def viewable(self, tid: str, rel: str) -> tuple[Path, str]:
         """An image or a PDF of the task's project, for `/file/...` (server.py)."""
@@ -481,6 +564,16 @@ class Core:
             await run(files.open_external, p)
             log.info("opened %s with the default app", msg["path"])
             return None
+        if cmd == "fs.saveas":  # an untitled tab (Cmd+N F): the save panel of macOS; None if cancelled
+            if self.window is None:
+                raise ValueError("Saving a new file works only in the Brain Fry window, not with --browser.")
+            project = await run(self._project_of, tid)
+            chosen = await run(self._save_panel, project, str(msg.get("name") or "Untitled"))
+            if not chosen:
+                return None
+            rel = await run(files.relative_in, project, chosen)
+            log.info("new file %s in %s", rel, Path(project).name)
+            return {"path": rel}
         if cmd == "fs.versions":
             return await run(files.versions, await run(self._project_of, tid), list(msg.get("paths") or []))
         if cmd == "fs.link":  # Cmd+click on a file link in a terminal: the target as it was written
@@ -508,6 +601,37 @@ class Core:
             text = await run(files.path_text, await run(self._project_of, tid), msg["path"], bool(msg.get("relative")))
             await run(files.copy_to_clipboard, text)
             return text
+        # ---- Finder tabs of column 3 (finder.py): absolute paths, anywhere on the disk
+        if cmd == "finder.list":
+            return await run(finder.list_folder, str(msg.get("path") or ""))
+        if cmd == "finder.info":  # the preview column; `thumb` is slower and comes on its own
+            return await run(finder.info, str(msg.get("path") or ""))
+        if cmd == "finder.thumb":
+            return await run(finder.thumbnail, str(msg.get("path") or ""))
+        if cmd == "finder.open":  # with the default app of macOS (a folder: in Finder)
+            p = await run(finder.absolute, str(msg.get("path") or ""))
+            await run(files.open_external, p)
+            log.info("opened %s with the default app (Finder tab)", p.name)
+            return None
+        if cmd == "finder.rename":
+            new = await run(finder.rename, str(msg.get("path") or ""), str(msg.get("name") or ""))
+            log.info("renamed %s to %s (Finder tab)", msg.get("path"), Path(new).name)
+            return new
+        if cmd == "finder.trash":
+            await run(finder.trash, str(msg.get("path") or ""))
+            log.info("moved %s to the Trash (Finder tab)", msg.get("path"))
+            return None
+        if cmd == "finder.paste":
+            cut = bool(msg.get("cut"))
+            pairs = await run(finder.paste, list(msg.get("paths") or []), str(msg.get("dir") or ""), cut)
+            log.info("%s %s (Finder tab)", "moved" if cut else "copied", ", ".join(f"{a} -> {b}" for a, b in pairs) or "nothing")
+            return pairs
+        if cmd == "finder.copypath":
+            project = await run(self._project_of, tid) if tid else None
+            return await run(finder.copy_path, str(msg.get("path") or ""), project, bool(msg.get("relative")))
+        if cmd == "finder.tabs.set":  # the Finder tabs of a task: [{root, path}], restored when it is selected
+            await run(actions.set_finder_tabs, tid, list(msg.get("tabs") or []))
+            return None
         if cmd == "thread.get":  # one thread in full, for its tab in 3a
             task = await run(actions.load, tid)
             for th in task.threads:
@@ -556,14 +680,35 @@ class Core:
                 task = await run(actions.mark_opened, tid)
                 if self._live_gen(tid) is None and not task.live:
                     self._start_pty(tid, self._resume_argv(task), task.cwd, rows, cols)
-                if tid not in self.restored:  # terminal tabs from the last run: fresh shells
-                    self.restored.add(tid)
-                    for _ in range(len(task.terminal_tabs) - len(self._shells_of(tid))):
-                        self._new_shell(task, int(msg.get("shellRows") or 12), int(msg.get("shellCols") or cols))
-        elif cmd == "shell.new":
+                self._restore_shells(task, msg, cols)
+        elif cmd == "idle":  # nothing needs me: 4a shows a photo, column 3 the tabs of the task that I opened last
+            self._restore_shells(await run(actions.load, tid), msg, cols)  # no session, not selected, not `opened`
+        elif cmd == "shell.new":  # path: "Open a terminal here" in 2a; folder: in a Finder tab; else the task's cwd
             task = await run(actions.load, tid)
+            cwd = None if msg.get("path") is None else await run(self._shell_folder, task.project, str(msg["path"]))
+            if msg.get("folder") is not None:
+                cwd = await run(self._finder_folder, str(msg["folder"]))
+            line = None
+            if msg.get("python") is not None:  # the play button of a Python file: run it from the project's root
+                line = await run(self._python_line, task.project, str(msg["python"]))
+                cwd = await run(self._shell_folder, task.project, "")
             self.restored.add(tid)
-            s = self._new_shell(task, rows, cols)
+            s = self._new_shell(task, rows, cols, cwd)
+            if line:
+                log.info("shell %s: runs %s", s.key, line)
+                self._type_when_ready(s, line)
+            await run(self._save_terminal_tabs, tid)
+            self.request_broadcast()
+            return {"key": s.key}
+        elif cmd == "shell.copy":  # Cmd+N O: a new shell in the folder where the shell `from` is now
+            task = await run(actions.load, tid)
+            src = self.ptys.get(str(msg.get("from")))
+            if not src or src.kind != "shell" or not src.alive:
+                raise ValueError("That terminal has ended.")
+            if (await run(actions.load, src.task)).project != task.project:
+                raise ValueError("That terminal belongs to another project.")
+            self.restored.add(tid)
+            s = self._new_shell(task, rows, cols, src.folder)
             await run(self._save_terminal_tabs, tid)
             self.request_broadcast()
             return {"key": s.key}
@@ -596,14 +741,6 @@ class Core:
             await run(actions.archive, tid)
         elif cmd == "pin":  # or unpin a pinned task
             await run(actions.pin, tid)
-        elif cmd == "adopt":  # a session of the bottom region of the board becomes a task
-            sid = str(msg.get("session"))
-            task = await run(sessions.adopt, sid, str(msg.get("prio") or "working"), (self.running or {}).get(sid))
-            self.others = [o for o in self.others if o["id"] != sid]
-            if any(th.kind == "pending" for th in task.threads):
-                self._enqueue_digest([task.id])
-            self.request_broadcast()
-            return {"id": task.id}
         elif cmd == "rename":
             await run(actions.rename, tid, str(msg.get("title", "")))
         elif cmd == "prio":
@@ -622,7 +759,7 @@ def _describe(msg: dict) -> str:
             continue
         if k in ("text", "notes", "message"):  # free text, as a prompt: never logged
             out.append(f"{k}=<{len(str(v))} chars>")
-        elif k in ("id", "session", "from") and isinstance(v, str):
+        elif k in ("id", "from") and isinstance(v, str):
             out.append(f"{k}={short(v)}")
         else:
             out.append(f"{k}={str(v)[:120]}")

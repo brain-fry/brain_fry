@@ -68,8 +68,8 @@ def test_new_task_runs_in_a_pty_and_takes_input(backend, project):
             assert b"GOT hello" in read_pty(pty, b"GOT")
 
         ctl.send(json.dumps({"cmd": "archive", "id": tid}))
-        st = states(ctl, lambda m: tid in m["archive"])
-        assert st["tasks"][tid]["status"] == "done" and st["tasks"][tid]["pty"]  # archive keeps the process
+        st = states(ctl, lambda m: m["tasks"][tid]["status"] == "done")
+        assert st["tasks"][tid]["pty"]  # archive keeps the process
 
 
 def test_new_task_with_the_tabs_of_the_previous_task(backend, project):
@@ -112,6 +112,30 @@ def test_select_resumes_a_task_without_live_session(backend, project):
         # the dropdown picked a project without a task to land on: nothing selected
         ctl.send(json.dumps({"cmd": "select", "id": None}))
         states(ctl, lambda m: m["selected"] is None)
+
+
+def test_idle_starts_the_terminal_tabs_of_the_task_without_its_session(backend, project, tmp_path, monkeypatch):
+    # nothing needs me: column 3 shows the tabs of the task that I opened last, 4a a photo
+    core, port = backend
+    fake_shell = tmp_path / "fake_shell"
+    fake_shell.write_text("#!/bin/bash\nsleep 30\n")
+    fake_shell.chmod(0o755)
+    monkeypatch.setenv("SHELL", str(fake_shell))
+    t = actions.new_task(project)
+    actions.set_live(t.id, False)
+    actions._update(t.id, terminal_tabs=["zsh", "zsh"])
+    opened = actions.load(t.id).opened
+    with connect(f"ws://127.0.0.1:{port}/ctl") as ctl:
+        ctl.recv(timeout=5)
+        ctl.send(json.dumps({"cmd": "idle", "id": t.id, "shellRows": 10, "shellCols": 60}))
+        st = states(ctl, lambda m: len(m["tasks"][t.id]["shells"]) == 2)
+        assert st["selected"] is None and not st["tasks"][t.id]["pty"]  # no session started
+        assert actions.load(t.id).opened == opened
+        # once per run: a second idle or the select that follows starts no other shell
+        ctl.send(json.dumps({"cmd": "idle", "id": t.id}))
+        ctl.send(json.dumps({"cmd": "select", "id": t.id, "rows": 24, "cols": 80}))
+        st = states(ctl, lambda m: m["tasks"][t.id]["pty"])
+        assert len(st["tasks"][t.id]["shells"]) == 2
 
 
 def test_plan_puts_a_card_on_the_board_without_a_session(backend, project):
@@ -182,6 +206,60 @@ def test_file_commands(backend, project):
         assert actions.load(t.id).open_files == ["notes.md"]
 
 
+def test_file_commands_for_a_project_without_a_task(backend, project, tmp_path):
+    """A project picked while it has no open task: 2a and the file tabs use `project:<path>`."""
+    import urllib.error
+    import urllib.parse
+    import urllib.request
+
+    core, port = backend
+    (project / "notes.md").write_text("hello\n")
+    (project / "plot.png").write_bytes(b"\x89PNG fake")
+    pid = f"project:{project}"
+    with connect(f"ws://127.0.0.1:{port}/ctl") as ctl:
+        ctl.recv(timeout=5)
+        assert {"name": "notes.md", "path": "notes.md", "dir": False} in request(ctl, 1, cmd="fs.list", id=pid)["data"]
+        r = request(ctl, 2, cmd="fs.read", id=pid, path="notes.md")["data"]
+        request(ctl, 3, cmd="fs.write", id=pid, path="notes.md", text="bye\n", base=r["version"])
+        assert (project / "notes.md").read_text() == "bye\n"
+        bad = request(ctl, 4, cmd="fs.read", id=pid, path="../../etc/passwd")
+        assert not bad["ok"] and "PermissionError" in bad["error"]
+        (tmp_path / "elsewhere").mkdir()
+        bad = request(ctl, 5, cmd="fs.list", id=f"project:{tmp_path / 'elsewhere'}")  # not a registered project
+        assert not bad["ok"] and "NotFound" in bad["error"]
+    base = f"http://127.0.0.1:{port}/file/{urllib.parse.quote(pid, safe='')}"
+    assert urllib.request.urlopen(f"{base}/plot.png?v=1").read() == b"\x89PNG fake"
+    with pytest.raises(urllib.error.HTTPError) as e:
+        urllib.request.urlopen(f"http://127.0.0.1:{port}/file/{urllib.parse.quote(f'project:{tmp_path}', safe='')}/a.png")
+    assert e.value.code == 404
+
+
+def test_save_as_asks_the_save_panel_for_a_path_in_the_project(backend, project):
+    """An untitled tab (Cmd+N F): fs.saveas shows the save panel, the front end then writes."""
+    core, port = backend
+    t = actions.new_task(project)
+    asked = []
+
+    class Window:  # pywebview's, in the app
+        answer = str(project / "docs" / "new.md")
+
+        def create_file_dialog(self, kind, directory, save_filename):
+            asked.append((kind, directory, save_filename))
+            return self.answer
+
+    with connect(f"ws://127.0.0.1:{port}/ctl") as ctl:
+        ctl.recv(timeout=5)
+        assert not request(ctl, 1, cmd="fs.saveas", id=t.id, name="Untitled-1")["ok"]  # no window: --browser
+        core.window = Window()
+        assert request(ctl, 2, cmd="fs.saveas", id=t.id, name="Untitled-1")["data"] == {"path": "docs/new.md"}
+        assert asked == [(30, str(project), "Untitled-1")]
+        Window.answer = None  # cancelled
+        assert request(ctl, 3, cmd="fs.saveas", id=t.id, name="Untitled-1")["data"] is None
+        Window.answer = "/tmp/outside.md"
+        bad = request(ctl, 4, cmd="fs.saveas", id=t.id, name="Untitled-1")
+        assert not bad["ok"] and "outside the project" in bad["error"]
+
+
 def test_commands_of_the_explorer_menu(backend, project, monkeypatch):
     """Rename, Trash, Paste (also from a task of another project), Copy path."""
     core, port = backend
@@ -213,8 +291,6 @@ def test_commands_of_the_explorer_menu(backend, project, monkeypatch):
 
 
 def test_thread_get(backend, project):
-    from brain_fry.taskfile import Thread
-
     core, port = backend
     t = actions.new_task(project)
     actions._update(t.id, threads=[Thread(n=1, ts="x", kind="answer", prompt="do it", reply="Done.\nA or B?", question="A or B?")])
@@ -244,6 +320,64 @@ def test_terminal_tabs(backend, project, tmp_path, monkeypatch):
         states(ctl, lambda m: not m["tasks"][t.id]["shells"])
         time.sleep(0.3)
         assert actions.load(t.id).terminal_tabs == []
+
+
+def test_terminal_here(backend, project, tmp_path, monkeypatch):
+    """"Open a terminal here" in 2a: the shell starts in the folder, or in the folder of the file;
+    never outside the project."""
+    core, port = backend
+    fake_shell = tmp_path / "fake_shell"
+    fake_shell.write_text("#!/bin/bash\necho \"SHELL in $(pwd -P)\"\nsleep 30\n")
+    fake_shell.chmod(0o755)
+    monkeypatch.setenv("SHELL", str(fake_shell))
+    (project / "sub" / "deep").mkdir(parents=True)
+    (project / "sub" / "a.py").write_text("x = 1\n")
+    t = actions.new_task(project)
+    with connect(f"ws://127.0.0.1:{port}/ctl") as ctl:
+        ctl.recv(timeout=5)
+        for i, (path, folder) in enumerate([("sub/deep", project / "sub" / "deep"), ("sub/a.py", project / "sub"), ("", project)]):
+            key = request(ctl, 10 + i, cmd="shell.new", id=t.id, rows=10, cols=80, path=path)["data"]["key"]
+            with connect(f"ws://127.0.0.1:{port}/pty/{key}") as pty:
+                assert f"SHELL in {folder.resolve()}\r".encode() in read_pty(pty, b"\r")
+        assert actions.load(t.id).terminal_tabs == ["fake_shell"] * 3
+        assert not request(ctl, 20, cmd="shell.new", id=t.id, rows=10, cols=80, path="../")["ok"]
+        assert not request(ctl, 21, cmd="shell.new", id=t.id, rows=10, cols=80, path="nope")["ok"]
+        assert len(actions.load(t.id).terminal_tabs) == 3
+
+
+def test_run_python_file(backend, project, tmp_path, monkeypatch):
+    """The play button of a Python file: a new shell at the project's root, which gets
+    `python <file>` typed once its output is quiet (a shell that does not tell its prompts);
+    with the project's .venv when it has one. Only a .py file of the project."""
+    core, port = backend
+    fake_shell = tmp_path / "fake_shell"
+    fake_shell.write_text('#!/bin/bash\necho "SHELL in $(pwd -P)"\nread -r line\necho "GOT $line"\nsleep 30\n')
+    fake_shell.chmod(0o755)
+    monkeypatch.setenv("SHELL", str(fake_shell))
+    (project / "sub").mkdir()
+    for name in ("a.py", "my script.py", "notes.txt"):
+        (project / "sub" / name).write_text("x = 1\n")
+    t = actions.new_task(project)
+
+    def ran(req, path):
+        key = request(ctl, req, cmd="shell.new", id=t.id, rows=10, cols=80, python=path)["data"]["key"]
+        with connect(f"ws://127.0.0.1:{port}/pty/{key}") as pty:
+            out = read_pty(pty, b"GOT ")
+            out += read_pty(pty, b"\r", 2) if b"\r" not in out.split(b"GOT ", 1)[-1] else b""
+        assert f"SHELL in {project.resolve()}\r".encode() in out
+        return out.split(b"GOT ", 1)[1].split(b"\r", 1)[0].decode()
+
+    with connect(f"ws://127.0.0.1:{port}/ctl") as ctl:
+        ctl.recv(timeout=5)
+        assert ran(10, "sub/a.py") == "python sub/a.py"
+        assert ran(11, "sub/my script.py") == "python 'sub/my script.py'"
+        (project / ".venv" / "bin").mkdir(parents=True)
+        (project / ".venv" / "bin" / "python").write_text("")
+        assert ran(12, "sub/a.py") == ".venv/bin/python sub/a.py"
+        assert actions.load(t.id).terminal_tabs == ["fake_shell"] * 3
+        for req, path in [(20, "sub/notes.txt"), (21, "../x.py"), (22, "sub/nope.py"), (23, "sub")]:
+            assert not request(ctl, req, cmd="shell.new", id=t.id, rows=10, cols=80, python=path)["ok"]
+        assert len(actions.load(t.id).terminal_tabs) == 3
 
 
 def test_unknown_command_reports_an_error(backend):
@@ -322,33 +456,6 @@ def test_web_pages_of_other_sites_are_refused(backend):
     assert urllib.request.urlopen(f"http://localhost:{port}/").status == 200
 
 
-SID = "11111111-2222-3333-4444-555555555555"
-
-
-def _transcript(home, cwd):
-    d = home / ".claude" / "projects" / "-slug"
-    d.mkdir(parents=True, exist_ok=True)
-    entries = [
-        {"type": "user", "origin": {"kind": "human"}, "cwd": str(cwd), "timestamp": "2026-11-09T08:00:00Z",
-         "message": {"role": "user", "content": "explore the data"}},
-        {"type": "assistant", "message": {"role": "assistant", "content": [{"type": "tool_use", "name": "Bash", "input": {}}]}},
-    ]  # cut off after a tool call: nothing to digest
-    (d / f"{SID}.jsonl").write_text("".join(json.dumps(e) + "\n" for e in entries))
-
-
-def test_adopt_a_session_from_the_bottom_region(backend, project, home):
-    core, port = backend
-    _transcript(home, project)
-    with connect(f"ws://127.0.0.1:{port}/ctl") as ctl:
-        ctl.recv(timeout=5)
-        st = states(ctl, lambda m: m["others"], timeout=8)
-        assert st["others"][0]["id"] == SID and st["others"][0]["title"] == "explore the data"
-        assert request(ctl, 1, cmd="adopt", session=SID, prio="planning")["data"] == {"id": SID}
-        st = states(ctl, lambda m: SID in m["tasks"] and not m["others"])
-        assert (st["tasks"][SID]["prio"], st["tasks"][SID]["live"]) == ("planning", False)
-        assert not request(ctl, 2, cmd="adopt", session=SID)["ok"]  # already a task
-
-
 def test_outside_tasks_follow_claude_codes_process_files(backend, project, home):
     import os
 
@@ -357,10 +464,10 @@ def test_outside_tasks_follow_claude_codes_process_files(backend, project, home)
     d = home / ".claude" / "sessions"
     d.mkdir(parents=True)
     (d / "1.json").write_text(json.dumps({"pid": os.getpid(), "sessionId": "another", "entrypoint": "cli"}))
-    core._refresh_others()
+    core._refresh_outside()
     assert actions.load(t.id).live is False  # Claude Code runs no process for it
     (d / "2.json").write_text(json.dumps({"pid": os.getpid(), "sessionId": t.id, "entrypoint": "claude-vscode", "status": "idle"}))
-    core._refresh_others()
+    core._refresh_outside()
     assert actions.load(t.id).live is True
     task = core.snapshot()["tasks"][t.id]
     assert task["outside"] and task["elsewhere"]["where"] == "VS Code"
@@ -385,13 +492,13 @@ def test_a_blocked_task_whose_dialog_closed_leaves_the_inbox(backend, project, h
     with connect(f"ws://127.0.0.1:{port}/ctl") as ctl:
         ctl.recv(timeout=5)
         process("waiting", now - 16)  # the dialog opened 6 s before the Notification
-        core._refresh_others()
+        core._refresh_outside()
         assert actions.load(t.id).status == "blocked"
         process("busy", now - 20)  # a status from before this block
-        core._refresh_others()
+        core._refresh_outside()
         assert actions.load(t.id).inbox
         process("busy", now)  # I granted the permission
-        core._refresh_others()
+        core._refresh_outside()
         m = states(ctl, lambda m: m["type"] == "prompted")
         assert m == {"type": "prompted", "id": t.id, "slash": False, "why": "dialog closed"}
         got = actions.load(t.id)
@@ -420,7 +527,7 @@ def test_the_picker_gets_a_fresh_project_list(backend, project, home):
 
 
 def test_a_project_removed_from_the_lists_comes_back_with_bf_init(backend, project, home):
-    from brain_fry import events, projects
+    from brain_fry import projects
 
     core, port = backend
     with connect(f"ws://127.0.0.1:{port}/ctl") as ctl:

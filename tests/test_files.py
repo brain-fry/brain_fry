@@ -181,3 +181,10 @@ def test_link_target_refuses_what_3a_cannot_open(repo):
         files.link_target(repo, str(repo), "src")
     with pytest.raises(ValueError):
         files.link_target(repo, str(repo), "#L3")
+
+
+def test_relative_in_takes_the_save_panels_choice_inside_the_project_only(repo):
+    assert files.relative_in(repo, repo / "src" / "new.md") == "src/new.md"  # need not exist yet
+    for outside in (repo.parent / "elsewhere.md", repo):
+        with pytest.raises(PermissionError):
+            files.relative_in(repo, outside)

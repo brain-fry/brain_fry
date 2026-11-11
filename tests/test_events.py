@@ -1,7 +1,7 @@
 import json
 from itertools import count
 
-from brain_fry import actions, events, paths, taskfile
+from brain_fry import actions, events, paths, taskfile, views
 
 _seq = count()
 
@@ -81,14 +81,6 @@ def test_session_end_alone_creates_no_task(project):
     put(project, "SessionEnd", sid="ghost", reason="exit")
     assert events.consume(project) == []
     assert not paths.task_path(project, "ghost").exists()
-
-
-def test_session_end_while_working_becomes_waiting(project):
-    put(project, "UserPromptSubmit", prompt="a")
-    put(project, "SessionEnd", reason="exit")
-    events.consume(project)
-    t = task(project)
-    assert (t.status, t.live, t.inbox) == ("waiting", False, False)
 
 
 def test_idle_notification_is_not_blocked(project):
@@ -264,6 +256,20 @@ def test_close_mark_before_a_trailer(project):
     assert task(project).status == "done"
 
 
+def test_x_closes_like_close(project):
+    put(project, "UserPromptSubmit", prompt="X")
+    put(project, "Stop", last_assistant_message="Notes written.\nclosed :-)")
+    events.consume(project)
+    assert task(project).status == "done"
+
+
+def test_x_inside_a_prompt_does_not_close(project):
+    put(project, "UserPromptSubmit", prompt="x axis")
+    put(project, "Stop", last_assistant_message="Done.\nclosed :-)")
+    events.consume(project)
+    assert task(project).status == "waiting"
+
+
 def test_close_without_the_mark_goes_to_the_inbox(project):
     put(project, "UserPromptSubmit", prompt="close")
     put(project, "Stop", last_assistant_message="Before I close: keep the spike folder?")
@@ -317,13 +323,43 @@ def test_stop_after_a_block_while_an_agent_runs_leaves_the_inbox(project):
     assert (t.status, t.inbox, t.notification) == ("working", False, None)
 
 
-def test_background_shell_or_monitor_does_not_hold_the_inbox(project):
-    """A dev server in a background shell may never end: the reply goes to the inbox."""
+def test_background_shell_or_monitor_holds_the_reply_for_the_digest(project):
+    """A dev server, or a loop that waits for another session: the digest tells (test_digest.py)."""
     put(project, "UserPromptSubmit", prompt="start the server")
     put(project, "Stop", last_assistant_message="It runs on :8000.",
         background_tasks=[_bg("shell", command="npm run dev"), _bg("monitor")])  # fmt: skip
     events.consume(project)
-    assert (task(project).status, task(project).inbox) == ("waiting", True)
+    t = task(project)
+    assert (t.status, t.inbox, t.unread, t.held, t.threads[0].kind) == ("working", False, False, True, "pending")
+
+
+def test_next_event_ends_the_hold(project):
+    put(project, "UserPromptSubmit", prompt="wait")
+    put(project, "Stop", last_assistant_message="I'll wait.", background_tasks=[_bg("shell")])
+    put(project, "UserPromptSubmit", prompt="<task-notification>\n...")  # the shell ended: the next turn
+    events.consume(project)
+    assert (task(project).held, task(project).status) == (False, "working")
+    put(project, "Stop", last_assistant_message="Done.", background_tasks=[])
+    events.consume(project)
+    t = task(project)
+    assert (t.held, t.status, t.inbox) == (False, "waiting", True)
+
+
+def test_session_end_during_a_hold_goes_to_the_inbox(project):
+    """The shell died with the session: nothing will wake the agent."""
+    put(project, "UserPromptSubmit", prompt="wait")
+    put(project, "Stop", last_assistant_message="I'll wait.", background_tasks=[_bg("shell")])
+    put(project, "SessionEnd", reason="other")
+    events.consume(project)
+    t = task(project)
+    assert (t.held, t.status, t.inbox, t.unread, t.live) == (False, "waiting", True, True, False)
+
+
+def test_agents_and_shells_together_wait_for_the_agents(project):
+    put(project, "UserPromptSubmit", prompt="a")
+    put(project, "Stop", last_assistant_message="Waiting.", background_tasks=[_bg(), _bg("shell")])
+    events.consume(project)
+    assert (task(project).status, task(project).inbox, task(project).held) == ("working", False, False)
 
 
 def test_finished_or_odd_background_entries_do_not_hold_the_inbox(project):
@@ -338,3 +374,66 @@ def test_close_while_an_agent_runs_still_archives(project):
     put(project, "Stop", last_assistant_message="Notes written.\nclosed :-)", background_tasks=[_bg()])
     events.consume(project)
     assert task(project).status == "done"
+
+
+def test_session_end_mid_turn_goes_to_the_inbox(project):
+    """A restart of the app kills the turn in progress (2 of 44 sessions on 2026-11-10).
+    The task comes back in the inbox, to be resumed with "Continue"."""
+    put(project, "UserPromptSubmit", prompt="fix the bug")
+    put(project, "SessionEnd", reason="other")
+    events.consume(project)
+    t = task(project)
+    assert (t.status, t.live, t.inbox, t.unread) == ("waiting", False, True, True)
+    assert t.threads[0].kind == "interrupted"
+    assert views.inbox_line(t) == "interrupted: fix the bug"
+
+    put(project, "UserPromptSubmit", prompt="continue")  # resumed
+    events.consume(project)
+    t = task(project)
+    assert (t.status, t.inbox) == ("working", False)
+    assert [th.kind for th in t.threads] == ["interrupted", "working"]
+
+
+def test_session_end_while_blocked_goes_to_the_inbox(project):
+    put(project, "UserPromptSubmit", prompt="a")
+    put(project, "Notification", notification_type="permission_prompt", message="needs Bash")
+    put(project, "SessionEnd", reason="other")
+    events.consume(project)
+    t = task(project)
+    assert (t.status, t.inbox, t.notification, t.threads[0].kind) == ("waiting", True, None, "interrupted")
+
+
+def test_session_end_while_agents_run_goes_to_the_inbox(project):
+    """The agents died with the session: their results will never start a turn."""
+    put(project, "UserPromptSubmit", prompt="find photos")
+    put(project, "Stop", last_assistant_message="I'll wait for the photos.", background_tasks=[_bg()])
+    put(project, "SessionEnd", reason="other")
+    events.consume(project)
+    t = task(project)
+    assert (t.status, t.inbox, t.unread) == ("waiting", True, True)
+    assert t.threads[0].kind == "pending"  # its reply is kept and digested
+    assert views.inbox_line(t) == "I'll wait for the photos."
+
+
+def test_session_end_after_the_app_marked_it_ended(project):
+    """At quit, the app ends the task (set_live) before it reads the hook's SessionEnd,
+    which it applies at the next start. The event then changes nothing."""
+    put(project, "UserPromptSubmit", prompt="a")
+    events.consume(project)
+    actions.set_live(task(project).id, False)
+    actions.mark_read(task(project).id)  # I looked at it after the restart
+    put(project, "SessionEnd", reason="other")
+    events.consume(project)
+    t = task(project)
+    assert (t.status, t.live, t.inbox, t.unread, t.threads[0].kind) == ("waiting", False, True, False, "interrupted")
+
+
+def test_session_end_when_idle_stays_out_of_the_inbox(project):
+    put(project, "UserPromptSubmit", prompt="a")
+    put(project, "Stop", last_assistant_message="done")
+    events.consume(project)
+    actions._update(task(project).id, inbox=False, unread=False)  # as if read and set aside
+    put(project, "SessionEnd", reason="other")
+    events.consume(project)
+    t = task(project)
+    assert (t.status, t.live, t.inbox, t.unread) == ("waiting", False, False, False)

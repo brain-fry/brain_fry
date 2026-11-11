@@ -15,14 +15,17 @@ import time
 from importlib import resources
 from pathlib import Path
 
-from . import paths, taskfile
+from . import actions, paths, taskfile
 from .taskfile import Task
 from .logs import short
 from .util import child_env, claude_bin
 
 log = logging.getLogger(__name__)
 
-KINDS = ["review", "answer", "rule", "FYI", "blocked"]
+KINDS = ["review", "answer", "rule", "FYI", "wait", "blocked"]
+WAIT = ("wait: Claude waits for something other than the owner (a background command, another agent or "
+        "session, a timer) and will go on by itself when it comes; nothing is needed from the owner now. "
+        "Use it rather than FYI when the reply says that Claude will go on by itself.")  # fmt: skip
 SCHEMA = {
     "type": "object",
     "properties": {
@@ -36,7 +39,8 @@ SCHEMA = {
                 "type": "object",
                 "properties": {
                     "n": {"type": "integer"},
-                    "kind": {"type": "string", "enum": KINDS},
+                    # described here too, so that an inbox_prompt.md older than `wait` still gets it
+                    "kind": {"type": "string", "enum": KINDS, "description": "See the instructions. " + WAIT},
                     "digest": {"type": "string"},
                     "question": {"type": ["string", "null"]},
                 },
@@ -159,6 +163,9 @@ def apply_result(task: Task, result: dict, sent: list[int]) -> None:
             t.kind = r.get("kind") if r.get("kind") in KINDS else "FYI"
             t.digest = (r.get("digest") or "").strip()
             t.question = (r.get("question") or "").strip() or None
+    last = task.threads[-1] if task.threads else None
+    if task.held and last and last.n in sent:  # the reply of a held Stop: inbox or not
+        actions.settle_hold(task, waits=last.kind == "wait")
 
 
 def short_title_of(result: dict, task: Task) -> str:
@@ -193,15 +200,31 @@ def digest_task(task: Task, call=call_sonnet) -> Task:
         result = call(prompt)
     except DigestError as e:
         log.warning("digest %s failed after %.1f s: %s", short(task.id), time.monotonic() - t0, e)
+        _release(task)
         raise
     with taskfile.LOCK:
         fresh = taskfile.load(paths.task_path(Path(task.project), task.id))
+        held = fresh.held
         apply_result(fresh, result, sent)
         taskfile.save(fresh)
     kinds = {t.n: t.kind for t in fresh.threads if t.n in sent}
     log.info("digest %s done in %.1f s: kinds %s, title %r, short title %r", short(task.id), time.monotonic() - t0,
              kinds, fresh.display_title[:50], fresh.short_title[:40])  # fmt: skip
+    if held and not fresh.held:
+        log.info("task %s: held reply settled: kind %s, inbox %s, status %s", short(task.id),
+                 fresh.threads[-1].kind, fresh.inbox, fresh.status)  # fmt: skip
     return fresh
+
+
+def _release(task: Task) -> None:
+    """The digest failed: a held reply goes to the inbox all the same (it must never wait
+    for a digest that does not come)."""
+    with taskfile.LOCK:
+        fresh = taskfile.load(paths.task_path(Path(task.project), task.id))
+        if fresh.held:
+            actions.settle_hold(fresh, waits=False)
+            taskfile.save(fresh)
+            log.info("task %s: the digest failed: the held reply goes to the inbox", short(task.id))
 
 
 def digest_project(project: Path, call=call_sonnet) -> tuple[list[str], list[str]]:

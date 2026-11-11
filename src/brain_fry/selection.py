@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import json
 import os
-import time
 from pathlib import Path
 
 from . import files, paths
@@ -31,8 +30,7 @@ def write(task, rel: str, first: int, last: int, text: str, total: int, dirty: b
     cwd = Path(task.cwd or task.project).resolve()
     shown = str(p.relative_to(cwd)) if cwd in p.parents else str(p)
     data = {"session_id": task.id, "pid": os.getpid(), "path": shown, "from": first, "to": last,
-            "text": text[:MAX_CHARS], "cut": max(total, len(text)) > MAX_CHARS, "dirty": dirty,
-            "ts": time.time()}  # fmt: skip
+            "text": text[:MAX_CHARS], "cut": max(total, len(text)) > MAX_CHARS, "dirty": dirty}  # fmt: skip
     paths.bf_home().mkdir(parents=True, exist_ok=True)
     write_atomic(selection_file(), json.dumps(data))
     return data

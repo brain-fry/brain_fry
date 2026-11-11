@@ -60,11 +60,11 @@ def _resolve(base: Path, path: str) -> Path:
     return Path(path) if path.startswith("/") else base / path
 
 
-def read_cookies(profile: Path | None = None) -> tuple[list[dict], str]:
+def read_cookies() -> tuple[list[dict], str]:
     """The cookies as rows for app/browser.py's cookie_props, and the profile's folder name.
     Reads a copy: Firefox locks its database while it runs. The copy and its WAL (the latest
     writes) go to a private temp folder, deleted at once."""
-    profile = profile or profile_dir()
+    profile = profile_dir()
     if profile is None:
         raise FileNotFoundError(f"no Firefox profile with cookies in {base_dir()}")
     with tempfile.TemporaryDirectory(prefix="bf-firefox-") as tmp:

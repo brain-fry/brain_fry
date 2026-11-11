@@ -11,7 +11,6 @@
 #rv-sep { display: none; width: 4px; flex: none; background: var(--line); }
 #dev.review.rv-agent > #rv-sep { display: block; }
 
-#review .keys { margin-top: auto; }
 #review :focus { outline: none; }
 
 /* 1: worktrees and branches */
@@ -144,6 +143,5 @@
 #rv-dialog textarea { margin-top: 10px; font: 13px/1.45 ui-monospace, Menlo, monospace; resize: vertical; }
 .rv-err { margin: 10px 14px 0; padding: 6px 8px; max-height: 220px; overflow: auto; font: 12px/1.4 ui-monospace, Menlo, monospace;
   color: #ffb3b5; background: #2a1517; border: 1px solid #5c2a2d; border-radius: 5px; white-space: pre-wrap; }
-.rv-err[hidden] { display: none; }
 .rv-dkeys { display: flex; align-items: center; gap: 8px; padding: 10px 14px 12px; color: var(--dim); font-size: 11px; }
 .rv-dkeys button:first-of-type { margin-left: auto; }

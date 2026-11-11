@@ -18,6 +18,10 @@ Return:
     - answer: Claude asks the owner a question, or needs information to go on.
     - rule: Claude needs a decision between options, a tradeoff only the owner can settle.
     - FYI: Claude reports something; nothing is needed from the owner.
+    - wait: Claude waits for something other than the owner (a background command, another
+      agent or session, a timer) and will go on by itself when it comes; nothing is needed
+      from the owner now. Use it rather than FYI when the reply says that Claude will go on
+      by itself.
     - blocked: Claude cannot go on (error, missing access, missing tool).
   - digest: 1 to 3 lines: what Claude did or found in this turn, and what it needs.
   - question: the question that Claude asks the owner, copied verbatim from the reply,

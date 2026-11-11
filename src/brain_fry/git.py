@@ -130,7 +130,6 @@ def worktrees(top: Path) -> list[dict]:
     if cur:
         trees.append(cur)
     for i, t in enumerate(trees):
-        t["main"] = i == 0
         t["name"] = "main" if i == 0 else Path(t["path"]).name
     return [t for t in trees if not t["bare"]]
 
@@ -187,13 +186,12 @@ def status(tree: Path) -> dict:
     if sum(1 for f in st["unstaged"] if f["st"] == "?") > MAX_UNTRACKED:  # by folder (-unormal)
         folded = _parse_status(run(tree, "status", "--porcelain=v2", "-z", "-unormal"))
         st["unstaged"] = [f for f in st["unstaged"] if f["st"] != "?"] + [f for f in folded["unstaged"] if f["st"] == "?"]
-    st["sig"] = hashlib.sha1(out).hexdigest()[:16]
     return st
 
 
 def _parse_status(out: bytes) -> dict:
     staged, unstaged, conflicts = [], [], []
-    branch = {"oid": None, "head": None, "ab": None}
+    branch = {"head": None}
     recs = out.split(b"\0")
     i = 0
     while i < len(recs):
@@ -201,25 +199,19 @@ def _parse_status(out: bytes) -> dict:
         i += 1
         if not r:
             continue
-        if r.startswith("# branch.oid "):
-            oid = r.split(" ", 2)[2]
-            branch["oid"] = None if oid == "(initial)" else oid
-        elif r.startswith("# branch.head "):
+        if r.startswith("# branch.head "):
             branch["head"] = r.split(" ", 2)[2]
-        elif r.startswith("# branch.ab "):
-            a, b = r.split(" ")[2:4]
-            branch["ab"] = [int(a), -int(b)]
         elif r[0] == "1":
-            _, xy, sub, *_rest, path = r.split(" ", 8)
-            _add(staged, unstaged, xy, path, None, sub)
+            _, xy, _sub, *_rest, path = r.split(" ", 8)
+            _add(staged, unstaged, xy, path, None)
         elif r[0] == "2":
-            _, xy, sub, *_rest, path = r.split(" ", 9)
+            _, xy, _sub, *_rest, path = r.split(" ", 9)
             orig = _s(recs[i])
             i += 1
-            _add(staged, unstaged, xy, path, orig, sub)
+            _add(staged, unstaged, xy, path, orig)
         elif r[0] == "u":
-            _, xy, _sub, *_rest, path = r.split(" ", 10)
-            conflicts.append({"path": path, "st": "U", "xy": xy})
+            _, _xy, _sub, *_rest, path = r.split(" ", 10)
+            conflicts.append({"path": path, "st": "U"})
         elif r[0] == "?":
             unstaged.append({"path": r[2:], "st": "?"})
     by_path = lambda f: f["path"]  # noqa: E731
@@ -227,13 +219,12 @@ def _parse_status(out: bytes) -> dict:
             "conflicts": sorted(conflicts, key=by_path), "branch": branch}  # fmt: skip
 
 
-def _add(staged: list, unstaged: list, xy: str, path: str, orig: str | None, sub: str) -> None:
+def _add(staged: list, unstaged: list, xy: str, path: str, orig: str | None) -> None:
     x, y = xy[0], xy[1]
-    submodule = sub.startswith("S")
     if x != ".":
-        staged.append({"path": path, "orig": orig if x in "RC" else None, "st": x, "sub": submodule})
+        staged.append({"path": path, "orig": orig if x in "RC" else None, "st": x})
     if y != ".":
-        unstaged.append({"path": path, "st": y, "sub": submodule})
+        unstaged.append({"path": path, "st": y})
 
 
 _counts: dict[str, tuple[float, int]] = {}
@@ -320,7 +311,7 @@ def log_rows(top: Path, trees: list[dict], cur: dict, all_branches: bool = True,
     wip = {"h": "wip", "p": [cur["head"]] if cur["head"] else [], "a": "", "t": 0, "s": "Uncommitted changes", "refs": []}
     rows = [wip, *rows]
     lanes(rows)
-    return {"rows": rows, "more": more, "count": count}
+    return {"rows": rows, "more": more}
 
 
 def lanes(rows: list[dict]) -> None:
@@ -397,8 +388,8 @@ def commit_info(top: Path, sha: str) -> dict:
     """The message, parents, author and changed files of one commit (against its first parent)."""
     if not SHA.fullmatch(sha or ""):
         raise ValueError(f"not a commit: {sha!r}")
-    out = _s(run(top, "show", "-s", "--format=%H%x00%P%x00%an%x00%ae%x00%at%x00%B", sha))
-    h, p, an, ae, at, body = (out.split("\0") + [""] * 6)[:6]
+    out = _s(run(top, "show", "-s", "--format=%H%x00%P%x00%an%x00%at%x00%B", sha))
+    h, p, an, at, body = (out.split("\0") + [""] * 5)[:5]
     parents = p.split()
     args = ["diff-tree", "-r", "-z", "-M", "--name-status", "--no-commit-id"]
     args += [f"{h}^1", h] if parents else ["--root", h]
@@ -416,7 +407,7 @@ def commit_info(top: Path, sha: str) -> dict:
         else:
             fl.append({"st": code[0], "path": _s(recs[i])})
             i += 1
-    return {"h": h, "parents": parents, "author": an, "email": ae, "t": int(at or 0), "message": body.strip("\n"), "files": fl}
+    return {"h": h, "parents": parents, "author": an, "t": int(at or 0), "message": body.strip("\n"), "files": fl}
 
 
 # ------------------------------------------------------------------ diffs
@@ -476,11 +467,6 @@ def diff(tree: Path, side: str, path: str, orig: str | None = None, sha: str | N
     head = b"".join(header)
     info = {
         "binary": b"Binary files" in head or b"GIT binary patch" in head,
-        "newFile": b"new file mode" in head,
-        "deleted": b"deleted file mode" in head,
-        "rename": b"rename from" in head or b"copy from" in head,
-        "mode": b"old mode" in head,
-        "submodule": b"Subproject commit" in raw,
     }
     whole = any(m in head for m in WHOLE_FILE)
     hunkable = side in ("unstaged", "staged") and not whole and bool(hunks)
@@ -640,8 +626,8 @@ def commit(tree: Path, message: str) -> dict:
 
 
 def state(top: Path, trees: list[dict], cur: dict, tasks: list[dict]) -> dict:
-    """Everything that panels 1 and 2b show, and the signatures that tell the front end when to
-    reload the log (refs) and the diff (status)."""
+    """Everything that panels 1 and 2b show, and the signature that tells the front end when to
+    reload the log (refs)."""
     tree = Path(cur["path"])
     st = status(tree)
     changed_count(cur["path"], st)
@@ -653,19 +639,15 @@ def state(top: Path, trees: list[dict], cur: dict, tasks: list[dict]) -> dict:
                           "tasks": [{"id": x["id"], "status": x["status"], "title": x["title"]} for x in mine]})  # fmt: skip
     return {
         "repo": True,
-        "top": str(top),
         "tree": cur["path"],
         "trees": out_trees,
         "branch": cur["branch"],
-        "head": cur["head"],
-        "ab": st["branch"]["ab"],
         "staged": st["staged"],
         "unstaged": st["unstaged"],
         "conflicts": st["conflicts"],
         "op": operation(tree),
         "branches": branches(top),
         "refsSig": refs_sig(top, trees),
-        "sig": st["sig"],
     }
 
 

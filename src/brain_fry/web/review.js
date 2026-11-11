@@ -309,7 +309,7 @@ function openCommitDialog() {
   el.innerHTML = `<div class="box"><h3>Commit ${n} staged file${n === 1 ? '' : 's'}
       <span class="hint">on ${esc(st.branch || 'a detached HEAD')} · worktree ${esc(t ? t.name : '')} · the repository's hooks run</span></h3>
     <div class="rv-dfiles">${st.staged.map((f) => `<div><span class="st st-${stClass(f.st)}">${esc(f.st)}</span>  ${esc(f.orig ? `${f.orig} --> ${f.path}` : f.path)}</div>`).join('')}</div>
-    <textarea class="plan-notes rv-msg" rows="7" spellcheck="false" placeholder="Message: a subject line, then a blank line and the details">${esc(R.drafts[st.tree] || '')}</textarea>
+    <textarea class="plan-notes" rows="7" spellcheck="false" placeholder="Message: a subject line, then a blank line and the details">${esc(R.drafts[st.tree] || '')}</textarea>
     <pre class="rv-err" hidden></pre>
     <div class="rv-dkeys"><span>Cmd+Enter: commit · Esc: close (the message is kept)</span>
       <button data-rvd="cancel">Cancel</button><button class="primary" data-rvd="commit">Commit</button></div></div>`;
@@ -350,7 +350,6 @@ async function doCommit() {
   try {
     const r = await rvReq('git.commit', { message });
     R.drafts[tree] = '';
-    delete el.dataset.busy;
     closeCommitDialog();
     toast(`Committed ${r.sha}.`);
   } catch (e) {
@@ -503,7 +502,7 @@ function fileRowHtml(f, act) {
   const name = nameOfPath(f.path) + (f.path.endsWith('/') ? '/' : '');
   const dir = f.path.replace(/\/$/, '').split('/').slice(0, -1).join('/');
   const orig = f.orig ? `${f.orig} --> ` : '';
-  const btn = act ? `<button class="act" data-rv-act="${act.cmd}" title="${act.title}">${act.label}</button>` : '';
+  const btn = act ? `<button class="act" data-rv-act title="${act.title}">${act.label}</button>` : '';
   return `<div class="rv-file${sel ? ' sel' : ''}" data-side="${f.side}" data-path="${esc(f.path)}" title="${esc(orig + f.path)}">`
     + `<span class="st st-${stClass(f.st)}">${esc(f.st)}</span><span class="name">${esc(name)}</span><span class="dir">${esc(dir)}</span>${btn}</div>`;
 }
@@ -520,10 +519,10 @@ function drawFiles() {
     + (list.length ? list.map((f) => fileRowHtml(f, act)).join('') : '<div class="rv-empty">None.</div>') + '</div>';
   const hidden = st.staged.length ? '' : 'disabled title="Nothing is staged"';
   setHtml('rv-files', op
-    + (conflicts.length ? sec('Conflicts', conflicts, { cmd: 'stage', label: '+', title: 'Mark resolved (stage it)' }, '') : '')
-    + sec('Staged files', staged, { cmd: 'unstage', label: '−', title: 'Unstage (Space)' },
+    + (conflicts.length ? sec('Conflicts', conflicts, { label: '+', title: 'Mark resolved (stage it)' }, '') : '')
+    + sec('Staged files', staged, { label: '−', title: 'Unstage (Space)' },
       `<button data-rv="unstage-all" ${st.staged.length ? '' : 'disabled'}>Unstage all</button><button class="primary" data-rv="commit" ${hidden} title="Write the message and commit (Cmd+Enter)">Commit</button>`)
-    + sec('Unstaged files', unstaged, { cmd: 'stage', label: '+', title: 'Stage (Space)' },
+    + sec('Unstaged files', unstaged, { label: '+', title: 'Stage (Space)' },
       `<button data-rv="stage-all" ${unstaged.length ? '' : 'disabled'}>Stage all</button>`));
 }
 

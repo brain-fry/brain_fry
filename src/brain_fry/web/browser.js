@@ -4,8 +4,8 @@
 // over the placeholder's rectangle. Native views always paint above this page, so while an
 // HTML dialog covers the panel (the project picker), the view is hidden and a snapshot of it
 // takes its place. See DESIGN_DETAILS.md, "Browser (3a)".
-// Uses S, $, esc, request, send, toast, toggleLayout (app.js, layout.js) and work, renderFiles,
-// renderFileTabs, renderExplorer, activeTab, closeFile (files.js).
+// Uses S, $, request, send, toast (app.js) and work, renderFiles,
+// renderFileTabs, activeTab, closeFile (files.js).
 
 const B = {
   seq: 0,
@@ -31,10 +31,9 @@ function normalizeUrl(text) {
   return SEARCH + encodeURIComponent(s);
 }
 
-function makeWebTab(tid, url, key) {
+function makeWebTab(tid, url, key, pane) {
   const el = document.createElement('div');
   el.className = 'editor web-page';
-  $('#editors').appendChild(el);
   key = key || `b${++B.seq}-${Math.random().toString(36).slice(2, 8)}`;
   const tab = { tid, key, path: `web:${key}`, el, kind: 'web', web: true, url: url || '', title: '', loading: false,
     back: false, forward: false, error: null, dirty: false, diskChanged: false, gone: false, wantFocus: false };
@@ -42,7 +41,7 @@ function makeWebTab(tid, url, key) {
   tab.close = () => forgetWebTab(tab);
   tab.focus = () => focusPage(tab);
   B.tabs.set(key, tab);
-  work(tid).tabs.push(tab);
+  addTab(work(tid), tab, pane || openPane(work(tid))); // grid.js
   return tab;
 }
 
@@ -101,10 +100,11 @@ function updateTools(tab) {
   url.classList.toggle('error', Boolean(tab.error));
 }
 
-async function openWebTab(tid, url = '', { activate = true, lazy = false, key = null, native = false } = {}) {
+// pane: where it opens (Cmd+N B 2); by default the pane that I used last (openPane, grid.js)
+async function openWebTab(tid, url = '', { activate = true, lazy = false, key = null, native = false, pane = null } = {}) {
   if (!tid) { toast('Select a task first: browser tabs belong to a task.'); return null; }
   if (B.unavailable) { toast(B.unavailable); return null; }
-  const tab = makeWebTab(tid, url, key);
+  const tab = makeWebTab(tid, url, key, pane);
   if (!native) {
     try {
       await request('browser.open', { tab: tab.key, id: tid, url: url || 'about:blank', lazy });
@@ -112,21 +112,18 @@ async function openWebTab(tid, url = '', { activate = true, lazy = false, key = 
       if (/only in the Brain Fry window/.test(e.message)) B.unavailable = e.message;
       toast(e.message);
       dropWebTab(tab);
-      if (tid === S.selected) renderFiles();
+      if (tid === wsId()) renderFiles();
       return null;
     }
   }
   if (activate) activateWebTab(tab, !url);
-  else if (tid === S.selected) renderFileTabs();
+  else if (tid === wsId()) renderFileTabs();
   if (!lazy) saveWebTabs(tid);
   return tab;
 }
 
 function activateWebTab(tab, focusAddress) {
-  const w = work(tab.tid);
-  w.active = tab.path;
-  if (!S.layout.middle_on) toggleLayout('middle');
-  if (tab.tid === S.selected) { renderFiles(); renderExplorer(); }
+  showTab(tab); // grid.js
   if (focusAddress) setTimeout(() => focusAddressField(tab), 0);
   else focusPage(tab);
 }
@@ -187,9 +184,7 @@ function forgetWebTab(tab) {
 }
 
 function dropWebTab(tab) { // a tab whose page could not open
-  const w = work(tab.tid);
-  w.tabs.splice(w.tabs.indexOf(tab), 1);
-  tab.el.remove();
+  dropTab(work(tab.tid), tab); // grid.js
   B.tabs.delete(tab.key);
 }
 
@@ -201,15 +196,14 @@ function saveWebTabs(tid) {
   }, 500));
 }
 
-// files.js, the first time the task is selected after a start: its tabs come back, and each
-// loads its page when it is first shown
-async function restoreBrowserTabs(tid) {
+// files.js, the first time the task is selected after a start: its tabs come back, each in its
+// pane (grid: the remembered grid, grid.js), and each loads its page when it is first shown
+async function restoreBrowserTabs(tid, grid) {
   const task = S.state.tasks[tid];
-  const w = work(tid);
-  for (const url of (task && task.browserTabs) || []) {
+  const urls = (task && task.browserTabs) || [];
+  for (const [i, url] of urls.entries()) {
     if (B.unavailable) return;
-    const tab = await openWebTab(tid, url, { activate: false, lazy: true });
-    if (tab && !w.active) w.active = tab.path; // no file tab: the first page is the one shown
+    await openWebTab(tid, url, { activate: false, lazy: true, pane: grid.at[`web#${i}`] || 1 });
   }
 }
 
@@ -230,7 +224,9 @@ function onBrowser(m) {
     if (B.tabs.has(m.tab)) return;
     const tid = m.task && S.state && S.state.tasks[m.task] ? m.task : S.selected;
     if (!tid) { send('browser.close', { tab: m.tab }); return; }
-    openWebTab(tid, m.url, { native: true, key: m.tab, activate: m.activate !== false });
+    const opener = m.opener && B.tabs.get(m.opener);
+    const pane = opener && opener.tid === tid && !opener.closing ? opener.pane : null; // beside the page that opened it
+    openWebTab(tid, m.url, { native: true, key: m.tab, activate: m.activate !== false, pane });
     return;
   }
   const tab = B.tabs.get(m.tab);
@@ -241,7 +237,7 @@ function onBrowser(m) {
     const titleChanged = m.title !== tab.title;
     Object.assign(tab, { url: m.url || tab.url, title: m.title, loading: m.loading, back: m.back, forward: m.forward, error: m.error || null });
     updateTools(tab);
-    if (titleChanged && tab.tid === S.selected) renderFileTabs();
+    if (titleChanged && tab.tid === wsId()) renderFileTabs();
     if (urlChanged) saveWebTabs(tab.tid);
   }
 }
@@ -260,8 +256,11 @@ function overwriteCookies() {
 }
 
 // A Cmd key pressed while the page had the focus: the backend sends it here, and it goes to
-// the same listeners as a key pressed in this page (app.js, and the one below).
+// the same listeners as a key pressed in this page (app.js, and the one below). `tab`: the page
+// that had the focus; its pane becomes the one that I use (a click in a page never reaches here).
 function forwardKey(m) {
+  const t = m.tab && B.tabs.get(m.tab);
+  if (t && S.work && S.work[t.tid] && !t.closing) usePane(S.work[t.tid], t.pane);
   document.body.dispatchEvent(new KeyboardEvent('keydown', {
     key: m.key, metaKey: true, shiftKey: m.shift, altKey: m.alt, ctrlKey: m.ctrl, bubbles: true, cancelable: true,
   }));
@@ -269,8 +268,9 @@ function forwardKey(m) {
 
 // ------------------------------------------------------------------ placement, at every frame
 
-function covered() {
-  return !$('#picker').hidden || !$('#menu').hidden || !$('#ctx').hidden || Boolean(document.querySelector('#splash:not(.gone)'));
+function covered() { // S.tabDrag: a tab is dragged (grid.js), its marks must show over the pages
+  return !$('#picker').hidden || !$('#copytab').hidden || !$('#menu').hidden || !$('#keys').hidden || !$('#ctx').hidden || Boolean(document.querySelector('#splash:not(.gone)'))
+    || Boolean(S.tabDrag);
 }
 
 // At every frame (smooth while a splitter is dragged), and every 250 ms: WebKit pauses frames
@@ -285,22 +285,25 @@ function place() {
   const cover = covered();
   for (const tab of B.tabs.values()) {
     let want = { visible: false };
-    if (S.mode === 'dev' && tab.tid === S.selected && tab.el.style.display !== 'none' && tab.el.offsetParent) {
+    if (S.mode === 'dev' && tab.tid === wsId() && tab.el.style.display !== 'none' && tab.el.offsetParent) {
       const r = tab.el.getBoundingClientRect();
       if (r.width > 20 && r.height > 20) {
-        want = { visible: true, x: Math.round(r.left), y: Math.round(r.top), w: Math.round(r.width), h: Math.round(r.height) };
+        // alpha 0 while its task is veiled (veil.js): the page is laid out and loads, unseen
+        want = { visible: true, x: Math.round(r.left), y: Math.round(r.top), w: Math.round(r.width), h: Math.round(r.height),
+          alpha: veiled(tab.tid) ? 0 : 1 };
         if (cover) want.visible = shoot(tab);
         else if (tab.shot) clearShot(tab);
       }
     }
     const last = B.placed.get(tab.key) || { visible: false };
     const same = last.visible === want.visible && (!want.visible
-      || (last.x === want.x && last.y === want.y && last.w === want.w && last.h === want.h));
+      || (last.x === want.x && last.y === want.y && last.w === want.w && last.h === want.h && last.alpha === want.alpha));
     const focus = want.visible && tab.wantFocus;
     if (same && !focus) continue;
     if (focus) tab.wantFocus = false;
     B.placed.set(tab.key, want);
-    send('browser.place', { tab: tab.key, ...want, focus });
+    const fade = want.visible && last.visible && last.alpha === 0 && want.alpha === 1 ? VEIL_FADE_MS : 0; // with 2a and column 3
+    send('browser.place', { tab: tab.key, ...want, focus, fade });
   }
 }
 
@@ -347,20 +350,14 @@ document.addEventListener('keydown', (e) => {
   const tab = activeTab();
   const web = tab && tab.web ? tab : null;
   let done = true;
-  if (k === 't' && !e.shiftKey) openWebTab(S.selected);
-  else if (!web) done = false;
-  else if (k === 'w') closeFile(web.tid, web.path);
-  else if (k === 'l') focusAddressField(web);
+  if (!web) done = false; // a new page: Cmd+N B (grid.js); Cmd+T is a new task since 2026-11-10
+  else if (k === 'l') focusAddressField(web); // Cmd+W: any tab (files.js)
   else if (k === 'f') openFind(web);
   else if (k === 'r') send('browser.nav', { tab: web.key, action: 'reload' });
   else if (k === '[') send('browser.nav', { tab: web.key, action: 'back' });
   else if (k === ']') send('browser.nav', { tab: web.key, action: 'forward' });
   else done = false;
   if (done) { e.preventDefault(); e.stopPropagation(); }
-}, true);
-
-document.addEventListener('click', (e) => {
-  if (e.target.closest('[data-new-web]')) { e.stopPropagation(); openWebTab(S.selected); }
 }, true);
 
 // ------------------------------------------------------------------ links in the terminals
@@ -378,7 +375,7 @@ function browserTermLinks(term) {
   const open = (e, uri) => {
     if (!e.metaKey) return;
     if (/^https?:/i.test(uri)) openWebTab(S.selected, uri, { activate: true });
-    else if (/^file:/i.test(uri) || !/^[a-z][a-z0-9+.-]*:/i.test(uri)) openLink(S.selected, uri);
+    else if (/^file:/i.test(uri) || !/^[a-z][a-z0-9+.-]*:/i.test(uri)) openLink(wsId(), uri); // also on the idle screen (showIdle)
   };
   // allowNonHttpProtocols: else xterm.js drops every OSC 8 target that is not http(s),
   // `hello.py` included (its OscLinkProvider)

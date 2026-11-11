@@ -1,0 +1,56 @@
+/* Cmd+N O: the list that copies a tab of another task (copytab.js). The box of the pickers
+   (.modal .box in app.css), wider: the list on the left, the preview on the right. */
+#copytab { padding-top: 8vh; }
+#copytab .ct-box { width: min(980px, calc(100vw - 32px)); max-height: none; overflow: hidden; }
+.ct-cols { display: flex; }
+.ct-left { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.ct-right { flex: 0 0 440px; border-left: 1px solid var(--line); padding: 10px; background: #1f2023; }
+@media (max-width: 860px) { .ct-right { display: none; } }
+.ct-filter { margin: 6px 8px 4px; padding: 4px 8px; font: inherit; color: var(--text); background: var(--bg);
+  border: 1px solid var(--line); border-radius: 4px; outline: none; }
+.ct-filter:focus { border-color: var(--dim); }
+.ct-list { height: min(440px, 62vh); overflow-y: auto; padding-bottom: 4px; }
+
+/* one line per row */
+.ct-row { height: 22px; padding: 0 12px; display: flex; align-items: center; gap: 7px; cursor: pointer; white-space: nowrap; }
+.ct-row:hover { background: #303238; }
+.ct-row.sel { background: var(--panel-2); box-shadow: inset 2px 0 0 var(--accent); }
+.ct-head { height: 24px; margin-top: 4px; }
+.ct-head .ct-name { font-size: 11px; font-weight: 600; color: var(--dim); }
+.ct-head.sel .ct-name, .ct-head:hover .ct-name { color: var(--text); }
+.ct-tab { padding-left: 26px; }
+.ct-name { flex: none; max-width: 58%; overflow: hidden; text-overflow: ellipsis; }
+.ct-name.cmd { font: 12px ui-monospace, Menlo, monospace; }
+.ct-name.none { color: var(--dim); }
+.ct-path { flex: 1; min-width: 0; text-align: right; color: var(--dim); font-size: 11px;
+  overflow: hidden; text-overflow: ellipsis; direction: rtl; } /* a long path loses its start, not its end */
+.ct-meta { flex: 1; text-align: right; color: var(--dim); font-size: 11px; }
+.ct-dot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
+.ct-ico { width: 14px; height: 14px; flex: none; }
+.ct-row kbd { font: 10px ui-monospace, Menlo, monospace; color: var(--text); border: 1px solid var(--dim); border-radius: 4px; padding: 0 5px; flex: none; }
+.ct-group { padding: 8px 12px 0; color: var(--dim); font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: .05em;
+  border-top: 1px solid var(--line); margin-top: 6px; }
+.ct-row mark { background: none; color: var(--accent); }
+
+/* the preview: the tab as it looks now, as a pane with its tab bar */
+.ct-pv { height: calc(min(440px, 62vh) + 34px); display: flex; flex-direction: column; border: 1px solid var(--line); border-radius: 6px;
+  overflow: hidden; background: #000; }
+.ct-bar { flex: none; height: 28px; display: flex; align-items: stretch; background: #21252b; border-bottom: 1px solid var(--line); }
+.ct-bt { display: flex; align-items: center; gap: 6px; padding: 0 10px; background: #000; border-right: 1px solid var(--line);
+  box-shadow: inset 0 2px 0 var(--accent); font-size: 12px; max-width: 70%; overflow: hidden; white-space: nowrap; }
+.ct-bt span { overflow: hidden; text-overflow: ellipsis; }
+.ct-bp { flex: 1; min-width: 0; display: flex; align-items: center; justify-content: flex-end; padding: 0 8px; color: var(--dim); font-size: 11px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; direction: rtl; }
+.ct-body { flex: 1; min-height: 0; overflow: hidden; position: relative; }
+.ct-none { height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; padding: 16px;
+  color: var(--dim); text-align: center; overflow-wrap: anywhere; background: var(--panel); }
+.ct-term { margin: 0; padding: 8px 10px; height: 100%; overflow: hidden; background: #1e1e1e; color: #cccccc;
+  font: 11.5px/1.45 Menlo, Monaco, monospace; white-space: pre; display: flex; flex-direction: column; justify-content: flex-end; }
+.ct-img { height: 100%; display: flex; align-items: center; justify-content: center; background: #000; padding: 6px; }
+.ct-img img, .ct-img canvas { max-width: 100%; max-height: 100%; object-fit: contain; }
+.ct-pdf { background: #3b3f46; }
+.ct-shot { height: 100%; overflow: hidden; background: #fff; }
+.ct-shot img { width: 100%; display: block; }
+.ct-digest { height: 100%; padding: 14px 16px; background: var(--panel); overflow: hidden; }
+.ct-dh { display: flex; align-items: center; gap: 8px; font-weight: 600; margin-bottom: 8px; }
+.ct-dt { color: #c4c6cc; white-space: pre-wrap; line-height: 1.5; }

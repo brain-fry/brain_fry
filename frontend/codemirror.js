@@ -3,9 +3,10 @@
 
 import { basicSetup } from 'codemirror';
 import { EditorView, keymap } from '@codemirror/view';
-import { EditorState, Compartment } from '@codemirror/state';
+import { EditorState, EditorSelection, Compartment, Prec } from '@codemirror/state';
 import { indentWithTab } from '@codemirror/commands';
 import { StreamLanguage } from '@codemirror/language';
+import { openSearchPanel, searchPanelOpen, selectMatches, SearchQuery } from '@codemirror/search';
 import { unifiedMergeView } from '@codemirror/merge';
 import { oneDark } from '@codemirror/theme-one-dark';
 import { python } from '@codemirror/lang-python';
@@ -44,4 +45,31 @@ export function languageFor(name) {
   return make ? make() : [];
 }
 
-export { basicSetup, EditorView, EditorState, Compartment, keymap, indentWithTab, unifiedMergeView, oneDark };
+// Cmd+G (asked by Renaud on 2026-11-11): every occurrence selected, to edit them all at once, as
+// VS Code's Select All Occurrences (Cmd+Shift+L). From the find field: every match of the query,
+// and the keyboard back to the text. Else every occurrence of the selected text (case-sensitive).
+// Nothing selected, or a read-only text (a thread tab): nothing (Renaud removed both). It always
+// takes the key: CodeMirror's own Cmd+G (find next) never runs. At most 1000, as CodeMirror's commands.
+export function selectAllOccurrences(view) {
+  const { state } = view;
+  if (state.readOnly) return true;
+  const panel = view.dom.querySelector('.cm-search');
+  if (searchPanelOpen(state) && panel && panel.contains(view.root.activeElement)) {
+    if (selectMatches(view)) view.focus();
+    return true;
+  }
+  const { from, to } = state.selection.main;
+  if (from === to) return true;
+  const query = new SearchQuery({ search: state.sliceDoc(from, to), caseSensitive: true, literal: true });
+  const ranges = [];
+  let mainIndex = 0;
+  for (let cur = query.getCursor(state); !cur.next().done;) {
+    if (ranges.length >= 1000) return true;
+    if (cur.value.from === from) mainIndex = ranges.length;
+    ranges.push(EditorSelection.range(cur.value.from, cur.value.to));
+  }
+  if (ranges.length) view.dispatch({ selection: EditorSelection.create(ranges, mainIndex), userEvent: 'select.search.matches' });
+  return true;
+}
+
+export { basicSetup, EditorView, EditorState, Compartment, Prec, keymap, indentWithTab, unifiedMergeView, oneDark, openSearchPanel };

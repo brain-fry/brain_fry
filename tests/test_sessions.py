@@ -1,12 +1,10 @@
-"""Other sessions: Claude Code's transcripts and process files, in a fake ~/.claude."""
+"""Claude Code's process files and transcripts, in a fake ~/.claude."""
 
 import json
 import os
 import subprocess
 
-import pytest
-
-from brain_fry import actions, paths, projects, sessions, taskfile, views
+from brain_fry import sessions, taskfile, views
 
 SID = "11111111-2222-3333-4444-555555555555"
 
@@ -58,37 +56,6 @@ def write(home, cwd, entries, sid=SID, slug="-slug"):
     return f
 
 
-@pytest.fixture(autouse=True)
-def fresh_cache():
-    sessions._summaries.clear()
-    sessions._cwds.clear()
-
-
-def test_scan_lists_the_sessions_of_my_projects_that_are_not_tasks(home, project):
-    sub = project / "src"
-    write(home, str(sub), transcript(str(sub)))
-    write(home, "/elsewhere", transcript("/elsewhere"), sid="22222222-0000-0000-0000-000000000000", slug="-other")
-    write(home, str(project), [user("x", origin="peer", cwd=str(project))], sid="33333333-0000-0000-0000-000000000000")
-    write(home, str(project), [user("scripted", cwd=str(project), entrypoint="sdk-cli")], sid="44444444-0000-0000-0000-000000000000")
-    [o] = sessions.scan(set(), None)
-    assert (o["id"], o["title"], o["project"], o["cwd"], o["prompts"]) == (SID, "42 - auth bug", "proj", str(sub), 3)
-    assert (o["firstPrompt"], o["lastPrompt"], o["running"]) == ("fix the bug", "and now the tests", None)
-    assert sessions.scan({SID}, None) == []
-
-
-def test_scan_reads_only_complete_appended_lines(home, project):
-    f = write(home, str(project), transcript(str(project)))
-    assert sessions.scan(set(), None)[0]["prompts"] == 3
-    line = json.dumps(user("one more", cwd=str(project)))
-    with f.open("a") as out:
-        out.write(line[:20])  # Claude Code is writing this line
-    assert sessions.scan(set(), None)[0]["prompts"] == 3
-    with f.open("a") as out:
-        out.write(line[20:] + "\n")
-    [o] = sessions.scan(set(), None)
-    assert (o["prompts"], o["lastPrompt"]) == (4, "one more")
-
-
 def test_projects_ordered_by_last_opened_task():
     ps = [{"name": n, "path": f"/p/{n}"} for n in "abcde"]
     task = lambda p, opened="", updated="": taskfile.Task(session_ids=["x"], project=p, cwd=p, opened=opened, updated=updated)  # noqa: E731
@@ -126,55 +93,20 @@ def test_running_sessions(home, tmp_path):
     assert sessions.running() is None
 
 
-def test_adopt_imports_the_turns(home, project):
+def test_read_turns(home, project):
+    """One thread per prompt that I typed; the reply is the text after the last tool call."""
     sub = project / "src"
-    write(home, str(sub), transcript(str(sub)))
-    task = sessions.adopt(SID, "planning")
-    assert (task.id, task.project, task.cwd, task.prio, task.title) == (SID, str(project), str(sub), "planning", "42 - auth bug")
-    assert (task.status, task.live, task.inbox) == ("waiting", False, False)
-    t = actions.load(SID)
-    assert [(th.prompt, th.reply, th.kind) for th in t.threads] == [
-        ("fix the bug\nplease", "Fixed it. Review auth.py?", "imported"),
-        ("/model sonnet", "Set model.", "imported"),
-        ("and now the tests", "", "interrupted"),
+    title, threads, ids = sessions.read_turns(write(home, str(sub), transcript(str(sub))))
+    assert title == "42 - auth bug"
+    assert [(th.n, th.prompt, th.reply, th.kind) for th in threads] == [
+        (1, "fix the bug\nplease", "Fixed it. Review auth.py?", "imported"),
+        (2, "/model sonnet", "Set model.", "imported"),
+        (3, "and now the tests", "", "imported"),
     ]
-    assert t.created.startswith("2026-11-09T") and t.transcript_path.endswith(f"{SID}.jsonl")
-    with pytest.raises(ValueError, match="already a task"):
-        sessions.adopt(SID)
-
-
-def test_adopt_a_session_that_runs_elsewhere(home, project):
-    entries = transcript(str(project))[:6]  # ends with a reply: the last turn is digested
-    write(home, str(project), entries)
-    task = sessions.adopt(SID, "working", {"pid": 1, "where": "VS Code", "status": "busy", "name": None})
-    assert (task.live, task.status) == (True, "working")
-    assert [th.kind for th in task.threads] == ["pending"]
-
-
-def test_adopt_refuses_sessions_outside_my_projects(home, project):
-    write(home, "/elsewhere", transcript("/elsewhere"))
-    with pytest.raises(ValueError, match="not in a Brain Fry project"):
-        sessions.adopt(SID)
-    with pytest.raises(ValueError, match="not a session id"):
-        sessions.adopt("../../etc/passwd")
-
-
-def test_nearest_project_wins(home, project):
-    inner = project / "inner"
-    projects.init(inner)
-    assert sessions.project_for(str(inner / "x"), projects.project_paths()) == inner
-    assert sessions.project_for(str(project / "x"), projects.project_paths()) == project
-    assert sessions.project_for("/elsewhere", projects.project_paths()) is None
+    assert threads[0].ts.startswith("2026-11-09T") and ids == [None, None, None]
 
 
 def test_imported_threads_survive_a_round_trip(home, project):
-    write(home, str(project), transcript(str(project)))
-    sessions.adopt(SID)
-    task = taskfile.load(paths.task_path(project, SID))
+    threads = sessions.read_turns(write(home, str(project), transcript(str(project)))).threads
+    task = taskfile.Task(session_ids=[SID], project=str(project), cwd=str(project), threads=threads)
     assert taskfile.loads(taskfile.dumps(task)) == task
-
-
-def test_first_line_skips_wrapper_tags():
-    assert sessions._first_line('<pasted_content id="c7bd">\nTraceback (most recent call last):\n</pasted_content>') \
-        == "Traceback (most recent call last):"
-    assert sessions._first_line("<b>bold</b> text") == "<b>bold</b> text"

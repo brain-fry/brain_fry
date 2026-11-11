@@ -4,10 +4,10 @@
 
 const $ = (sel) => document.querySelector(sel);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-const KINDS = new Set(['review', 'answer', 'rule', 'FYI', 'blocked']);
+const KINDS = new Set(['review', 'answer', 'rule', 'FYI', 'wait', 'blocked']);
 const PRIOS = ['working', 'planning', 'later', 'more_later', 'never'];
 const HIDDEN_PRIOS = new Set(['later', 'more_later', 'never']);
-const OUR_KEYS = new Set(['arrowdown', 'arrowup', 'n', 'p', 'd', 'e', 'b', '1', '2', 'j', 'g', '4']);
+const OUR_KEYS = new Set(['arrowdown', 'arrowup', 'n', 't', 'j', 'p', 'd', 'e', 'b', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'g']);
 
 function stored(key, fallback) {
   try { const v = localStorage.getItem(key); return v === null ? fallback : JSON.parse(v); } catch { return fallback; }
@@ -24,18 +24,18 @@ const S = {
   showHidden: stored('showHidden', false),
   starting: null, // task id: select sent, waiting for its session to start
   terms: new Map(), // task id -> {id, el, term, fit, search, gen, ws}
-  archiveOpen: false,
-  picker: null, // {mode, items, index, moved}; mode 'new' (Cmd+N: new task) or 'open' (Cmd+P: switch project)
-  othersOpen: stored('othersOpen', true), // the region of other sessions under the board
-  otherSel: null, // the other session under the mouse cursor (click)
-  adopting: null, // {id, open}: adopt sent, waiting for the task in the state
+  picker: null, // {mode, items, index, moved}; mode 'new' (Cmd+T: new task) or 'open' (Cmd+P: switch project)
   plan: null, // {project, prio}: the dialog of a new task in Organize mode (a card, no session)
   planDraft: null, // {title, notes}: what that dialog held when it was closed without creating: back at the next N
   planned: null, // task id: plan answered, the cursor goes to its card when it is in the state
   dragging: false, // no re-render of the board while a card is dragged
+  autoAdvance: stored('autoAdvance', true), // after an answer, select the next inbox item (the header's switch)
   advance: null, // {from, order, at, timer}: an advance waiting for its second
   lastAnswered: null, // the task that the last advance (answer or archive) left: Cmd+Up from the first item goes back
   project: null, // the project picked in the dropdown when it had no task to land on (path)
+  idle: null, // task id: nothing is selected (4a: a photo), 2a and column 3 still show this task's tabs (showIdle)
+  shownTerm: null, // the task whose terminal 4a shows (showTerm), or null: the photo or the overlay
+  instant: false, // 4a swaps at once in this frame, nothing fades (swapAtOnce)
 };
 
 // the task that the header's actions apply to
@@ -114,16 +114,14 @@ function onState(st) {
     S.newFrom = null;
     if (from && st.tasks[from] && st.tasks[from].projectPath === task.projectPath) copyView(from, task.id); // files.js
     setMode('dev', false);
+    swapAtOnce(); // no fade in 4a: neither the old task (or the photo) nor the new one
     return select(st.selected, false);
   }
   if (S.starting && st.tasks[S.starting] && (st.tasks[S.starting].pty || st.tasks[S.starting].outside)) S.starting = null;
-  if (S.adopting && st.tasks[S.adopting.id]) { // a session of the bottom region is now a task
-    const { id, open } = S.adopting;
-    S.adopting = null;
-    S.boardSel = id;
-    if (open) return openInDev(id);
-  }
   if (S.planned && st.tasks[S.planned]) { S.boardSel = S.planned; S.planned = null; } // a new card (Organize mode)
+  if (selectArrival()) return; // it renders
+  if (!prev && !S.selected && !S.project) showIdle(lastOpenedAny()); // at start, nothing needs me
+  if (S.idle && !st.tasks[S.idle]) S.idle = null; // deleted: 2a and column 3 empty
   render();
 }
 
@@ -206,8 +204,81 @@ function fitSafely(t) {
   if (box.width > 50 && box.height > 30) t.fit.fit();
 }
 
+// ------------------------------------------------------------------ 4a's fades (DESIGN_DETAILS.md, "auto-advance")
+// A change of what 4a shows in Dev mode (a select, an advance, an archive, the photo): the old
+// content fades out, 4a stays empty for a moment, then the new one fades in. The photo fades in
+// each time it appears, at start too. Renaud chose them from a mockup on 2026-11-11.
+const FADE_OUT_MS = 250;
+const FADE_PAUSE_MS = 500;
+const FADE_IN_MS = 1000; // ease-in
+const PHOTO_IN_MS = 1000; // ease-in-out
+let fadeAt = -1e9; // the start of the last faded switch: what fades in waits for its fade out and pause
+
+// no fade where 4a was not on screen (Organize and Review mode), nor in a frame of swapAtOnce
+const fades = () => S.mode === 'dev' && !S.instant;
+
+// The changes of 4a in this frame are instant: the switch into Dev mode (4a was not on screen),
+// and a new task or a fork that I just created (Renaud, 2026-11-11: "there should be no fade-in
+// for Claude Code"; the fade is for moving from one inbox item to the next)
+function swapAtOnce() {
+  S.instant = true;
+  requestAnimationFrame(() => { S.instant = false; });
+}
+// 4a shows something: a terminal, the photo or the overlay (nothing before the first select)
+const agentShows = () => (S.shownTerm !== null && S.terms.has(S.shownTerm)) || !$('#calm').hidden || !$('#overlay').hidden;
+
+function fadeOut(el, done) {
+  if (el.fadingOut) return;
+  const from = +getComputedStyle(el).opacity; // a fade in that was running: from where it is
+  el.getAnimations().forEach((a) => a.cancel());
+  el.style.pointerEvents = 'none';
+  const a = el.animate([{ opacity: from }, { opacity: 0 }], { duration: FADE_OUT_MS, easing: 'ease-in', fill: 'forwards' });
+  el.fadingOut = a;
+  // the promise, not onfinish: a.finish() resolves it at once also in a hidden page (selftests); cancel rejects it
+  a.finished.then(() => { el.fadingOut = null; done(); a.cancel(); el.style.pointerEvents = ''; }, () => {});
+}
+
+// after the fade out and the pause of the last switch; from where it is when it was fading
+function fadeIn(el, ms, easing) {
+  const from = el.getAnimations().length ? +getComputedStyle(el).opacity : 0;
+  stopFade(el);
+  const delay = Math.max(0, fadeAt + FADE_OUT_MS + FADE_PAUSE_MS - performance.now());
+  el.animate([{ opacity: from }, { opacity: 1 }], { duration: ms, delay, easing, fill: 'backwards' });
+}
+
+function stopFade(el) {
+  el.getAnimations().forEach((a) => a.cancel());
+  el.fadingOut = null;
+  el.style.pointerEvents = '';
+}
+
+// The new terminal is on screen at opacity 0 from the start of the switch, so that it has the
+// keyboard at once: a key typed during the fade goes to the selected task, never to the old one.
 function showTerm(id) {
-  for (const x of S.terms.values()) if (!x.shell) x.el.style.display = x.id === id ? '' : 'none';
+  const fade = fades() && agentShows();
+  const prev = S.shownTerm;
+  S.shownTerm = id;
+  if (fade && prev === id) return focusTerm(id); // the same task again: its fade runs on
+  if (fade) fadeAt = performance.now();
+  for (const x of S.terms.values()) {
+    if (x.shell) continue;
+    if (x.id === id) {
+      x.el.style.display = '';
+      if (fade) fadeIn(x.el, FADE_IN_MS, 'ease-in');
+      else stopFade(x.el);
+    } else if (fade && (x.id === prev || x.el.fadingOut)) {
+      fadeOut(x.el, () => { x.el.style.display = 'none'; });
+    } else {
+      stopFade(x.el);
+      x.el.style.display = 'none';
+    }
+  }
+  if (fade) fadeIn($('#overlay'), FADE_IN_MS, 'ease-in'); // "Starting...", "No live session"
+  else stopFade($('#overlay')); // the fade in of a switch just before
+  focusTerm(id);
+}
+
+function focusTerm(id) {
   const t = S.terms.get(id);
   if (t && (S.mode === 'dev' || (S.mode === 'review' && S.reviewAgent))) requestAnimationFrame(() => { fitSafely(t); t.term.focus(); });
 }
@@ -227,6 +298,7 @@ function setMode(mode, doRender = true) {
     if (w > 100) S.agentWidth = Math.round(w);
   }
   S.mode = mode;
+  if (mode === 'dev') swapAtOnce(); // the selects that follow in this frame swap 4a at once (showTerm)
   $('#dev').hidden = mode === 'organize'; // Review mode shows its panels in #dev, beside 4a
   $('#board').hidden = mode !== 'organize';
   if (prev === 'review') leaveReview();
@@ -240,7 +312,8 @@ function setMode(mode, doRender = true) {
   } else if (S.selected) {
     showTerm(S.selected);
   }
-  if (doRender) render();
+  // doRender false: the caller selects a task itself (openInDev, a new task, a project)
+  if (doRender && !selectArrival()) render();
 }
 
 function openInDev(id) {
@@ -253,8 +326,22 @@ function openInDev(id) {
 // (`opened`, set by the backend at each select), with its files and terminals.
 
 function currentProject() {
-  const task = S.state && S.state.tasks[S.selected];
+  const task = S.state && S.state.tasks[S.selected || S.idle];
   return task ? task.projectPath : S.project;
+}
+
+// What 2a and column 3 show: the selected task's files and tabs; with no task selected, those of
+// the task that I left (the idle screen, showIdle), or those of the project picked in the dropdown
+// (it has no open task): `project:<path>`, a work state of files.js that no task file keeps. The
+// backend reads the same id (fs.* commands, /file/).
+function wsId() {
+  return S.selected || S.idle || (S.project ? `project:${S.project}` : null);
+}
+
+function wsProject(id) {
+  if (id.startsWith('project:')) return id.slice('project:'.length);
+  const t = S.state && S.state.tasks[id];
+  return t ? t.projectPath : null;
 }
 
 // archived tasks are done: never landed on (newTask counts them). Never opened (older tasks): the last updated.
@@ -275,6 +362,7 @@ function openProject(path) {
   uiLog(`project ${name}: no open task to land on`);
   setMode('dev', false);
   cancelAdvance();
+  leaveIdle();
   S.project = path;
   S.selected = null;
   S.starting = null;
@@ -283,7 +371,7 @@ function openProject(path) {
   render();
 }
 
-// the projects of the dropdown, Cmd+P and Cmd+N: without the ones removed with the x of Cmd+P
+// the projects of the dropdown, Cmd+P and Cmd+T: without the ones removed with the x of Cmd+P
 // (`"active": false` in projects.json; bf init in the folder puts one back)
 function activeProjects(projects) {
   return projects.filter((p) => p.active !== false);
@@ -310,12 +398,14 @@ function renderProjectSelect(st) {
 
 function select(id, notify = true) {
   if (S.advance && S.advance.from !== id) cancelAdvance();
+  leaveIdle();
   S.selected = id;
   S.project = null; // the dropdown follows the task's project
   const t = ensureTerm(id);
   showTerm(id);
   const task = S.state && S.state.tasks[id];
   if (task && !task.pty && !task.outside) S.starting = id;
+  if (task && S.mode === 'dev' && !work(id).restored) veil(id); // its tabs fade in once all built (veil.js)
   render();
   if (notify) {
     requestAnimationFrame(() => {
@@ -355,6 +445,7 @@ function uiLog(msg) { send('log', { level: 'info', msg }); }
 
 function onPrompted(m) {
   if (m.id !== S.selected || S.mode !== 'dev') return;
+  if (!S.autoAdvance) return uiLog(`auto-advance off: stays on ${m.id.slice(0, 8)}`);
   if (m.slash) return uiLog(`auto-advance: no advance for a slash command in ${m.id.slice(0, 8)}`);
   cancelAdvance();
   // the inbox order before the answer: the "next" item is the one after it
@@ -378,7 +469,7 @@ function nextAfter(from, order) {
 function doAdvance() {
   const a = S.advance;
   S.advance = null;
-  if (!a || S.mode !== 'dev' || S.selected !== a.from) return;
+  if (!a || S.mode !== 'dev' || S.selected !== a.from || !S.autoAdvance) return;
   const t = S.terms.get(a.from);
   if (t && t.lastInput > a.at) return uiLog(`auto-advance: stays on ${a.from.slice(0, 8)}, I am typing in it`);
   const next = nextAfter(a.from, a.order);
@@ -392,12 +483,53 @@ function doAdvance() {
 // Cmd+Up goes back to the task that I left.
 function selectNone() {
   cancelAdvance();
+  const left = S.selected;
   S.selected = null;
   S.starting = null;
   S.project = null;
   showTerm(null);
   send('select', { id: null });
+  showIdle(left);
   render();
+}
+
+// The idle screen (Renaud, 2026-11-11): while nothing is selected, only 4a changes (the photo).
+// The dropdown, 2a and column 3 keep showing the task that I left, or at start the task that I
+// opened last: its project and its layout, terminals and browser tabs included. That task is not
+// selected: no session is started for it, `opened` does not change. A file opened there is not
+// added to it, and goes when a task is selected (dropIdleTabs, files.js).
+function showIdle(id) {
+  S.idle = id && S.state && S.state.tasks[id] ? id : null;
+  if (!S.idle) return;
+  if (S.mode === 'dev' && !work(id).restored) veil(id); // at start: its tabs fade in once built (veil.js)
+  restoreFiles(id); // files.js: its file and browser tabs, once per run, as at a select
+  const sh = shellBoxSize();
+  send('idle', { id, shellRows: sh.rows, shellCols: sh.cols }); // the backend starts its terminals, once per run
+}
+
+function leaveIdle() {
+  if (S.idle) dropIdleTabs(S.idle);
+  S.idle = null;
+}
+
+// the task that I opened last, in any project, archived or not
+function lastOpenedAny() {
+  let best = null;
+  for (const t of Object.values(S.state.tasks)) if (t.opened && (!best || Date.parse(t.opened) > Date.parse(best.opened))) best = t;
+  return best ? best.id : null;
+}
+
+// The calm photo shows only while nothing needs me (Renaud, 2026-11-10): in Dev mode with no task
+// selected, the first inbox item that needs me (a reply or a block) is selected at once. Checked at
+// each state push and when I switch to Dev mode. Not while Cmd+T, Cmd+P or a plan dialog is open:
+// the selection would take the keyboard focus from it. Returns true when it selected.
+function selectArrival() {
+  if (!S.state || S.mode !== 'dev' || S.selected || S.project || S.picker || S.plan) return false;
+  const next = S.state.inbox.find((id) => S.state.tasks[id] && S.state.tasks[id].inbox);
+  if (!next) return false;
+  uiLog(`inbox: nothing was selected --> ${next.slice(0, 8)} ${JSON.stringify(S.state.tasks[next].title)}`);
+  select(next);
+  return true;
 }
 
 function act(cmd) {
@@ -412,7 +544,8 @@ function act(cmd) {
 }
 
 // Archiving the selected task (Dev mode): it is done, so it leaves 1a at once and the next
-// item that needs me is selected, with no second to wait. Nothing needs me: 4a empties.
+// item that needs me is selected, with no second to wait, whatever the auto-advance switch
+// (that switch is about staying on a task after an answer). Nothing needs me: 4a empties.
 // Cmd+Up goes back to the archived task, to unarchive it.
 function afterArchive(id, next) {
   S.lastAnswered = id;
@@ -464,39 +597,6 @@ function ago(iso) {
   return `${Math.round(s / 86400)} d ago`;
 }
 
-// a session of my projects that is not a task: drag it onto a column to adopt it
-function otherCard(o) {
-  const tip = [o.cwd, `${o.prompts} prompt(s)`, `first: ${o.firstPrompt}`, `last: ${o.lastPrompt}`].join('\n');
-  return `<div class="card other ${o.id === S.otherSel ? 'sel' : ''}" data-other="${o.id}" draggable="true" title="${esc(tip)}">
-    <div class="top">${runBadge(o.running)}<span class="proj" style="--h:${hue(o.project)}">${esc(o.project)}</span></div>
-    <div class="title">${esc(o.title)}</div>
-    <div class="line">${o.prompts} prompt${o.prompts === 1 ? '' : 's'} · ${ago(o.updated)}${o.lastPrompt ? ' · last: ' + esc(o.lastPrompt) : ''}</div>
-  </div>`;
-}
-
-function renderOthers(st) {
-  const list = (st.others || []).filter((o) => !st.tasks[o.id]);
-  $('#others-count').textContent = list.length ? `(${list.length})` : '';
-  $('#others-toggle').classList.toggle('open', S.othersOpen);
-  const el = $('#others-cards');
-  el.hidden = !S.othersOpen;
-  if (S.othersOpen) {
-    el.innerHTML = list.length ? list.map(otherCard).join('')
-      : '<div class="empty">None: every session of your Brain Fry projects is a task.</div>';
-  }
-}
-
-function setOthersOpen(on) {
-  S.othersOpen = on;
-  store('othersOpen', on);
-  render();
-}
-
-function adopt(sessionId, prio, open = false) {
-  S.adopting = { id: sessionId, open };
-  send('adopt', { session: sessionId, prio });
-}
-
 // the card under the cursor must be on the board (it may have been hidden or moved)
 function ensureBoardSel(cols) {
   if (!S.boardSel || !cols.some((c) => c.ids.includes(S.boardSel))) {
@@ -514,7 +614,6 @@ function renderBoard(st) {
       <h3>${c.prio.replace('_', ' ')} <span>${c.ids.length || ''}</span></h3>
       <div class="cards">${c.ids.length ? c.ids.map((id, i) => card(st.tasks[id], c.prio === 'working' && i < 9 ? i + 1 : 0)).join('') : '<div class="empty">Empty.</div>'}</div>
     </div>`).join('');
-  renderOthers(st);
   const sel = document.querySelector('#columns .card.sel');
   if (sel) sel.scrollIntoView({ block: 'nearest' });
 }
@@ -585,11 +684,11 @@ function render() {
   renderBanner(st);
   renderProjectSelect(st);
   renderHead(st);
+  $('#auto-advance').checked = S.autoAdvance;
   if (S.mode === 'organize') return renderBoard(st);
   if (S.mode === 'review') { renderAgent(st); return renderReview(st); } // review.js
   renderInbox(st);
   renderThreads(st);
-  renderArchive(st);
   renderAgent(st);
   renderExplorer();
   renderFiles();
@@ -645,30 +744,23 @@ function renderInbox(st) {
   const ids = visibleInbox();
   const waiting = st.inbox.filter((id) => st.tasks[id].inbox).length; // pinned tasks that need nothing do not count
   $('#inbox-count').textContent = waiting ? `(${waiting})` : '';
-  $('#inbox').innerHTML = ids.length
-    ? ids.map((id) => row(st.tasks[id], st.inbox.includes(id) ? '' : 'current')).join('')
-    : '<div class="empty">Nothing needs you.</div>';
+  // An empty inbox: only its heading, no text, and no Threads section (Renaud, 2026-11-10)
+  $('#inbox').innerHTML = ids.map((id) => row(st.tasks[id], st.inbox.includes(id) ? '' : 'current')).join('');
 }
 
 function renderThreads(st) {
   const task = st.tasks[S.selected];
-  const threads = task ? [...task.threads].reverse() : [];
+  $('#threads-section').hidden = !task; // no task selected, which an empty inbox implies
+  if (!task) return;
+  const threads = [...task.threads].reverse();
   $('#threads').innerHTML = threads.length
     ? threads.map((th) => {
       const kind = KINDS.has(th.kind) ? `<span class="kind ${th.kind}">${th.kind}</span>` : th.kind; // working, interrupted, pending, imported
       const txt = th.digest || th.prompt || '(no prompt)';
       return `<div class="thread" data-n="${th.n}" title="${esc(th.prompt)} (click: open in 3a)"><span class="n">${th.n}</span>${kind}<span class="txt">${esc(txt)}</span></div>`;
     }).join('')
-    : task && task.notes ? `<div class="notes"><div class="label">My notes (no thread yet)</div>${esc(task.notes)}</div>`
+    : task.notes ? `<div class="notes"><div class="label">My notes (no thread yet)</div>${esc(task.notes)}</div>`
     : '<div class="empty">No threads yet.</div>';
-}
-
-function renderArchive(st) {
-  $('#archive-count').textContent = st.archive.length ? `(${st.archive.length})` : '';
-  $('#archive-toggle').classList.toggle('open', S.archiveOpen);
-  const el = $('#archive');
-  el.hidden = !S.archiveOpen;
-  if (S.archiveOpen) el.innerHTML = st.archive.length ? st.archive.map((id) => row(st.tasks[id])).join('') : '<div class="empty">Empty.</div>';
 }
 
 function renderAgent(st) {
@@ -699,16 +791,23 @@ function renderAgent(st) {
 // The empty 4a (no task selected): a calm photo, no text, nothing to watch or start (Renaud,
 // 2026-11-10). A different photo each time it appears. Credits: web/calm/CREDITS.md.
 const CALM_PHOTOS = ['beech-forest-fog', 'lone-tree-fog', 'tree-mist-reflection', 'snowy-lake-fog',
-  'snowfield-mist', 'misty-hills', 'peak-in-cloud'];
+  'snowfield-mist', 'misty-hills', 'peak-in-cloud', 'argentine-ridge', 'diablerets-summit',
+  'diablerets-rampart', 'creux-de-champ'];
 
 function calm(on) {
   const el = $('#calm');
-  if (on && el.hidden) {
-    const others = CALM_PHOTOS.filter((p) => p !== el.dataset.photo);
-    el.dataset.photo = others[Math.floor(Math.random() * others.length)];
-    el.style.backgroundImage = `url(calm/${el.dataset.photo}.jpg)`;
+  if (on && (el.hidden || el.fadingOut)) { // fading out: back, with the same photo
+    if (el.hidden) {
+      const others = CALM_PHOTOS.filter((p) => p !== el.dataset.photo);
+      el.dataset.photo = others[Math.floor(Math.random() * others.length)];
+      el.style.backgroundImage = `url(calm/${el.dataset.photo}.jpg)`;
+      el.hidden = false;
+    }
+    fadeIn(el, PHOTO_IN_MS, 'ease-in-out'); // after the task's fade out and the pause (showTerm)
+  } else if (!on && !el.hidden) {
+    if (fades()) fadeOut(el, () => { el.hidden = true; });
+    else { stopFade(el); el.hidden = true; }
   }
-  el.hidden = !on;
 }
 
 function overlay(html) {
@@ -733,9 +832,9 @@ function toast(msg, action = null) { // action: { label, run }, a button in the 
 
 // ------------------------------------------------------------------ project picker (new task, switch project)
 
-// Cmd+N (new task) and Cmd+P (switch project; picking one does what the dropdown does) show the
+// Cmd+T (new task) and Cmd+P (switch project; picking one does what the dropdown does) show the
 // list of the dropdown: the most recently used project first (views.project_order). Enter opens
-// the highlighted one, the digits 1 to 9 open the n-th one. Cmd+N highlights the first project,
+// the highlighted one, the digits 1 to 9 open the n-th one. Cmd+T highlights the first project,
 // Cmd+P the first one that is not the current one: the current project is usually first, so
 // Cmd+P, Enter goes back to the project before it.
 function openPicker(mode = 'new') {
@@ -856,6 +955,10 @@ function submitPlan() {
 // ------------------------------------------------------------------ events
 
 document.addEventListener('keydown', (e) => {
+  // Cmd+N, then T, B or F, then a digit: a terminal, a page or a new file in that pane (grid.js).
+  // Cmd+J, then a digit: the keyboard to that pane.
+  // First, also before a text field: while the chord waits, no key may reach a field or a terminal
+  if (chordKey(e)) { e.preventDefault(); e.stopImmediatePropagation(); return; }
   if (S.picker) {
     const n = S.picker.items.length;
     if (e.key === 'Escape') closePicker();
@@ -881,7 +984,6 @@ document.addEventListener('keydown', (e) => {
     else if (/^[1-9]$/.test(k)) openWorking(Number(k));
     else if (k === 'Escape') setMode('dev');
     else if (k === 'h' || k === 'H') setShowHidden(!S.showHidden);
-    else if (k === 'o' || k === 'O') setOthersOpen(!S.othersOpen);
     else if (k === 'e') act('archive');
     else if (k === 'f') act('fork');
     else if (k === 'n') openPicker();
@@ -894,14 +996,14 @@ document.addEventListener('keydown', (e) => {
   const k = e.key.toLowerCase();
   // in a code editor, the editor keeps Cmd+D (next occurrence) and Cmd+Up/Down (start/end)
   if (e.target.closest && e.target.closest('.cm-editor') && ['d', 'arrowup', 'arrowdown'].includes(k)) return;
+  // a Finder tab keeps Cmd+Up (enclosing folder) and Cmd+Down (open), as Finder (finder.js)
+  if (e.target.closest && e.target.closest('.finder') && ['arrowup', 'arrowdown'].includes(k)) return;
   if (k === 'g' && e.shiftKey) setMode(S.mode === 'review' ? R.from : 'review'); // Review mode, and back
   else if (k === 'b') setMode(S.mode === 'organize' ? 'dev' : 'organize');
-  else if (k === '1' && S.mode === 'dev') toggleLayout('explorer');
-  else if (k === '2' && S.mode === 'dev') toggleLayout('middle');
-  else if (k === 'j' && S.mode === 'dev') toggleLayout('shells');
+  else if (/^[1-9]$/.test(k) && S.mode === 'dev') showTabAt(Number(k)); // grid.js
   else if (k === 'arrowdown' && S.mode === 'dev') move(1);
   else if (k === 'arrowup' && S.mode === 'dev') move(-1);
-  else if (k === 'n') openPicker();
+  else if (k === 't') openPicker(); // a new task (Cmd+N creates in a pane since 2026-11-10: grid.js)
   else if (k === 'p') openPicker('open');
   else if (k === 'd' && e.shiftKey) act('fork');
   else if (k === 'e') act('archive');
@@ -915,10 +1017,6 @@ document.addEventListener('click', (e) => {
   // A double-click on a card is the second click (detail 2), not a dblclick listener: the
   // first click re-renders the board, so the second click's card is gone from the page
   // before WebKit sends it the dblclick, and the event never reaches the document.
-  const otherEl = e.target.closest('.card.other');
-  if (otherEl && e.detail === 2) return adopt(otherEl.dataset.other, 'working', true);
-  if (otherEl) { S.otherSel = otherEl.dataset.other; $('#board').focus(); return render(); }
-  if (e.target.closest('#others-toggle')) return setOthersOpen(!S.othersOpen);
   const cardEl = e.target.closest('.card');
   if (cardEl && e.detail === 2) return openInDev(cardEl.dataset.card);
   if (cardEl) { S.boardSel = cardEl.dataset.card; $('#board').focus(); return render(); }
@@ -933,25 +1031,31 @@ document.addEventListener('click', (e) => {
   const item = e.target.closest('#picker .item');
   if (item) return pick(Number(item.dataset.i));
   if (e.target.id === 'picker') return closePicker();
-  if (e.target.closest('#archive-toggle')) { S.archiveOpen = !S.archiveOpen; render(); }
 });
 
 $('#new-btn').addEventListener('click', () => openPicker());
 
 document.addEventListener('change', (e) => {
   if (e.target.id === 'show-hidden') { setShowHidden(e.target.checked); $('#board').focus(); }
+  if (e.target.id === 'auto-advance') {
+    S.autoAdvance = e.target.checked;
+    store('autoAdvance', S.autoAdvance);
+    if (!S.autoAdvance) cancelAdvance();
+    uiLog(`auto-advance switched ${S.autoAdvance ? 'on' : 'off'}`);
+    const t = S.mode === 'dev' && S.selected && S.terms.get(S.selected);
+    if (t) t.term.focus(); // the keys go back to the selected task's terminal
+  }
   if (e.target.id === 'project-select') {
     e.target.blur(); // the selected task's terminal takes the focus
     if (e.target.value) openProject(e.target.value);
   }
 });
 
-// drag a card to another column: same as Shift+Left/Right. Drag an other session onto a
-// column: it becomes a task with that prio.
+// drag a card to another column: same as Shift+Left/Right
 document.addEventListener('dragstart', (e) => {
   const c = e.target.closest && e.target.closest('.card');
   if (!c) return;
-  e.dataTransfer.setData('text/plain', c.dataset.other ? `other:${c.dataset.other}` : c.dataset.card);
+  e.dataTransfer.setData('text/plain', c.dataset.card);
   S.dragging = true;
 });
 document.addEventListener('dragend', () => {
@@ -971,12 +1075,6 @@ document.addEventListener('drop', (e) => {
   const id = e.dataTransfer.getData('text/plain');
   for (const x of document.querySelectorAll('.column.drop')) x.classList.remove('drop');
   S.dragging = false;
-  if (col && id.startsWith('other:')) {
-    e.preventDefault();
-    adopt(id.slice('other:'.length), col.dataset.prio);
-    if (HIDDEN_PRIOS.has(col.dataset.prio) && !S.showHidden) setShowHidden(true);
-    return render();
-  }
   if (!col || !S.state.tasks[id]) return render();
   e.preventDefault();
   S.state.tasks[id].prio = col.dataset.prio;

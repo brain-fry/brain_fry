@@ -8,6 +8,8 @@
 <link rel="stylesheet" href="/app.css">
 <link rel="stylesheet" href="/browser.css">
 <link rel="stylesheet" href="/review.css">
+<link rel="stylesheet" href="/finder.css">
+<link rel="stylesheet" href="/copytab.css">
 <script>
   window.__errors = [];
   window.onerror = (msg, src, line) => {
@@ -21,18 +23,20 @@
 <div id="splash"><img src="/icon.png" alt=""><div class="name">Brain Fry</div></div>
 <header id="top">
   <div class="brand"><img src="/icon.png" alt=""><button id="menu-btn" title="Menu">&#9776;</button>
-    <select id="project-select" title="Project (Cmd+P): lands on the task that I opened last in it. The most worked in the last 7 days first"></select></div>
+    <select id="project-select" title="Project (Cmd+P): lands on the task that I opened last in it"></select></div>
   <div class="modes">
     <button class="mode" data-mode="dev" title="Dev mode (Cmd+B toggles)">Dev</button>
     <button class="mode" data-mode="organize" title="Organize mode (Cmd+B toggles)">Organize</button>
     <button class="mode" data-mode="review" title="Review mode: git (Cmd+Shift+G toggles)">Review</button>
   </div>
   <div id="task-head"></div>
-  <button id="new-btn" title="New task (Cmd+N). In Organize mode: a card on the board, not started">+ New task</button>
+  <label class="switch" title="After I answer the selected task, select the next inbox item (Cmd+Up from the first item goes back). Off: stay on the task"><input type="checkbox" id="auto-advance"> Auto-advance</label>
+  <button id="new-btn" title="New task (Cmd+T). In Organize mode: a card on the board, not started">+ New task</button>
 </header>
 <div id="menu" hidden>
   <button data-menu="cookies">Overwrite my cookies<small>Copies my Firefox cookies into the browser of 3a. For each site that Firefox has cookies for, they replace the browser's.</small></button>
   <div class="menu-note" id="menu-cookies-note"></div>
+  <button data-menu="keys">Show shortcuts</button>
 </div>
 <div id="banner" hidden></div>
 <main id="dev">
@@ -41,15 +45,10 @@
       <h2>Inbox <span id="inbox-count"></span></h2>
       <div id="inbox" class="list"></div>
     </section>
-    <section>
+    <section id="threads-section">
       <h2>Threads</h2>
       <div id="threads" class="list"></div>
     </section>
-    <section>
-      <h2 id="archive-toggle" class="toggle">Archive <span id="archive-count"></span></h2>
-      <div id="archive" class="list" hidden></div>
-    </section>
-    <footer class="keys">Cmd+Up/Down inbox · Cmd+E archive · Cmd+Shift+D fork · Cmd+N new · Cmd+P project · Cmd+B board · Cmd+1 files · Cmd+2 editor · Cmd+J terminal</footer>
   </aside>
   <div class="split v" data-split="side"></div>
   <section id="explorer">
@@ -58,22 +57,8 @@
       stroke-width="1.2"><path d="M4.5 2.5h9v9"/><rect x="2.5" y="4.5" width="9" height="9" rx="1"/><path d="M5 9h4"/></svg></button>
   </section>
   <div class="split v" data-split="explorer"></div>
-  <section id="middle">
-    <div id="files">
-      <div id="file-tabs" class="tabs"></div>
-      <div id="file-bar"></div>
-      <div id="editors">
-        <div id="file-empty" class="empty-pane">Open a file from the explorer.</div>
-      </div>
-    </div>
-    <div class="split h" data-split="shellsHeight"></div>
-    <div id="shells">
-      <div id="shell-tabs" class="tabs"></div>
-      <div id="shell-terms">
-        <div id="shell-empty" class="empty-pane">No terminal. + opens one in the task's folder.</div>
-      </div>
-    </div>
-  </section>
+  <!-- column 3: the grid of up to four panes, built by grid.js -->
+  <section id="middle"></section>
   <div class="split v" data-split="middle"></div>
   <!-- Review mode (review.js): replaces 1, 2a and the middle column; 4a stays at the right on demand (Cmd+4) -->
   <section id="review">
@@ -100,17 +85,101 @@
 <main id="board" tabindex="-1" hidden>
   <div class="board-bar">
     <label><input type="checkbox" id="show-hidden"> Show later, more later, never and archived (H)</label>
-    <span class="keys">Arrows move · Shift+Left/Right change prio · Enter or 1-9 (working) open in Dev · E archive · F fork · N new task (not started) · O other sessions · Esc / Cmd+B Dev</span>
+    <span class="keys">Arrows move · Shift+Left/Right change prio · Enter or 1-9 (working) open in Dev · E archive · F fork · N new task (not started) · Esc / Cmd+B Dev</span>
   </div>
   <div id="columns"></div>
-  <section id="others">
-    <h3 id="others-toggle">Other Claude Code sessions <span id="others-count"></span>
-      <span class="hint">in your Brain Fry projects, not tasks yet · drag one onto a column to add it · double-click: add it and open it (O shows or hides)</span></h3>
-    <div id="others-cards"></div>
-  </section>
 </main>
 <div id="picker" class="modal" hidden></div>
+<div id="copytab" class="modal" hidden></div>
 <div id="rv-dialog" class="modal" hidden></div>
+<!-- the burger menu's "Show shortcuts" (menu.js). Written by hand: a new or changed key goes here too -->
+<div id="keys" class="modal" hidden><div class="box">
+  <h3>Keyboard shortcuts</h3>
+  <div class="cols">
+    <section><h4>Everywhere</h4>
+      <div><kbd>Cmd+B</kbd><span>Dev / Organize mode</span></div>
+      <div><kbd>Cmd+Shift+G</kbd><span>Review mode, and back</span></div>
+      <div><kbd>Cmd+T</kbd><span>New task (Organize: a card, not started)</span></div>
+      <div><kbd>Cmd+P</kbd><span>Switch project</span></div>
+    </section>
+    <section><h4>Dev mode</h4>
+      <div><kbd>Cmd+Up / Down</kbd><span>Previous / next inbox item</span></div>
+      <div><kbd>Cmd+E</kbd><span>Archive the task</span></div>
+      <div><kbd>Cmd+Shift+D</kbd><span>Fork the task</span></div>
+      <div><kbd>Cmd+1-9</kbd><span>That tab of the pane that you use (from the left)</span></div>
+      <div><kbd>Cmd+N, T / B / F / E, 1-4</kbd><span>Terminal / browser / new file / Finder in that pane (no digit: pane 1)</span></div>
+      <div><kbd>Cmd+N, O</kbd><span>Copy a tab of another task into the pane that you use</span></div>
+      <div><kbd>Cmd+W</kbd><span>Close the tab on screen in the pane that you use</span></div>
+      <div><kbd>Cmd+J, 1-4</kbd><span>Keyboard to that pane</span></div>
+      <div><kbd>Cmd+J, C</kbd><span>Keyboard to Claude Code (4a)</span></div>
+      <div><kbd>Cmd+J, E, 1-9 / a-z</kbd><span>Keyboard to the explorer, on that row</span></div>
+      <div><kbd>Shift+Enter</kbd><span>New line in Claude Code (4a)</span></div>
+      <div><kbd>Cmd+click</kbd><span>Open a link of a terminal in a tab</span></div>
+    </section>
+    <section><h4>Files and PDFs</h4>
+      <div><kbd>Cmd+F</kbd><span>Find</span></div>
+      <div><kbd>Cmd+G</kbd><span>Select all occurrences</span></div>
+      <div><kbd>Cmd+S</kbd><span>Save</span></div>
+      <div><kbd>Cmd+scroll, pinch</kbd><span>Zoom a PDF</span></div>
+    </section>
+    <section><h4>Browser tab</h4>
+      <div><kbd>Cmd+L</kbd><span>Address field</span></div>
+      <div><kbd>Cmd+F</kbd><span>Find in the page</span></div>
+      <div><kbd>Cmd+R</kbd><span>Reload</span></div>
+      <div><kbd>Cmd+[ / ]</kbd><span>Back / forward</span></div>
+      <div><kbd>Cmd+= / - / 0</kbd><span>Zoom in / out / reset</span></div>
+    </section>
+    <section><h4>Finder tab</h4>
+      <div><kbd>Arrows</kbd><span>Move; Right / Left: into / out of a folder</span></div>
+      <div><kbd>Type a name</kbd><span>Select it</span></div>
+      <div><kbd>Cmd+Down, double-click</kbd><span>Open (a folder: first column)</span></div>
+      <div><kbd>Cmd+Up</kbd><span>Enclosing folder</span></div>
+      <div><kbd>Enter</kbd><span>Rename</span></div>
+      <div><kbd>Cmd+Backspace</kbd><span>Move to the Trash</span></div>
+      <div><kbd>Ctrl+C</kbd><span>Copy the relative path</span></div>
+      <div><kbd>Double-click the path bar</kbd><span>That folder as the first column</span></div>
+      <div><kbd>Option+drag a grip</kbd><span>Resize every column</span></div>
+    </section>
+    <section><h4>Explorer (2a)</h4>
+      <div><kbd>Enter, F2</kbd><span>Rename</span></div>
+      <div><kbd>Cmd+Backspace</kbd><span>Move to the Trash</span></div>
+      <div><kbd>Ctrl+C</kbd><span>Copy the relative path</span></div>
+    </section>
+    <section><h4>Organize mode</h4>
+      <div><kbd>Arrows</kbd><span>Move the cursor</span></div>
+      <div><kbd>Shift+Left / Right</kbd><span>Card to the previous / next column</span></div>
+      <div><kbd>Enter</kbd><span>Open in Dev mode (also a double-click)</span></div>
+      <div><kbd>1-9</kbd><span>Open that card of the working column</span></div>
+      <div><kbd>E</kbd><span>Archive</span></div>
+      <div><kbd>F</kbd><span>Fork</span></div>
+      <div><kbd>N</kbd><span>New card</span></div>
+      <div><kbd>H</kbd><span>Show / hide later, more later, never, archived</span></div>
+      <div><kbd>Esc</kbd><span>Back to Dev mode</span></div>
+    </section>
+    <section><h4>Review mode</h4>
+      <div><kbd>Tab / Shift+Tab</kbd><span>Next / previous panel</span></div>
+      <div><kbd>Up / Down</kbd><span>Commit or file</span></div>
+      <div><kbd>N / P</kbd><span>Next / previous hunk</span></div>
+      <div><kbd>Space</kbd><span>Stage / unstage the file, hunk or lines</span></div>
+      <div><kbd>Shift+click, Cmd+click</kbd><span>Select lines in a hunk</span></div>
+      <div><kbd>Cmd+Backspace</kbd><span>Discard the file, hunk or lines</span></div>
+      <div><kbd>Cmd+Enter</kbd><span>Commit</span></div>
+      <div><kbd>Cmd+1</kbd><span>Show / hide the side panel</span></div>
+      <div><kbd>Cmd+4</kbd><span>Show / hide the agent (4a)</span></div>
+      <div><kbd>Esc</kbd><span>Clear the selected lines, else back to Dev mode</span></div>
+    </section>
+    <section><h4>Pickers (Cmd+T, Cmd+P)</h4>
+      <div><kbd>Up / Down, Enter</kbd><span>Choose</span></div>
+      <div><kbd>1-9</kbd><span>Pick that row</span></div>
+      <div><kbd>Esc</kbd><span>Close</span></div>
+    </section>
+    <section><h4>New card dialog</h4>
+      <div><kbd>Enter</kbd><span>From the title to the notes</span></div>
+      <div><kbd>Cmd+Enter</kbd><span>Create</span></div>
+      <div><kbd>Esc</kbd><span>Close (the text is kept)</span></div>
+    </section>
+  </div>
+</div></div>
 <div id="ctx" class="ctx-menu" hidden></div>
 <div id="toast" hidden></div>
 <script src="/vendor/xterm/xterm.js"></script>
@@ -120,12 +189,16 @@
 <script src="/vendor/xterm/addon-unicode11.js"></script>
 <script src="/vendor/codemirror.js"></script>
 <script src="/app.js"></script>
+<script src="/grid.js"></script>
 <script src="/files.js"></script>
+<script src="/veil.js"></script>
 <script src="/explorer.js"></script>
+<script src="/finder.js"></script>
 <script src="/browser.js"></script>
 <script src="/review.js"></script>
 <script src="/menu.js"></script>
 <script src="/shells.js"></script>
+<script src="/copytab.js"></script>
 <script src="/layout.js"></script>
 </body>
 </html>

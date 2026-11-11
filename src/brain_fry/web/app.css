@@ -44,6 +44,7 @@ button:disabled { opacity: .45; cursor: default; }
 .mode.on { background: var(--accent); color: #fff; border-color: var(--accent); }
 #task-head { flex: 1; display: flex; align-items: center; gap: 10px; min-width: 0; }
 #task-head .actions { display: flex; gap: 6px; margin-left: auto; }
+.switch { display: flex; align-items: center; gap: 5px; color: var(--dim); font-size: 12px; white-space: nowrap; cursor: pointer; }
 
 #banner { padding: 6px 12px; background: #4a3a12; color: #ffd98a; border-bottom: 1px solid var(--line); }
 #banner code { background: #0004; padding: 0 4px; border-radius: 3px; }
@@ -75,6 +76,9 @@ body.resizing-v, body.resizing-v * { cursor: row-resize !important; user-select:
 #tree .node.cut .name { opacity: .5; }
 #tree .tree-rename { font: inherit; color: var(--text); background: var(--bg); border: 1px solid var(--accent); border-radius: 3px;
   padding: 0 3px; width: calc(100% - 16px); outline: none; }
+/* Cmd+J E: a key on each row on screen, right after the name (explorer.js) */
+#tree .tree-hint { display: inline-block; vertical-align: 1px; margin-left: 6px; padding: 0 3px; border-radius: 3px;
+  background: var(--accent); color: #0b1220; font: 600 10px/14px ui-monospace, Menlo, monospace; pointer-events: none; }
 /* right-click menu of 2a (explorer.js) */
 .ctx-menu { position: fixed; z-index: 60; min-width: 220px; padding: 4px; background: var(--panel-2); border: 1px solid var(--line);
   border-radius: 7px; box-shadow: 0 8px 24px rgba(0, 0, 0, .45); font-size: 12.5px; }
@@ -86,10 +90,20 @@ body.resizing-v, body.resizing-v * { cursor: row-resize !important; user-select:
 
 /* the middle column gives way first when the window is narrow; 4a keeps at least 360 px */
 #middle { flex: 0 1 var(--w-middle, 480px); display: flex; flex-direction: column; min-height: 0; min-width: 280px; }
-#files { flex: 1; display: flex; flex-direction: column; min-height: 0; background: #282c34; }
+/* the grid of column 3 (grid.js): two rows of two panes; flex-grow holds the fractions of layout.js */
+.grid-row { flex: 1 1 0; display: flex; min-height: 0; }
+.pane { flex: 1 1 0; display: flex; flex-direction: column; min-width: 0; min-height: 0; background: #000; }
+.pane-body { flex: 1; position: relative; min-height: 0; }
+/* the pane that I use, when there are several: its tab on screen keeps the accent, the others' turn grey */
+#middle.multi .pane:not(.used) .tabs .tab.on { box-shadow: inset 0 2px 0 #5c6370; }
 /* files are pure black (Renaud, 2026-11-10): the ids beat the scoped classes of CodeMirror's One Dark (#282c34) */
-#files, #files .tabs .tab.on, #editors .cm-editor, #editors .cm-gutters, #editors .viewer.image-viewer { background: #000; }
-#shells { height: var(--h-shells, 220px); flex: none; display: flex; flex-direction: column; background: #1e1e1e; min-height: 0; }
+#middle .pane .tabs .tab.on, #middle .pane-body .cm-editor, #middle .pane-body .cm-gutters, #middle .pane-body .viewer.image-viewer { background: #000; }
+#middle .pane-body .term { background: #1e1e1e; }
+/* a tab dragged to another pane: its name follows the mouse, the place where it goes is marked */
+.tab-ghost { position: fixed; left: 0; top: 0; z-index: 50; pointer-events: none; padding: 4px 10px; font-size: 12px;
+  color: var(--text); background: var(--panel-2); border: 1px solid var(--accent); border-radius: 4px; }
+.drop-mark { position: fixed; z-index: 49; pointer-events: none; background: rgba(77, 120, 204, .25); border: 2px solid var(--accent); }
+body.tab-dragging, body.tab-dragging * { cursor: grabbing !important; user-select: none; }
 .tabs { display: flex; background: var(--panel); border-bottom: 1px solid var(--line); overflow-x: auto; flex: none; min-height: 30px; }
 .tabs .tab { display: flex; align-items: center; gap: 6px; padding: 5px 10px; font-size: 12px; color: var(--dim);
   border-right: 1px solid var(--line); cursor: pointer; white-space: nowrap; }
@@ -98,16 +112,20 @@ body.resizing-v, body.resizing-v * { cursor: row-resize !important; user-select:
 .tabs .tab .x { opacity: .5; padding: 0 2px; }
 .tabs .tab .x:hover { opacity: 1; color: #fff; }
 .tabs .tab .dirty { color: #e9d38a; }
-.tabs .tab.add { color: var(--text); font-weight: 600; }
-#file-bar { display: flex; align-items: center; gap: 8px; padding: 3px 8px; font-size: 11px; color: var(--dim); background: #21252b; flex: none; }
-#file-bar:empty { display: none; }
-#file-bar .path { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-#file-bar { overflow-x: auto; }
-#file-bar .path { min-width: 60px; }
-#file-bar .note { color: #e9d38a; white-space: nowrap; }
-#file-bar button { font-size: 11px; padding: 1px 8px; white-space: nowrap; flex: none; }
-#file-bar button.on { background: var(--accent); border-color: var(--accent); color: #fff; }
-#editors { flex: 1; position: relative; min-height: 0; }
+/* close all tabs of a pane (grid.js): at the right end of its tab bar, still there when the tabs scroll */
+.pane-tabs .pane-x { position: sticky; right: 0; margin-left: auto; flex: none; align-self: center; padding: 3px 4px;
+  margin-right: 4px; line-height: 0; color: var(--dim); background: var(--panel); border-color: transparent; box-shadow: -4px 0 4px var(--panel); }
+.pane-tabs .pane-x:hover { color: var(--text); background: var(--panel-2); border-color: var(--line); }
+.pane-bar { display: flex; align-items: center; gap: 8px; padding: 3px 8px; font-size: 11px; color: var(--dim); background: #21252b; flex: none; }
+.pane-bar:empty { display: none; }
+.pane-bar .path { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pane-bar { overflow-x: auto; }
+.pane-bar .path { min-width: 60px; }
+.pane-bar .note { color: #e9d38a; white-space: nowrap; }
+.pane-bar button { font-size: 11px; padding: 1px 8px; white-space: nowrap; flex: none; }
+.pane-bar button.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+.pane-bar button.run { color: #89d185; padding: 1px 6px; } /* VS Code's green of Run */
+.pane-bar button.run svg { vertical-align: -1px; }
 .editor { position: absolute; inset: 0; }
 /* viewers of 3a: images and PDFs */
 .viewer { background: #1b1e23; outline: none; }
@@ -116,22 +134,16 @@ body.resizing-v, body.resizing-v * { cursor: row-resize !important; user-select:
   background: repeating-conic-gradient(#3a3f4b 0% 25%, #2c313a 0% 50%) 50% / 16px 16px; }  /* shows transparency */
 .image-viewer.fit img { max-width: 100%; max-height: 100%; object-fit: contain; cursor: zoom-in; }
 .pdf-container { position: absolute; inset: 0; overflow: auto; background: #3b3f46; outline: none; }  /* PDF.js wants it absolute */
-#file-bar .meta { white-space: nowrap; }
-#file-bar .pdf-tools { display: flex; align-items: center; gap: 4px; flex: none; }
-#file-bar .pdf-tools input, #file-bar .pdf-tools select { font: inherit; color: var(--text); background: var(--panel-2);
+.pane-bar .meta { white-space: nowrap; }
+.pane-bar .pdf-tools { display: flex; align-items: center; gap: 4px; flex: none; }
+.pane-bar .pdf-tools input, .pane-bar .pdf-tools select { font: inherit; color: var(--text); background: var(--panel-2);
   border: 1px solid var(--line); border-radius: 3px; padding: 1px 4px; }
-#file-bar .pdf-page { width: 3.5em; text-align: right; }
-#file-bar .pdf-find { width: 11em; margin-left: 6px; }
-#file-bar .pdf-count { min-width: 4em; white-space: nowrap; }
+.pane-bar .pdf-page { width: 3.5em; text-align: right; }
+.pane-bar .pdf-find { width: 11em; margin-left: 6px; }
+.pane-bar .pdf-count { min-width: 4em; white-space: nowrap; }
 #toast button { margin-left: 8px; font-size: 12px; padding: 1px 8px; }
-#shell-terms { flex: 1; position: relative; min-height: 0; }
-.empty-pane { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: var(--dim);
-  font-style: italic; padding: 16px; text-align: center; }
 #side section { padding: 8px 0 4px; }
 #side h2 { margin: 0 12px 6px; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .06em; color: var(--dim); }
-#side h2.toggle { cursor: pointer; }
-#side h2.toggle::before { content: "▸ "; }
-#side h2.toggle.open::before { content: "▾ "; }
 .keys { margin-top: auto; padding: 8px 12px; color: var(--dim); font-size: 11px; border-top: 1px solid var(--line); }
 
 .list .row { display: flex; gap: 8px; padding: 6px 12px; cursor: pointer; border-left: 3px solid transparent; }
@@ -163,15 +175,13 @@ body.resizing-v, body.resizing-v * { cursor: row-resize !important; user-select:
 
 #agent { flex: 1; position: relative; min-width: 360px; background: #1e1e1e; }
 #terms, .term { position: absolute; inset: 0; }
-.term { padding: 6px 0 0 8px; }
+/* content-box: xterm.js's FitAddon reads the computed height of this div and does not subtract its padding */
+.term { padding: 6px 0 0 8px; box-sizing: content-box; }
 #overlay { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; flex-direction: column;
   gap: 12px; background: #1e1e1ee6; color: var(--dim); text-align: center; padding: 24px; }
-#overlay[hidden] { display: none; }
-/* the empty 4a: a calm photo of web/calm/, no text, a little dimmed for the dark theme, fading in */
-#calm { position: absolute; inset: 0; background: #1e1e1e center / cover no-repeat; animation: calm-in 1.2s ease-out; }
+/* the empty 4a: a calm photo of web/calm/, no text, a little dimmed for the dark theme; app.js fades it */
+#calm { position: absolute; inset: 0; background: #1e1e1e center / cover no-repeat; }
 #calm::after { content: ""; position: absolute; inset: 0; background: #1e1e1e26; }
-#calm[hidden] { display: none; }
-@keyframes calm-in { from { opacity: 0; } }
 /* on top of the terminal, not above it: showing it must not resize the PTY (Claude Code would re-render) */
 #sel-chip { position: absolute; top: 6px; right: 14px; z-index: 20; font-size: 11.5px; color: var(--text);
   background: #2b2d32ee; border: 1px solid var(--accent); border-radius: 10px; padding: 1px 4px 1px 9px; }
@@ -179,8 +189,8 @@ body.resizing-v, body.resizing-v * { cursor: row-resize !important; user-select:
 #sel-chip .x:hover { color: var(--text); }
 #overlay .big { font-size: 15px; color: var(--text); }
 
-.modal { position: fixed; inset: 0; background: #0008; display: flex; align-items: flex-start; justify-content: center; padding-top: 12vh; }
-.modal[hidden] { display: none; }
+/* z-index: above #tree-collapse (2) and #sel-chip (20), below the toast and the menus */
+.modal { position: fixed; inset: 0; z-index: 40; background: #0008; display: flex; align-items: flex-start; justify-content: center; padding-top: 12vh; }
 .modal .box { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; width: 460px; max-height: 60vh;
   overflow-y: auto; box-shadow: 0 10px 40px #0008; }
 .modal h3 { margin: 0; padding: 10px 14px; font-size: 13px; border-bottom: 1px solid var(--line); }
@@ -193,6 +203,13 @@ body.resizing-v, body.resizing-v * { cursor: row-resize !important; user-select:
 .modal kbd { font: 11px ui-monospace, Menlo, monospace; color: var(--dim); border: 1px solid var(--line); border-radius: 4px;
   padding: 1px 6px; min-width: 22px; text-align: center; }
 .modal .item.sel kbd { color: var(--text); border-color: var(--dim); }
+#keys { padding-top: 6vh; }
+#keys .box { width: min(980px, calc(100vw - 32px)); max-height: 84vh; }
+#keys .cols { columns: 3 280px; column-gap: 28px; padding: 4px 14px 12px; }
+#keys section { break-inside: avoid; padding-top: 8px; }
+#keys h4 { margin: 0 0 4px; font-size: 11px; font-weight: 600; color: var(--dim); text-transform: uppercase; letter-spacing: .04em; }
+#keys section div { display: flex; align-items: baseline; gap: 10px; padding: 2px 0; font-size: 12px; }
+#keys kbd { flex: none; min-width: 0; color: var(--text); white-space: nowrap; }
 .modal .item .remove { visibility: hidden; border: 0; background: none; color: var(--dim); font-size: 15px; line-height: 1;
   padding: 2px 5px; border-radius: 4px; cursor: pointer; }
 .modal .item:hover .remove, .modal .item.sel .remove { visibility: visible; }
@@ -242,19 +259,6 @@ body.resizing-v, body.resizing-v * { cursor: row-resize !important; user-select:
 .run { font-size: 10px; padding: 0 5px; border-radius: 3px; background: #30a46c22; color: #7ee2a8; white-space: nowrap; }
 .run.busy { background: #e8912d22; color: #f0b26b; }
 
-/* sessions of my projects that are not tasks: drag one onto a column to adopt it */
-#others { flex: none; max-height: 40%; display: flex; flex-direction: column; min-height: 0; border-top: 1px solid var(--line); }
-#others h3 { margin: 0; padding: 8px 14px; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .06em;
-  color: var(--dim); cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-#others h3::before { content: "▸ "; }
-#others h3.open::before { content: "▾ "; }
-#others h3 .hint { text-transform: none; letter-spacing: 0; font-weight: 400; margin-left: 10px; }
-#others-cards { overflow-y: auto; display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 8px;
-  padding: 0 14px 12px; align-content: start; }
-#others-cards .empty { color: var(--dim); font-style: italic; }
-.card.other { border-style: dashed; background: var(--panel); }
-.card.other .line { -webkit-line-clamp: 3; }
-
 #splash { position: fixed; inset: 0; z-index: 100; background: #040510; display: flex; flex-direction: column;
   align-items: center; justify-content: center; gap: 18px; transition: opacity .45s ease; }
 #splash img { width: min(46vmin, 360px); height: auto; image-rendering: pixelated;
@@ -262,5 +266,5 @@ body.resizing-v, body.resizing-v * { cursor: row-resize !important; user-select:
 #splash .name { color: #c9a7b8; font-size: 15px; letter-spacing: .3em; text-transform: uppercase; }
 #splash.gone { opacity: 0; pointer-events: none; }
 
-#toast { position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%); background: #5a1e22; color: #ffd0d2;
+#toast { position: fixed; z-index: 45; bottom: 16px; left: 50%; transform: translateX(-50%); background: #5a1e22; color: #ffd0d2;
   padding: 8px 14px; border-radius: 6px; max-width: 70vw; }

@@ -4,7 +4,24 @@
 
 const MENU = {
   cookies: () => overwriteCookies(),
+  keys: () => { $('#keys').hidden = false; }, // the list is static, in index.html
 };
+
+// "Show shortcuts": Esc or a click outside the box closes it. While it shows, no key may
+// reach a terminal or a mode: window, capture phase, runs before every document listener
+function closeKeys() {
+  $('#keys').hidden = true;
+  const t = S.selected && S.terms.get(S.selected);
+  if (S.mode === 'organize') $('#board').focus();
+  else if (S.mode === 'dev' && t) t.term.focus();
+}
+$('#keys').addEventListener('click', (e) => { if (e.target === $('#keys')) closeKeys(); });
+window.addEventListener('keydown', (e) => {
+  if ($('#keys').hidden) return;
+  e.preventDefault();
+  e.stopImmediatePropagation();
+  if (e.key === 'Escape') closeKeys();
+}, true);
 
 function openMenu() {
   const m = $('#menu');

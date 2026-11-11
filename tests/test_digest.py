@@ -67,6 +67,64 @@ def test_skipped_thread_does_not_stay_pending(project):
     assert [th.kind for th in taskfile.load(paths.task_path(project, "s1")).threads] == ["FYI", "review"]
 
 
+def _held(project, **kw):
+    """The state after a Stop that left a background shell running (events.py)."""
+    return make(project, [Thread(n=1, ts="x", kind="pending", prompt="wait", reply="I'll wait for b2d49b16.")],
+                status="working", live=True, held=True, **kw)  # fmt: skip
+
+
+def _one(kind):
+    return fake({"title": "T", "digest": "D", "threads": [{"n": 1, "kind": kind, "digest": "d", "question": None}]})
+
+
+def test_held_reply_that_waits_stays_out_of_the_inbox(project):
+    digest.digest_task(_held(project), _one("wait"))
+    got = taskfile.load(paths.task_path(project, "s1"))
+    assert (got.held, got.status, got.inbox, got.unread, got.threads[0].kind) == (False, "working", False, False, "wait")
+
+
+@pytest.mark.parametrize("kind", ["FYI", "review", "answer"])
+def test_held_reply_that_does_not_wait_goes_to_the_inbox(project, kind):
+    digest.digest_task(_held(project), _one(kind))
+    got = taskfile.load(paths.task_path(project, "s1"))
+    assert (got.held, got.status, got.inbox, got.unread) == (False, "waiting", True, True)
+
+
+def test_held_reply_goes_to_the_inbox_when_the_digest_fails(project):
+    _held(project)
+
+    def call(prompt):
+        raise digest.DigestError("boom")
+
+    digest.digest_project(project, call)
+    got = taskfile.load(paths.task_path(project, "s1"))
+    assert (got.held, got.status, got.inbox, got.threads[0].kind) == (False, "waiting", True, "pending")
+
+
+def test_held_reply_archived_meanwhile_stays_archived(project):
+    t = _held(project)
+    t.status = "done"
+    taskfile.save(t)
+    digest.digest_task(t, _one("review"))
+    got = taskfile.load(paths.task_path(project, "s1"))
+    assert (got.held, got.status, got.inbox) == (False, "done", False)
+
+
+def test_wait_without_a_hold_changes_nothing(project):
+    """Nothing in flight can wake the agent: the reply stays in the inbox, whatever Sonnet says."""
+    t = make(project, [Thread(n=1, ts="x", kind="pending", reply="I'll wait.")], status="waiting", inbox=True, unread=True)
+    digest.digest_task(t, _one("wait"))
+    got = taskfile.load(paths.task_path(project, "s1"))
+    assert (got.status, got.inbox, got.threads[0].kind) == ("waiting", True, "wait")
+
+
+def test_wait_is_described_in_the_schema_and_the_prompt():
+    from importlib import resources
+
+    assert "wait" in digest.SCHEMA["properties"]["threads"]["items"]["properties"]["kind"]["enum"]
+    assert "- wait:" in resources.files("brain_fry").joinpath("inbox_prompt.md").read_text()
+
+
 def test_failure_leaves_the_thread_pending(project):
     make(project, [Thread(n=1, ts="x", kind="pending", reply="a")])
 
