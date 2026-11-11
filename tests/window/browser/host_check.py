@@ -146,7 +146,7 @@ check("the page sees the Firefox cookie", "ff=1" in (seen.get("v") or ""), repr(
 # ---- keys
 core.msgs.clear()
 key("", code=125)  # Cmd+Down: Brain Fry's (next inbox item)
-check("Cmd+Down goes to Brain Fry", msgs("key") == [{"type": "browser", "ev": "key", "key": "ArrowDown", "shift": False, "alt": False, "ctrl": False}],
+check("Cmd+Down goes to Brain Fry", msgs("key") == [{"type": "browser", "ev": "key", "key": "ArrowDown", "tab": page.key, "shift": False, "alt": False, "ctrl": False}],
       str(msgs("key")))  # fmt: skip
 check("...and the focus goes back to Brain Fry's page", host._focused_page() is None)
 win.makeFirstResponder_(page.wv)

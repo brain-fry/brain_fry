@@ -58,8 +58,6 @@ def log_changes(task: Task, changes: dict) -> None:
 
 
 def _brief(value) -> str:
-    if isinstance(value, list) and value and hasattr(value[0], "n"):  # threads
-        return f"{len(value)} threads"
     text = repr(value)
     return text if len(text) <= 120 else text[:117] + "..."
 

@@ -27,7 +27,7 @@ ui_log = logging.getLogger("brain_fry.ui")
 CONSUME_EVERY = 0.5  # s
 SWEEP_EVERY = 60  # s: retry failed digests, close idle sessions
 DIGEST_RETRY = 120  # s after a failure
-DIGEST_NOW, DIGEST_LATER = 0, 1  # priorities in the digest queue: turns first, then short titles of older tasks
+DIGEST_NOW = 0  # the priority of a turn in the digest queue; the shutdown's (-1) goes first
 IDLE_CLOSE = 4 * 3600  # s without events and output, see DESIGN_DETAILS.md "App"
 OUTSIDE_EVERY = 3  # s: which tasks run elsewhere, the end of a block, projects.json
 PROJECT_WS = "project:"  # the id of a project's files with no task selected (fs.* commands, /file/)
@@ -55,7 +55,7 @@ class Core:
         self.selected: str | None = None
         # (priority, seq, task id); a task id None stops the worker
         self.digest_q: queue.PriorityQueue[tuple[int, int, str | None]] = queue.PriorityQueue()
-        self.queued: dict[str, int] = {}  # task id -> its best priority in the queue
+        self.queued: set[str] = set()  # the task ids in the digest queue
         self._digest_seq = itertools.count()
         self.failed: dict[str, float] = {}
         self.digest_error: str | None = None
@@ -236,7 +236,6 @@ class Core:
             try:
                 tasks = await asyncio.to_thread(actions.all_tasks)
                 self._enqueue_digest([t.id for t in tasks if any(th.kind == "pending" for th in t.threads)])
-                self._enqueue_digest([t.id for t in tasks if digest.needs_call(t)], DIGEST_LATER)  # short titles
                 now = time.time()
                 for t in tasks:
                     s = self.ptys.get(t.id)
@@ -248,15 +247,14 @@ class Core:
                 log.exception("sweep")
             await asyncio.sleep(SWEEP_EVERY)
 
-    def _enqueue_digest(self, ids: list[str], prio: int = DIGEST_NOW) -> None:
-        """A task already queued with a lower priority is queued again; its first entry
-        out of the queue does the work, the other is skipped."""
+    def _enqueue_digest(self, ids: list[str]) -> None:
+        """A task that is already in the queue is not queued again."""
         now = time.time()
         for tid in ids:
-            if self.queued.get(tid, 99) > prio and now - self.failed.get(tid, 0) > DIGEST_RETRY:
-                log.debug("digest %s queued (priority %d)%s", short(tid), prio, " (retry)" if tid in self.failed else "")
-                self.queued[tid] = prio
-                self.digest_q.put((prio, next(self._digest_seq), tid))
+            if tid not in self.queued and now - self.failed.get(tid, 0) > DIGEST_RETRY:
+                log.debug("digest %s queued%s", short(tid), " (retry)" if tid in self.failed else "")
+                self.queued.add(tid)
+                self.digest_q.put((DIGEST_NOW, next(self._digest_seq), tid))
 
     async def _outside_loop(self) -> None:
         while not self.shutting_down:
@@ -341,12 +339,10 @@ class Core:
 
     def _digest_worker(self) -> None:
         while True:
-            prio, _, tid = self.digest_q.get()
+            _, _, tid = self.digest_q.get()
             if tid is None:
                 return
-            if self.queued.get(tid) != prio:
-                continue  # queued again with a higher priority, and done then
-            del self.queued[tid]
+            self.queued.discard(tid)
             try:
                 task = actions.load(tid)
                 if digest.needs_call(task):
@@ -371,13 +367,12 @@ class Core:
     # ---------------------------------------------------------------- PTYs
 
     def _start_pty(self, key: str, argv: list[str], cwd: str, rows: int, cols: int,
-                   kind: str = "claude", task: str | None = None, title: str = "",
-                   extra_env: dict[str, str] | None = None) -> PtySession:  # fmt: skip
+                   kind: str = "claude", task: str | None = None, title: str = "") -> PtySession:  # fmt: skip
         """kind "claude": a task's session in 4a, key = task id. kind "shell": a terminal
         tab (3b) of `task`, key = "shell:<task>:<n>"."""
         gen = self.gens.get(key, 0) + 1
         self.gens[key] = gen
-        env = child_env(TERM="xterm-256color", COLORTERM="truecolor", **(extra_env or {}))
+        env = child_env(TERM="xterm-256color", COLORTERM="truecolor")
         if kind == "claude":  # Claude Code writes its links as OSC 8 (DESIGN_DETAILS.md "Browser (3a)")
             env["FORCE_HYPERLINK"] = "1"
         if not Path(cwd).is_dir():
@@ -426,12 +421,12 @@ class Core:
         its commands and its folder (ptys.scan_info). Other shells: `-l`, and they tell nothing."""
         self.shell_seq += 1
         shell = os.environ.get("SHELL") or "/bin/zsh"
-        argv, extra = [shell, "-l"], None
+        argv, tells = [shell, "-l"], False
         if Path(shell).name == "bash" and SHELL_INIT.is_file():
-            argv, extra = [shell, "--init-file", str(SHELL_INIT)], {"BF_SHELL_LOGIN": "1"}
+            argv, tells = [shell, "--init-file", str(SHELL_INIT)], True
         s = self._start_pty(f"shell:{task.id}:{self.shell_seq}", argv, cwd or task.cwd, rows, cols,
-                            kind="shell", task=task.id, title=Path(shell).name, extra_env=extra)  # fmt: skip
-        s.tells = extra is not None
+                            kind="shell", task=task.id, title=Path(shell).name)  # fmt: skip
+        s.tells = tells
         return s
 
     @staticmethod

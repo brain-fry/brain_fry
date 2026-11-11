@@ -401,13 +401,13 @@ function drawReview() {
   if (S.mode !== 'review') return;
   const st = R.st;
   if (!R.key || !st || !st.repo || R.error) {
-    const msg = !R.key ? 'Select a task: Review mode shows the git repository of its folder.'
+    const msg = !R.key ? ''
       : R.error ? `Git: ${esc(R.error)}`
-      : !st ? 'Loading...'
+      : !st ? ''
       : `${esc((S.state.tasks[R.key] || {}).project || 'This project')} is not in a git repository.`;
     setHtml('rv-side', '');
     setHtml('rv-loghead', '');
-    setHtml('rv-rows', `<div class="rv-note">${msg}</div>`);
+    setHtml('rv-rows', msg ? `<div class="rv-note">${msg}</div>` : '');
     setHtml('rv-files', '');
     setHtml('rv-diffbar', '');
     setHtml('rv-diffbody', '');
@@ -435,8 +435,7 @@ function drawSide() {
     const right = [track, wt ? `wt ${wt.name}` : ''].filter(Boolean).join(' · ');
     return `<div class="rv-branch${b.name === st.branch ? ' cur' : ''}" data-branch="${esc(b.name)}"><span class="name">${esc(b.name)}</span><span class="right">${esc(right)}</span></div>`;
   }).join('');
-  setHtml('rv-side', `<h2>Worktrees</h2>${trees}<h2>Branches</h2>${branches || '<div class="rv-empty">No branch yet.</div>'}
-    <footer class="keys">Cmd+Shift+G back · Tab next panel · Up/Down move · Space stage · N/P hunk · click, Shift+click: lines · Cmd+Backspace discard · Cmd+Enter commit · Cmd+1 side panel · Cmd+4 agent · Cmd+B board</footer>`);
+  setHtml('rv-side', `<h2>Worktrees</h2>${trees}<h2>Branches</h2>${branches}`);
 }
 
 function fmtDate(t) {
@@ -516,7 +515,7 @@ function drawFiles() {
   const unstaged = files.filter((f) => f.side === 'unstaged' || f.side === 'untracked');
   const op = st.op ? `<div class="rv-op">${esc(st.op[0].toUpperCase() + st.op.slice(1))} in progress: resolve the conflicts, stage them, then commit.</div>` : '';
   const sec = (title, list, act, buttons) => `<div class="rv-sec"><h2>${title} <span class="n">${list.length}</span>${buttons}</h2>`
-    + (list.length ? list.map((f) => fileRowHtml(f, act)).join('') : '<div class="rv-empty">None.</div>') + '</div>';
+    + list.map((f) => fileRowHtml(f, act)).join('') + '</div>';
   const hidden = st.staged.length ? '' : 'disabled title="Nothing is staged"';
   setHtml('rv-files', op
     + (conflicts.length ? sec('Conflicts', conflicts, { label: '+', title: 'Mark resolved (stage it)' }, '') : '')
@@ -528,14 +527,14 @@ function drawFiles() {
 
 function drawCommitFiles() {
   const i = R.info;
-  if (!i) return setHtml('rv-files', '<div class="rv-note">Loading...</div>');
+  if (!i) return setHtml('rv-files', '');
   const files = i.files.map((f) => ({ ...f, side: 'commit', sha: i.h }));
   const [subject, ...rest] = i.message.split('\n');
   const body = rest.join('\n').trim();
   setHtml('rv-files', `<div class="rv-commit"><div class="subj">${esc(subject)}</div>${body ? `<div class="body">${esc(body)}</div>` : ''}
     <dl><dt>Commit</dt><dd class="mono">${esc(i.h)}</dd><dt>Parents</dt><dd class="mono">${esc(i.parents.map((p) => p.slice(0, 7)).join(', ') || 'none')}</dd>
     <dt>Author</dt><dd>${esc(i.author)}</dd><dt>Date</dt><dd>${esc(new Date(i.t * 1000).toLocaleString('en-GB', { dateStyle: 'medium', timeStyle: 'short' }))}</dd></dl></div>
-    <div class="rv-sec"><h2>Files <span class="n">${files.length}</span></h2>${files.map((f) => fileRowHtml(f, null)).join('') || '<div class="rv-empty">No change.</div>'}</div>`);
+    <div class="rv-sec"><h2>Files <span class="n">${files.length}</span></h2>${files.map((f) => fileRowHtml(f, null)).join('')}</div>`);
 }
 
 const SIDE_TEXT = {
@@ -546,15 +545,14 @@ const SIDE_TEXT = {
   commit: ['Commit', ''],
 };
 
-function diffNote(d, f) {
-  if (!d) return 'Loading...';
+function diffNote(d) {
+  if (!d) return '';
   if (d.folder) return 'A folder of untracked files: stage it or move it to the Trash as a whole.';
   if (d.tooBig) return 'Too big to show (over 2 MB).';
   if (d.info && d.info.binary) return 'Binary file.';
   if (!d.hunks.length) {
     const modes = (d.header || []).filter((l) => /^(old|new) mode /.test(l)).join(' --> ').replace(/(old|new) mode /g, '');
     if (modes) return `Mode changed: ${modes}.`;
-    return f.side === 'commit' ? 'No change of content.' : 'No change of content (a rename, or a file staged as a whole).';
   }
   return '';
 }
@@ -563,7 +561,7 @@ function drawDiff() {
   const f = R.file, d = R.diff;
   if (!f) {
     setHtml('rv-diffbar', '');
-    setHtml('rv-diffbody', `<div class="rv-note">${R.sel === 'wip' ? (wipFiles().length ? 'Select a file.' : 'No changes.') : 'Select a file.'}</div>`);
+    setHtml('rv-diffbody', '');
     return;
   }
   const [kind, range0] = SIDE_TEXT[f.side] || ['', ''];
@@ -583,8 +581,8 @@ function drawDiff() {
   if (body.dataset.key !== key) {
     const sameFile = body.dataset.file === R.diffKey;
     const scroll = sameFile ? body.scrollTop : 0;
-    const note = diffNote(d, f);
-    body.innerHTML = note && !(d && d.hunks.length) ? `<div class="rv-note">${note}</div>`
+    const note = diffNote(d);
+    body.innerHTML = !d ? '' : note && !d.hunks.length ? `<div class="rv-note">${note}</div>`
       : d.hunks.map((h, i) => hunkHtml(h, i, pick)).join('')
         + (d.truncated ? `<div class="rv-note">The diff has ${d.total} lines: the first ones are shown. <button data-rv-file="show-all">Show all</button></div>` : '');
     body.classList.toggle('rv-pick', Boolean(pick));

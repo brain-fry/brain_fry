@@ -1,6 +1,7 @@
 import os
 import select
 import sys
+import termios
 import time
 
 from brain_fry.app.ptys import set_size, spawn
@@ -32,6 +33,7 @@ def test_spawn_gives_a_controlling_terminal_size_and_sigwinch():
     try:
         out = read_until(fd, b"LEADER")
         assert b"columns=100, lines=30" in out and b"CTTY True" in out and b"LEADER True" in out
+        assert termios.tcgetattr(fd)[0] & 0x00004000  # IUTF8, also where Python's termios lacks the constant (macOS)
         os.write(fd, b"hello\r")
         assert b"READ hello" in read_until(fd, b"READ")
         set_size(fd, 40, 120)

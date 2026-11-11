@@ -137,14 +137,14 @@ function renderExplorer() {
   const task = tid && S.state.tasks[tid];
   const project = tid && wsProject(tid);
   const el = $('#tree');
-  if (!project) { el.innerHTML = '<div class="empty">No task selected.</div>'; return; }
+  if (!project) { el.innerHTML = ''; return; }
   const w = work(tid);
   if (task && task.updated !== w.lastUpdated) { // an event arrived: the agent may have added files
     const first = w.lastUpdated === null;
     w.lastUpdated = task.updated;
     if (!first) refreshTree(tid);
   }
-  if (!w.kids.has('')) { loadDir(tid, ''); el.innerHTML = '<div class="empty">Loading...</div>'; return; }
+  if (!w.kids.has('')) { loadDir(tid, ''); el.innerHTML = ''; return; }
   const rows = [];
   const shown = fileOnScreen(w);
   const walk = (path, depth) => {
@@ -162,7 +162,7 @@ function renderExplorer() {
     }
   };
   walk('', 0);
-  el.innerHTML = rows.join('') || '<div class="empty">Empty folder.</div>';
+  el.innerHTML = rows.join('');
   if (G.chord && G.chord.kind === 'tree') drawTreeHints(); // Cmd+J E: the labels follow the new rows (explorer.js)
 }
 

@@ -222,15 +222,13 @@ def _screenshot(window, path: str) -> None:
     done.wait(5)
 
 
-def _selftest(window, seconds: float, new_in: str | None, shots: str | None, js: str | None) -> None:
-    """For Claude to check the window without a human: optionally start a task or run
-    some JS, wait, print the page text and the selected terminal, close."""
+def _selftest(window, seconds: float, shots: str | None, js: str | None) -> None:
+    """For Claude to check the window without a human: optionally run some JS, wait, print
+    the page text and the selected terminal, close."""
     time.sleep(0.5)
     if shots:
         _screenshot(window, f"{shots}/1_splash.png")
     time.sleep(2.5)
-    if new_in:
-        window.evaluate_js(f"newTask({json.dumps(new_in)})")
     if js:
         window.evaluate_js(js)
     time.sleep(seconds)
@@ -248,8 +246,7 @@ def _selftest(window, seconds: float, new_in: str | None, shots: str | None, js:
 
 
 def run(debug: bool = False, browser: bool = False, selftest: float | None = None,
-        selftest_new: str | None = None, selftest_shots: str | None = None,
-        selftest_js: str | None = None) -> int:  # fmt: skip
+        selftest_shots: str | None = None, selftest_js: str | None = None) -> int:  # fmt: skip
     logfile = logs.setup("app", debug)
     lock = _single_instance()  # noqa: F841
     _log_start(logfile)
@@ -287,7 +284,7 @@ def run(debug: bool = False, browser: bool = False, selftest: float | None = Non
         core.browser = BrowserHost(core, window)  # the browser of 3a; sets itself up at its first command
         core.window = window  # the save panel of an untitled tab
         if selftest is not None:
-            webview.start(_selftest, (window, selftest, selftest_new, selftest_shots, selftest_js), debug=debug)
+            webview.start(_selftest, (window, selftest, selftest_shots, selftest_js), debug=debug)
         else:
             webview.start(debug=debug)
     except KeyboardInterrupt:

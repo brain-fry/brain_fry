@@ -398,10 +398,12 @@ def test_static_files_are_served(backend):
     assert urllib.request.urlopen(f"http://127.0.0.1:{port}/app.js").status == 200
     # the photos of the empty 4a, one for each name in app.js
     import re
+    from pathlib import Path
 
     js = urllib.request.urlopen(f"http://127.0.0.1:{port}/app.js").read().decode()
     names = re.findall(r"'([a-z-]+)'", js.split("const CALM_PHOTOS = [", 1)[1].split("];", 1)[0])
-    assert len(names) == 7
+    calm = Path(actions.__file__).parent / "web" / "calm"
+    assert sorted(names) == sorted(f.stem for f in calm.glob("*.jpg"))  # every photo listed, none missing
     for name in names:
         r = urllib.request.urlopen(f"http://127.0.0.1:{port}/calm/{name}.jpg")
         assert r.headers["Content-Type"] == "image/jpeg" and r.read(3) == b"\xff\xd8\xff"
@@ -671,9 +673,8 @@ def test_pin_command_keeps_the_task_in_the_inbox(backend, project):
         assert st["tasks"][t.id]["pinned"] is False
 
 
-def test_digest_queue_does_turns_before_short_titles(project, monkeypatch):
+def test_digest_queue_skips_a_task_already_in_it(project, monkeypatch):
     from brain_fry import digest
-    from brain_fry.app.core import DIGEST_LATER
 
     a, b = actions.new_task(project), actions.new_task(project)
     for t in (a, b):
@@ -681,13 +682,11 @@ def test_digest_queue_does_turns_before_short_titles(project, monkeypatch):
     done = []
     monkeypatch.setattr(digest, "digest_task", lambda task: done.append(task.id))
     core = Core()
-    core._enqueue_digest([a.id], DIGEST_LATER)
-    core._enqueue_digest([b.id])
-    core._enqueue_digest([a.id])  # a gets a turn while it waits: queued again, in front
-    core._enqueue_digest([b.id])  # already queued with this priority: no second entry
+    core._enqueue_digest([a.id, b.id])
+    core._enqueue_digest([a.id])  # already queued: no second entry
     core.digest_q.put((9, 0, None))  # stops the worker after the rest
     core._digest_worker()
-    assert done == [b.id, a.id] and core.queued == {}
+    assert done == [a.id, b.id] and core.queued == set()
 
 
 def test_commands_of_review_mode(backend, project, monkeypatch):

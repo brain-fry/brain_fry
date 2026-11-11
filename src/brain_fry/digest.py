@@ -30,8 +30,7 @@ SCHEMA = {
     "type": "object",
     "properties": {
         "title": {"type": "string"},
-        # described here too, so that an inbox_prompt.md older than the field still gets it
-        "short_title": {"type": "string", "description": "2 or 3 words naming what the task is about"},
+        "short_title": {"type": "string"},
         "digest": {"type": "string"},
         "threads": {
             "type": "array",
@@ -104,10 +103,6 @@ def tools_of_last_turn(transcript_path: str) -> list[str]:
 def build_prompt(task: Task, instructions: str) -> tuple[str, list[int]]:
     pending = [t for t in task.threads if t.kind == "pending"]
     parts = [instructions.strip(), "", "# Current digest", "", task.digest or "(none yet)", "", "# Turns"]
-    if not pending:  # only the short title is missing (a task from before the field)
-        parts += ["", "(none: the digest is up to date. Return it unchanged, with an empty threads list.)"]
-        if task.title:
-            parts += ["", "# Title", "", task.title]
     for t in pending:
         parts += ["", f"## Turn {t.n}", "", "Prompt:", _cut(t.prompt, MAX_PROMPT) or "(no prompt: the turn started on its own)"]
         if t is pending[-1] and (tools := tools_of_last_turn(task.transcript_path)):
@@ -142,9 +137,6 @@ def call_sonnet(prompt: str, timeout: float = 240) -> dict:
 
 
 def apply_result(task: Task, result: dict, sent: list[int]) -> None:
-    if not sent:  # a call for the short title only: the rest stays as it was
-        task.short_title = task.short_title or short_title_of(result, task)
-        return
     if not task.title and result.get("title", "").strip():
         task.title = result["title"].strip()
     if not task.short_title:  # set once, as the title
@@ -169,18 +161,13 @@ def apply_result(task: Task, result: dict, sent: list[int]) -> None:
 
 
 def short_title_of(result: dict, task: Task) -> str:
-    """Sonnet's short title, else the first three words of the title: never empty, so
-    that a task cannot loop on calls for it."""
+    """Sonnet's short title, else the first three words of the title: never empty."""
     return (result.get("short_title") or "").strip() or " ".join(task.display_title.split()[:3])
 
 
 def needs_call(task: Task) -> bool:
-    """Pending threads, or a digested task without a short title (one from before the
-    field). A fork that has no turn of its own waits for its first digest: a short title
-    made from its parent's digest would name the parent's topic."""
-    if any(th.kind == "pending" for th in task.threads):
-        return True
-    return bool(task.threads and task.digest and not task.short_title)
+    """Pending threads."""
+    return any(th.kind == "pending" for th in task.threads)
 
 
 def pending_tasks(project: Path) -> list[Task]:

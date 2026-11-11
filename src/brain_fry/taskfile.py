@@ -21,11 +21,6 @@ from . import paths
 from .util import write_atomic
 
 PRIOS = ("working", "planning", "later", "more_later", "never")
-# working: turn in progress. interrupted: a new prompt came before any Stop (Esc).
-# pending: the turn is over, the digest is not there yet. imported: a turn from before the
-# session became a task (events._import_history), never digested. The rest is set by the digest
-# (wait: the agent waits for its background shell or monitor, and will go on by itself).
-KINDS = ("working", "interrupted", "pending", "imported", "review", "answer", "rule", "FYI", "wait", "blocked")
 PARTS = ("digest", "question", "prompt", "reply")
 
 # Held around every load-modify-save of a task file: the reader, the digest worker and

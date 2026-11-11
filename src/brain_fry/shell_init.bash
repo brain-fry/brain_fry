@@ -4,15 +4,11 @@
 # current folder, as escape sequences that the terminal ignores (OSC 7771, read by app/ptys.py).
 # The list of Cmd+N O shows them (DESIGN_DETAILS.md, "2a, 3a, 3b: files and terminals").
 
-if [ -n "$BF_SHELL_LOGIN" ]; then # what `bash -l` reads
-  unset BF_SHELL_LOGIN
-  [ -r /etc/profile ] && . /etc/profile
-  if [ -r ~/.bash_profile ]; then . ~/.bash_profile
-  elif [ -r ~/.bash_login ]; then . ~/.bash_login
-  elif [ -r ~/.profile ]; then . ~/.profile
-  fi
-else
-  [ -r ~/.bashrc ] && . ~/.bashrc
+# what `bash -l` reads
+[ -r /etc/profile ] && . /etc/profile
+if [ -r ~/.bash_profile ]; then . ~/.bash_profile
+elif [ -r ~/.bash_login ]; then . ~/.bash_login
+elif [ -r ~/.profile ]; then . ~/.profile
 fi
 
 __bf_send() { builtin printf '\033]7771;%s;%s\007' "$1" "${2//[[:cntrl:]]/ }"; }

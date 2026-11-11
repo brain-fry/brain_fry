@@ -42,7 +42,7 @@ def test_scan_decodes_utf8():
 
 
 def run_bash(home: Path, lines: list[str], wait_for: bytes, timeout: float = 15.0) -> bytes:
-    env = {"HOME": str(home), "PATH": "/usr/bin:/bin", "TERM": "xterm", "BF_SHELL_LOGIN": "1"}
+    env = {"HOME": str(home), "PATH": "/usr/bin:/bin", "TERM": "xterm"}
     proc, fd = ptys.spawn(["/bin/bash", "--init-file", str(SHELL_INIT)], str(home), env, 24, 100)
     out = b""
 

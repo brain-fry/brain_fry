@@ -57,7 +57,6 @@ def test_status_lists_staged_unstaged_untracked_and_renames(repo):
     assert [(f["path"], f["st"]) for f in st["staged"]] == [("a.txt", "M"), ("c.txt", "R")]
     assert st["staged"][1]["orig"] == "b.txt"
     assert [(f["path"], f["st"]) for f in st["unstaged"]] == [("a.txt", "M"), ("new.txt", "?")]
-    assert st["branch"]["head"] == "main"
 
 
 def test_status_lists_conflicts(repo):

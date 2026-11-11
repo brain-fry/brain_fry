@@ -32,8 +32,8 @@ done
 # what it loads on demand: character maps and standard fonts (PDFs that do not embed their
 # fonts), the wasm decoders of JPEG 2000 and JBIG2 images, a color profile. Not copied: the
 # full viewer app, the decoders without wasm, the JS engine for PDF forms (scripting is off).
-# The legacy build, with polyfills: the modern one needs features that the system WebKit lacks
-# (macOS 26: no async iteration of a ReadableStream, so getTextContent and find fail).
+# The legacy build, for its polyfills. It does not cover the async iteration of a ReadableStream,
+# which the system WebKit lacks (macOS 26): web/pdf_polyfill.mjs adds it (DESIGN_DETAILS.md).
 pdf="$build/node_modules/pdfjs-dist"
 rm -rf "$out/pdfjs"
 mkdir -p "$out/pdfjs/wasm"

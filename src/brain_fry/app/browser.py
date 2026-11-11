@@ -510,8 +510,7 @@ class BrowserHost:
         wv.setUIDelegate_(self.uidel)
         wv.setAllowsBackForwardNavigationGestures_(True)
         wv.setAllowsMagnification_(True)
-        if wv.respondsToSelector_("setInspectable:"):
-            wv.setInspectable_(True)  # Safari's Web Inspector
+        wv.setInspectable_(True)  # Safari's Web Inspector
         wv.setHidden_(True)
         self.ui.addSubview_positioned_relativeTo_(wv, AppKit.NSWindowAbove, None)
         page = Page(self, key, task, wv)

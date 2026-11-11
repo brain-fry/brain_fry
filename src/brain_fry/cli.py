@@ -109,14 +109,13 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--debug", action="store_true", help="window: right click --> Inspect Element")
     ap.add_argument("--browser", action="store_true", help="no window: print a URL to open in a browser")
     ap.add_argument("--selftest", type=float, metavar="SECONDS", help=argparse.SUPPRESS)
-    ap.add_argument("--selftest-new", metavar="PROJECT", help=argparse.SUPPRESS)
     ap.add_argument("--selftest-shots", metavar="DIR", help=argparse.SUPPRESS)
     ap.add_argument("--selftest-js", metavar="JS", help=argparse.SUPPRESS)
     a = ap.parse_args(argv)
     if not a.cmd:
         from .app.main import run
 
-        return run(debug=a.debug, browser=a.browser, selftest=a.selftest, selftest_new=a.selftest_new,
+        return run(debug=a.debug, browser=a.browser, selftest=a.selftest,
                    selftest_shots=a.selftest_shots, selftest_js=a.selftest_js)  # fmt: skip
     logs.setup(f"cli:{a.cmd}")
     log.info("bf %s", " ".join(argv if argv is not None else sys.argv[1:]))

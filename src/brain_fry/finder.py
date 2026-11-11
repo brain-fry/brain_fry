@@ -56,12 +56,9 @@ def absolute(path: str) -> Path:
 def _sorted_names(names: list[str]) -> list[str]:
     """Finder's order: `localizedStandardCompare:` (case-insensitive, digits as numbers), in one
     native call. Folders are mixed with files, as in Finder without "Keep folders on top"."""
-    try:
-        from Foundation import NSArray  # noqa: PLC0415
+    from Foundation import NSArray  # noqa: PLC0415
 
-        return [str(n) for n in NSArray.arrayWithArray_(names).sortedArrayUsingSelector_("localizedStandardCompare:")]
-    except ImportError:  # not macOS
-        return sorted(names, key=lambda n: [int(p) if p.isdigit() else p.casefold() for p in re.split(r"(\d+)", n)])
+    return [str(n) for n in NSArray.arrayWithArray_(names).sortedArrayUsingSelector_("localizedStandardCompare:")]
 
 
 def _is_package(p: Path) -> bool:
@@ -69,13 +66,10 @@ def _is_package(p: Path) -> bool:
     has an extension can be one; asking for every folder would be slow in big folders."""
     if "." not in p.name.lstrip("."):
         return False
-    try:
-        from Foundation import NSURL  # noqa: PLC0415
+    from Foundation import NSURL  # noqa: PLC0415
 
-        ok, value, _ = NSURL.fileURLWithPath_(str(p)).getResourceValue_forKey_error_(None, "NSURLIsPackageKey", None)
-        return bool(ok and value)
-    except ImportError:
-        return False
+    ok, value, _ = NSURL.fileURLWithPath_(str(p)).getResourceValue_forKey_error_(None, "NSURLIsPackageKey", None)
+    return bool(ok and value)
 
 
 def icon_key(p: Path, is_dir: bool, package: bool) -> str:
@@ -139,54 +133,45 @@ def crumbs(d: Path) -> list[dict]:
 
 def free_space(d: Path) -> str:
     """As the status bar of Finder: "393.58 GB available" counts purgeable space."""
-    try:
-        from Foundation import NSURL, NSByteCountFormatter  # noqa: PLC0415
+    from Foundation import NSURL, NSByteCountFormatter  # noqa: PLC0415
 
+    try:
         ok, n, _ = NSURL.fileURLWithPath_(str(d)).getResourceValue_forKey_error_(
             None, "NSURLVolumeAvailableCapacityForImportantUsageKey", None)  # fmt: skip
         if not ok or n is None:
             st = os.statvfs(d)
             n = st.f_bavail * st.f_frsize
         return str(NSByteCountFormatter.stringFromByteCount_countStyle_(int(n), 0))  # 0: file style, as Finder
-    except (ImportError, OSError):
+    except OSError:
         return ""
 
 
 def volume_name(path: str = "/") -> str:
     """The name that Finder gives the disk: "Macintosh HD"."""
-    try:
-        from Foundation import NSURL  # noqa: PLC0415
+    from Foundation import NSURL  # noqa: PLC0415
 
-        ok, name, _ = NSURL.fileURLWithPath_(path).getResourceValue_forKey_error_(None, "NSURLVolumeLocalizedNameKey", None)
-        return str(name) if ok and name else "/"
-    except ImportError:
-        return "/"
+    ok, name, _ = NSURL.fileURLWithPath_(path).getResourceValue_forKey_error_(None, "NSURLVolumeLocalizedNameKey", None)
+    return str(name) if ok and name else "/"
 
 
 # ---------------------------------------------------------------- the preview column
 
 def _fmt_size(n: int) -> str:
-    try:
-        from Foundation import NSByteCountFormatter  # noqa: PLC0415
+    from Foundation import NSByteCountFormatter  # noqa: PLC0415
 
-        return str(NSByteCountFormatter.stringFromByteCount_countStyle_(n, 0))
-    except ImportError:
-        return f"{n} bytes"
+    return str(NSByteCountFormatter.stringFromByteCount_countStyle_(n, 0))
 
 
 def _fmt_date(ts: float | None) -> str | None:
     """In the format of the system (Finder's): "11 November 2026 at 6:03 PM"."""
     if not ts:
         return None
-    try:
-        from Foundation import NSDate, NSDateFormatter  # noqa: PLC0415
+    from Foundation import NSDate, NSDateFormatter  # noqa: PLC0415
 
-        f = NSDateFormatter.alloc().init()
-        f.setDateStyle_(3)  # long
-        f.setTimeStyle_(1)  # short
-        return str(f.stringFromDate_(NSDate.dateWithTimeIntervalSince1970_(ts)))
-    except ImportError:
-        return None
+    f = NSDateFormatter.alloc().init()
+    f.setDateStyle_(3)  # long
+    f.setTimeStyle_(1)  # short
+    return str(f.stringFromDate_(NSDate.dateWithTimeIntervalSince1970_(ts)))
 
 
 def _last_opened(p: Path) -> float | None:
@@ -208,16 +193,12 @@ def _last_opened(p: Path) -> float | None:
 
 def info(path: str) -> dict:
     """What the preview column shows for a file: kind, size, dates."""
+    from Foundation import NSURL  # noqa: PLC0415
+
     p = absolute(path)
     st = p.stat()
-    kind = None
-    try:
-        from Foundation import NSURL  # noqa: PLC0415
-
-        ok, v, _ = NSURL.fileURLWithPath_(str(p)).getResourceValue_forKey_error_(None, "NSURLLocalizedTypeDescriptionKey", None)
-        kind = str(v) if ok and v else None
-    except ImportError:
-        pass
+    ok, v, _ = NSURL.fileURLWithPath_(str(p)).getResourceValue_forKey_error_(None, "NSURLLocalizedTypeDescriptionKey", None)
+    kind = str(v) if ok and v else None
     is_dir = p.is_dir()
     package = is_dir and _is_package(p)
     return {

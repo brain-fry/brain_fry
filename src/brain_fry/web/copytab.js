@@ -5,7 +5,8 @@
 // that is already open in the selected task is not listed. Enter or a click on a tab copies it; on
 // a task, all its tabs that the list shows. On the right, a preview of the tab under the mouse (else
 // of the selected one), as it looks now in its task. Typing filters.
-// What a copy is: a file is read from disk, a page loads its URL, a terminal is a new shell in the
+// What a copy is: a file opens as any file does, so it shows the other task's text, unsaved edits
+// included (One text per file, DESIGN_DETAILS.md), a page loads its URL, a terminal is a new shell in the
 // folder where the other one is now (shell.copy; bash tells its folder and its last command,
 // shell_init.bash).
 // Uses S, $, esc, request, toast, uiLog, wsId (app.js), work, openFile, fileUrl (files.js),

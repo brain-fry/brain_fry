@@ -56,9 +56,9 @@ def spawn(argv: list[str], cwd: str, env: dict[str, str], rows: int, cols: int) 
     master, slave = pty.openpty()
     try:
         attrs = termios.tcgetattr(slave)
-        if hasattr(termios, "IUTF8"):
-            attrs[0] |= termios.IUTF8  # backspace removes a whole UTF-8 character
-            termios.tcsetattr(slave, termios.TCSANOW, attrs)
+        # IUTF8 (Backspace erases a whole UTF-8 character): Python's termios on macOS lacks it, so its value
+        attrs[0] |= getattr(termios, "IUTF8", 0x00004000)
+        termios.tcsetattr(slave, termios.TCSANOW, attrs)
         set_size(master, rows, cols)
         proc = subprocess.Popen(
             [sys.executable, "-I", "-S", "-c", WRAPPER, *argv],

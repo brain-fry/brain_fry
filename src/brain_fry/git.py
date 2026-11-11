@@ -181,7 +181,7 @@ def operation(tree: Path) -> str | None:
 
 def status(tree: Path) -> dict:
     """The staged, unstaged and conflicted files of a worktree (`--porcelain=v2`)."""
-    out = run(tree, "status", "--porcelain=v2", "-z", "--branch", "-uall")
+    out = run(tree, "status", "--porcelain=v2", "-z", "-uall")
     st = _parse_status(out)
     if sum(1 for f in st["unstaged"] if f["st"] == "?") > MAX_UNTRACKED:  # by folder (-unormal)
         folded = _parse_status(run(tree, "status", "--porcelain=v2", "-z", "-unormal"))
@@ -191,7 +191,6 @@ def status(tree: Path) -> dict:
 
 def _parse_status(out: bytes) -> dict:
     staged, unstaged, conflicts = [], [], []
-    branch = {"head": None}
     recs = out.split(b"\0")
     i = 0
     while i < len(recs):
@@ -199,9 +198,7 @@ def _parse_status(out: bytes) -> dict:
         i += 1
         if not r:
             continue
-        if r.startswith("# branch.head "):
-            branch["head"] = r.split(" ", 2)[2]
-        elif r[0] == "1":
+        if r[0] == "1":
             _, xy, _sub, *_rest, path = r.split(" ", 8)
             _add(staged, unstaged, xy, path, None)
         elif r[0] == "2":
@@ -216,7 +213,7 @@ def _parse_status(out: bytes) -> dict:
             unstaged.append({"path": r[2:], "st": "?"})
     by_path = lambda f: f["path"]  # noqa: E731
     return {"staged": sorted(staged, key=by_path), "unstaged": sorted(unstaged, key=by_path),
-            "conflicts": sorted(conflicts, key=by_path), "branch": branch}  # fmt: skip
+            "conflicts": sorted(conflicts, key=by_path)}  # fmt: skip
 
 
 def _add(staged: list, unstaged: list, xy: str, path: str, orig: str | None) -> None:
@@ -290,7 +287,7 @@ def log_rows(top: Path, trees: list[dict], cur: dict, all_branches: bool = True,
     count = min(int(count), 20 * LOG_PAGE)
     heads = [t["head"] for t in trees if t["head"] and not t["prunable"]]
     rows: list[dict] = []
-    if cur["head"] and (heads or all_branches):
+    if cur["head"]:
         revs = ["--branches", "--remotes", *heads] if all_branches else [cur["head"]]
         fmt = "%H%x1f%P%x1f%an%x1f%at%x1f%s"
         out = run(top, "log", "--date-order", "-z", f"-n{int(count)}", f"--format={fmt}", *revs, "--")

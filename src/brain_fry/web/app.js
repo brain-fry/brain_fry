@@ -273,7 +273,7 @@ function showTerm(id) {
       x.el.style.display = 'none';
     }
   }
-  if (fade) fadeIn($('#overlay'), FADE_IN_MS, 'ease-in'); // "Starting...", "No live session"
+  if (fade) fadeIn($('#overlay'), FADE_IN_MS, 'ease-in'); // "No live session"
   else stopFade($('#overlay')); // the fade in of a switch just before
   focusTerm(id);
 }
@@ -576,17 +576,11 @@ function card(t, pos = 0) {
   const cls = ['card', t.id === S.boardSel ? 'sel' : '', t.status === 'done' ? 'archived' : '', t.unread ? 'unread' : ''].join(' ');
   return `<div class="${cls}" data-card="${t.id}" draggable="true">
     <div class="top">${pos ? `<span class="pos" title="press ${pos} to open">${pos}</span>` : ''}<span class="dot ${t.status}" title="${t.status}"></span>
-      ${t.inbox ? '<span class="inbox-badge">inbox</span>' : ''}${t.pinned ? '<span class="pin-badge">pinned</span>' : ''}${runBadge(t.elsewhere)}<span class="proj" style="--h:${hue(t.project)}">${esc(t.project)}</span></div>
+      ${t.inbox ? '<span class="inbox-badge">inbox</span>' : ''}${t.pinned ? '<span class="pin-badge">pinned</span>' : ''}<span class="proj" style="--h:${hue(t.project)}">${esc(t.project)}</span></div>
     <div class="title" title="${esc(t.title)}">${esc(t.shortTitle || t.title)}</div>
     ${t.digest || t.notes ? `<div class="desc" title="${esc(t.digest || t.notes)}">${esc(t.digest || t.notes)}</div>` : ''}
     ${t.inbox && t.line ? `<div class="line need">${esc(t.line)}</div>` : ''}
   </div>`;
-}
-
-// where a session runs outside Brain Fry: "VS Code · idle"
-function runBadge(run) {
-  if (!run) return '';
-  return `<span class="run ${esc(run.status)}" title="runs now in ${esc(run.where)} (pid ${run.pid})">${esc(run.where)}${run.status ? ' · ' + esc(run.status) : ''}</span>`;
 }
 
 function ago(iso) {
@@ -612,7 +606,7 @@ function renderBoard(st) {
   $('#columns').innerHTML = cols.map((c) => `
     <div class="column" data-prio="${c.prio}">
       <h3>${c.prio.replace('_', ' ')} <span>${c.ids.length || ''}</span></h3>
-      <div class="cards">${c.ids.length ? c.ids.map((id, i) => card(st.tasks[id], c.prio === 'working' && i < 9 ? i + 1 : 0)).join('') : '<div class="empty">Empty.</div>'}</div>
+      <div class="cards">${c.ids.map((id, i) => card(st.tasks[id], c.prio === 'working' && i < 9 ? i + 1 : 0)).join('')}</div>
     </div>`).join('');
   const sel = document.querySelector('#columns .card.sel');
   if (sel) sel.scrollIntoView({ block: 'nearest' });
@@ -760,7 +754,7 @@ function renderThreads(st) {
       return `<div class="thread" data-n="${th.n}" title="${esc(th.prompt)} (click: open in 3a)"><span class="n">${th.n}</span>${kind}<span class="txt">${esc(txt)}</span></div>`;
     }).join('')
     : task.notes ? `<div class="notes"><div class="label">My notes (no thread yet)</div>${esc(task.notes)}</div>`
-    : '<div class="empty">No threads yet.</div>';
+    : '';
 }
 
 function renderAgent(st) {
@@ -784,7 +778,7 @@ function renderAgent(st) {
       <div>Close it there, then resume it here. Resuming it now runs two processes on one conversation: their messages get mixed.</div>
       <button data-act="resume">Resume here anyway</button>`);
   }
-  if (S.starting === task.id) return overlay('<div>Starting...</div>');
+  if (S.starting === task.id) return overlay(null);
   overlay(`<div class="big">No live session.</div><button data-act="resume">Resume</button>`);
 }
 
@@ -886,7 +880,7 @@ function renderPicker() {
         <div class="main"><div>${esc(it.name)}</div><div class="path">${esc(it.path)}</div></div>
         ${use(it)}
         ${key(i) ? `<kbd>${key(i)}</kbd>` : ''}${remove(i)}</div>`).join('')
-    : '<div class="empty">No project yet. Run <code>bf init</code> in a project folder.</div>'}</div>`;
+    : ''}</div>`;
 }
 
 function removeProject(i) {

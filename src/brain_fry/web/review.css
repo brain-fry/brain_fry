@@ -31,7 +31,6 @@
 .rv-branch .name { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .rv-branch.cur .name { font-weight: 600; }
 .rv-branch .right { margin-left: auto; color: var(--dim); font-size: 11px; white-space: nowrap; }
-.rv-empty { padding: 4px 12px 8px; color: var(--dim); font-style: italic; font-size: 12px; }
 .rv-note { padding: 16px; color: var(--dim); font: 13px/1.4 -apple-system, BlinkMacSystemFont, sans-serif; }
 .rv-note button { margin-left: 8px; }
 
