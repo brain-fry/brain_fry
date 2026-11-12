@@ -3,7 +3,8 @@
 // left (the main pane), 2 top right, 3 bottom left, 4 bottom right. Each pane has its own tabs,
 // and a tab is a file, a thread, a browser page, a terminal or a Finder tab (finder.js). A pane is on screen only while it
 // has tabs; the others give it their space. Everything belongs to the selected task (work(tid),
-// files.js). See DESIGN_DETAILS.md, "2a, 3a, 3b".
+// files.js), or to its project (project tabs, shown first in each pane: viewTabs). See
+// DESIGN_DETAILS.md, "2a, 3a, 3b".
 // - Cmd+N, then T (terminal), B (browser), F (new file) or E (Finder), then a digit 1-4: created in that
 //   pane. No digit within 1 s: pane 1. Nothing is created and then moved. Cmd+N O: the list
 //   that copies a tab of another task into the pane that I use (copytab.js).
@@ -44,7 +45,8 @@ function buildGrid() {
 
 // ------------------------------------------------------------------ panes of a task
 
-const paneTabs = (w, n) => w.tabs.filter((t) => t.pane === n && !t.closing);
+// w: a view (a task, or a project's tabs); its tabs include its project's (viewTabs, files.js)
+const paneTabs = (w, n) => viewTabs(w).filter((t) => t.pane === n && !t.closing);
 const paneActive = (w, n) => paneTabs(w, n).find((t) => t.path === w.act[n]) || null;
 
 function shownPanes(w) {
@@ -52,7 +54,7 @@ function shownPanes(w) {
   return shown.length ? shown : [1];
 }
 
-function addTab(w, tab, n) {
+function addTab(w, tab, n) { // w: the tab's owner, work(tab.tid)
   tab.pane = n;
   G.els[n].body.appendChild(tab.el);
   w.tabs.push(tab);
@@ -76,47 +78,57 @@ function openPane(w) {
   return 1;
 }
 
-// The tab on screen in its pane, and its pane the one that I use.
+// The tab on screen in its pane, and its pane the one that I use (in the view that shows it).
 function showTab(tab, focus = false) {
-  const w = work(tab.tid);
+  const w = viewWork(tab.tid);
   w.act[tab.pane] = tab.path;
   delete w.want[tab.pane];
   usePane(w, tab.pane);
-  saveGrid(tab.tid);
-  if (tab.tid !== wsId()) return;
+  saveGrid(w.id);
+  if (!inView(tab.tid)) return;
   renderFiles();
   renderExplorer();
   if (focus) focusTab(tab);
 }
 
-// Out of its pane (closed, or moved): the tab next to it takes its place on screen.
-function leavePane(w, tab) {
-  const list = paneTabs(w, tab.pane);
-  const i = list.indexOf(tab);
-  const rest = list.filter((t) => t !== tab);
-  if (w.act[tab.pane] === tab.path) w.act[tab.pane] = rest.length ? rest[Math.min(i, rest.length - 1)].path : null;
+// Out of its pane (closed, or moved): the tab next to it takes its place on screen, in every
+// view that shows it (a project tab: each task of the project).
+function leavePane(tab) {
+  for (const w of viewsOf(tab)) {
+    if (w.act[tab.pane] !== tab.path) continue;
+    const list = paneTabs(w, tab.pane);
+    const i = list.indexOf(tab);
+    const rest = list.filter((t) => t !== tab);
+    w.act[tab.pane] = rest.length ? rest[Math.min(i, rest.length - 1)].path : null;
+  }
 }
 
-function dropTab(w, tab) {
-  leavePane(w, tab);
+function dropTab(w, tab) { // w: the tab's owner
+  const views = viewsOf(tab);
+  leavePane(tab);
   const i = w.tabs.indexOf(tab);
   if (i >= 0) w.tabs.splice(i, 1);
   tab.el.remove();
-  if (!paneTabs(w, w.pane).length) usePane(w, w.mru.find((n) => paneTabs(w, n).length) || 1);
+  for (const v of views) if (!paneTabs(v, v.pane).length) usePane(v, v.mru.find((n) => paneTabs(v, n).length) || 1);
 }
 
-// To pane n, before the tab `before` (a drop on a tab), or at the end.
+// To pane n, before the tab `before` (a drop on a tab), or at the end. A project tab has one
+// pane for all the tasks of the project. Its owner's list keeps the order: a tab dropped before
+// a tab of another owner goes to the start of its own (a task's tabs come after the project's).
 function moveTab(tab, n, before = null) {
   const w = work(tab.tid);
   if (tab.pane !== n) {
-    leavePane(w, tab);
+    leavePane(tab);
     tab.pane = n;
     G.els[n].body.appendChild(tab.el);
   }
   w.tabs.splice(w.tabs.indexOf(tab), 1);
-  const i = before ? w.tabs.indexOf(before) : -1;
-  if (i >= 0) w.tabs.splice(i, 0, tab); else w.tabs.push(tab);
+  const i = before && before.tid === tab.tid ? w.tabs.indexOf(before) : -1;
+  if (i >= 0) w.tabs.splice(i, 0, tab);
+  else if (before && isProjectWs(before.tid)) w.tabs.unshift(tab);
+  else w.tabs.push(tab);
   if (tab.web) saveWebTabs(tab.tid); else if (tab.finder) saveFinderTabs(tab.tid); else if (isFileTab(tab)) saveOpenFiles(tab.tid); // the order is kept
+  if (tab.tid !== wsId()) saveGrid(tab.tid); // its pane, in its owner's grid
   showTab(tab, true);
 }
 
@@ -175,25 +187,20 @@ function fitPaneShell(n) {
 // is in, the tab on screen in each pane, the pane that I used last. A tab is named by its path; a
 // browser tab by its position among the saved ones (`web#0`), a terminal by its position among
 // the task's (`shell#0`), a Finder tab by its position among the task's (`finder#0`): their keys
-// are new at each start. Threads and untitled files are not kept.
+// are new at each start. Threads and untitled files are not kept. A project tab's name starts
+// with `p:` (gridKey): a task's grid names the project tab on screen in a pane, and the pane of
+// each project tab is in the project's grid.
 
 const savedWeb = (t) => t.web && t.url && t.url !== 'about:blank'; // as saveWebTabs (browser.js)
 
+const gridKey = (tid, id) => (isProjectWs(tid) ? `p:${id}` : id);
+
 function tabId(t) {
-  if (t.shell) {
-    const task = S.state && S.state.tasks[t.tid];
-    const i = task ? task.shells.findIndex((s) => s.key === t.key) : -1;
-    return i >= 0 ? `shell#${i}` : null;
-  }
-  if (t.web) {
-    const i = work(t.tid).tabs.filter(savedWeb).indexOf(t);
-    return i >= 0 ? `web#${i}` : null;
-  }
-  if (t.finder) {
-    const i = work(t.tid).tabs.filter((x) => x.finder && !x.idle).indexOf(t); // as saveFinderTabs (finder.js)
-    return i >= 0 ? `finder#${i}` : null;
-  }
-  return t.thread || t.untitled ? null : t.path;
+  const id = (name, i) => (i >= 0 ? gridKey(t.tid, `${name}#${i}`) : null);
+  if (t.shell) return id('shell', shellsOf(t.tid).findIndex((s) => s.key === t.key));
+  if (t.web) return id('web', work(t.tid).tabs.filter(savedWeb).indexOf(t));
+  if (t.finder) return id('finder', work(t.tid).tabs.filter((x) => x.finder).indexOf(t)); // as saveFinderTabs (finder.js)
+  return t.thread || t.untitled ? null : gridKey(t.tid, t.path);
 }
 
 function gridRecord(w) {
@@ -309,10 +316,9 @@ function jumpToClaude() {
 
 function create(kind, n) {
   endChord();
-  const tid = wsId(); // a project without a task (wsId) has file tabs only: terminals and pages belong to a task
-  if (!tid || S.mode !== 'dev') { toast('Select a task first: tabs belong to a task.'); return; }
-  if (!S.selected && kind !== 'f' && kind !== 'e') { toast('Start a task first: terminals and browser tabs belong to a task.'); return; }
-  uiLog(`create: ${{ t: 'terminal', b: 'browser', f: 'new file', e: 'Finder' }[kind]} in pane ${n}`);
+  if (!wsId() || S.mode !== 'dev') { toast('Pick a project first: tabs belong to a task or to its project.'); return; }
+  const tid = ownerFor(wsId()); // with no task selected (idle screen, project view): a project tab
+  uiLog(`create: ${{ t: 'terminal', b: 'browser', f: 'new file', e: 'Finder' }[kind]} in pane ${n}${isProjectWs(tid) ? ', project tab' : ''}`);
   if (kind === 't') newShell(tid, n);
   else if (kind === 'b') openWebTab(tid, '', { pane: n });
   else if (kind === 'e') newFinder(tid, n); // finder.js
@@ -348,7 +354,7 @@ document.addEventListener('focusin', noteUse, true);
 document.addEventListener('mousedown', (e) => {
   const el = e.button === 0 && !e.target.closest('.x') && e.target.closest('#middle .pane-tabs .tab[data-file]');
   const w = el && wsId() && work(wsId());
-  const tab = w && w.tabs.find((t) => t.path === el.dataset.file);
+  const tab = w && viewTabs(w).find((t) => t.path === el.dataset.file);
   if (tab) G.press = { tab, x: e.clientX, y: e.clientY };
 });
 
@@ -417,7 +423,7 @@ function dropTarget(x, y) {
         const b = el.getBoundingClientRect();
         return x >= b.left && x <= b.right;
       });
-      const before = over ? w.tabs.find((t) => t.path === over.dataset.file) : null;
+      const before = over ? viewTabs(w).find((t) => t.path === over.dataset.file) : null;
       return { pane: n, before, rect: r };
     }
     const fx = (x - r.left) / r.width, fy = (y - r.top) / r.height;

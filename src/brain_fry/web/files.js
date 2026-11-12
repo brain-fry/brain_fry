@@ -1,9 +1,11 @@
 'use strict';
 // 2a (explorer) and the tabs of column 3 (CodeMirror for text, viewers for images and PDFs), in
-// the panes of grid.js. Everything belongs to the selected task: each task has its own tree state
-// and its own tabs, restored when it is selected. With no task selected, the idle screen shows the
-// tabs of the task that I left (S.idle: a tab opened there has `idle`), and a project picked in the
-// dropdown has its own (`wsId`, app.js: file tabs only, kept in memory). A tab's `kind`: text, image, pdf, thread (1b),
+// the panes of grid.js. Each task has its own tree state and its own tabs, restored when it is
+// selected. With no task selected, the idle screen shows the tabs of the task that I left (S.idle),
+// and a project picked in the dropdown has its own work state (`wsId`, app.js). A tab belongs to a
+// task or to its project (project tabs, `project:<path>`, app.js): every view of the project shows
+// the project's tabs too (viewTabs), and a tab opened with no task selected is one of them.
+// A tab's `kind`: text, image, pdf, thread (1b),
 // web (browser.js), shell (shells.js) or finder (finder.js); an untitled text tab has `untitled` (Cmd+N F).
 // Uses S, $, esc, request, send, toast, store, stored from app.js, which loads first, and the
 // panes of grid.js (PANES, paneTabs, paneActive, addTab, showTab, dropTab, openPane...).
@@ -13,7 +15,7 @@ const POLL_MS = 2000; // checks the open files for changes on disk (the agent ed
 function work(tid) {
   S.work = S.work || {};
   if (!S.work[tid]) {
-    S.work[tid] = { open: new Set(), kids: new Map(), loading: new Set(), tabs: [], restored: false, lastUpdated: null,
+    S.work[tid] = { id: tid, open: new Set(), kids: new Map(), loading: new Set(), tabs: [], restored: false, lastUpdated: null,
       treeSel: null, // the explorer's selected entry
       act: {}, // pane -> the path of the tab on screen in it
       pane: 1, mru: [...PANES], // the pane that I used last, and the panes from the most recently used
@@ -26,6 +28,75 @@ function work(tid) {
 
 // a tab that shows a file of the project (the poll, the explorer, files.set)
 const isFileTab = (t) => !t.thread && !t.web && !t.shell && !t.untitled && !t.finder;
+
+// ------------------------------------------------------------------ project tabs
+// The tabs that a view shows: its own and, for a task, its project's, which come first in each
+// pane. w.tabs holds only the tabs that w owns; act, pane and mru belong to the view.
+function viewTabs(w) {
+  if (isProjectWs(w.id)) return w.tabs;
+  const p = wsProject(w.id);
+  const pw = p && S.work && S.work[projectWs(p)];
+  return pw && pw.tabs.length ? [...pw.tabs, ...w.tabs] : w.tabs;
+}
+
+// the view that shows the tabs of `tid` now (the screen's, for a project tab), else their owner's
+const viewWork = (tid) => work(inView(tid) ? wsId() : tid);
+
+// the work states whose view shows this tab: its owner, and for a project tab each task of the project
+function viewsOf(tab) {
+  if (!isProjectWs(tab.tid)) return [work(tab.tid)];
+  const project = wsProject(tab.tid);
+  return Object.values(S.work || {}).filter((w) => w.id === tab.tid || (!isProjectWs(w.id) && wsProject(w.id) === project));
+}
+
+// A tab moves to another owner (a double-click, or a terminal that the backend moved): out of
+// its owner's list, into the end of the other's. It keeps its pane and its element.
+function reown(tab, to) {
+  const from = work(tab.tid);
+  const i = from.tabs.indexOf(tab);
+  if (i >= 0) from.tabs.splice(i, 1);
+  tab.tid = to;
+  work(to).tabs.push(tab);
+}
+
+// A file that becomes a project tab: its tabs in the tasks of the project close, since every task
+// shows the project's now. They share its text (peerTab): no edit is lost.
+function dropDuplicates(tab) {
+  const project = wsProject(tab.tid);
+  for (const w of Object.values(S.work || {})) {
+    if (isProjectWs(w.id) || wsProject(w.id) !== project) continue;
+    const dup = w.tabs.find((t) => t !== tab && isFileTab(t) && t.path === tab.path);
+    if (!dup) continue;
+    destroyTab(w, dup);
+    saveOpenFiles(w.id);
+    saveGrid(w.id);
+  }
+}
+
+// A double-click on a tab (asked by Renaud on 2026-11-11, instead of a key): a task's tab becomes
+// a project tab, which every task of the project shows; a project tab goes back to the task on
+// screen (the selected one, or the idle screen's). Not a thread (it belongs to its task), and
+// nothing in the project view, which has no task to give it to. A terminal is moved by the
+// backend (its shell's owner), and the state moves its tab (renderShells).
+function toggleProjectTab(tab) {
+  const view = wsId();
+  if (!view || tab.thread || tab.closing) return;
+  const from = tab.tid;
+  const to = isProjectWs(from) ? (isProjectWs(view) ? null : view) : projectWs(wsProject(from));
+  if (!to) return;
+  uiLog(`tab: ${isProjectWs(to) ? 'becomes a project tab' : 'back to the task'} (${tab.kind})`);
+  if (tab.shell) { send('shell.move', { key: tab.key, to }); return; }
+  reown(tab, to);
+  if (isFileTab(tab) && isProjectWs(to)) dropDuplicates(tab);
+  for (const tid of [from, to]) {
+    if (isFileTab(tab)) saveOpenFiles(tid);
+    else if (tab.web) saveWebTabs(tid);
+    else if (tab.finder) saveFinderTabs(tid);
+    saveGrid(tid);
+  }
+  renderFiles();
+  renderExplorer();
+}
 
 // ------------------------------------------------------------------ one text per file
 // The text tabs of one file, in all the tasks of a project, show one text (VS Code: one model per
@@ -260,9 +331,9 @@ function makeImageTab(tid, path, r) {
   tab.img.addEventListener('load', () => {
     tab.dims = `${tab.img.naturalWidth} × ${tab.img.naturalHeight}`;
     tab.error = null;
-    if (tab.tid === wsId()) renderFiles();
+    if (inView(tab.tid)) renderFiles();
   });
-  tab.img.addEventListener('error', () => { tab.error = 'WebKit cannot show this image.'; if (tab.tid === wsId()) renderFiles(); });
+  tab.img.addEventListener('error', () => { tab.error = 'WebKit cannot show this image.'; if (inView(tab.tid)) renderFiles(); });
   tab.img.addEventListener('click', () => setFit(tab, !tab.fit));
   tab.el.appendChild(tab.img);
   tab.img.src = fileUrl(tid, path, r.version);
@@ -417,7 +488,7 @@ async function loadPdf(tab, version, first = false) {
   tab.link.setDocument(doc, null);
   if (old) old.destroy().catch(() => {});
   Object.assign(tab, { version, size: sizeOf(version), gone: false, error: null });
-  if (tab.tid === wsId()) renderFiles();
+  if (inView(tab.tid)) renderFiles();
 }
 
 function pdfGoTo(tab, loc) {
@@ -470,24 +541,29 @@ function focusTab(tab) {
 // used last (openPane). `show` false: only added (a restore), not put on screen. `external`: a
 // file that 3a cannot show opens in its default app at once (a double-click in a Finder tab).
 // A text file open in another task of the project shows that tab's text (peerTab), not the disk's.
+// tid: the view where it opens (a task, or a project's tabs). With no task selected, a new tab is a
+// project tab (ownerFor); a restore adds it to `tid` itself. A file that is a project tab already
+// shows that tab.
 async function openFile(tid, path, focus = true, pane = null, show = true, external = false) {
   const w = work(tid);
-  let tab = w.tabs.find((t) => t.path === path);
+  const find = () => viewTabs(w).find((t) => t.path === path && !t.thread);
+  let tab = find();
   if (!tab) {
+    const owner = w.restoring ? tid : ownerFor(tid);
     let r;
-    try { r = await request('fs.read', { id: tid, path }); } catch (e) { toast(e.message); return; }
-    if ((r.binary || r.tooLarge) && external) { send('fs.open', { id: tid, path }); return; }
+    try { r = await request('fs.read', { id: owner, path }); } catch (e) { toast(e.message); return; }
+    if ((r.binary || r.tooLarge) && external) { send('fs.open', { id: owner, path }); return; }
     if (r.binary || r.tooLarge) {
       toast(`${path}: ${r.binary ? 'not a text file' : 'too large for the editor'}.`,
-        { label: 'Open in default app', run: () => send('fs.open', { id: tid, path }) });
+        { label: 'Open in default app', run: () => send('fs.open', { id: owner, path }) });
       return;
     }
-    tab = w.tabs.find((t) => t.path === path); // opened meanwhile by another click
+    tab = find(); // opened meanwhile by another click
     if (!tab) {
-      tab = r.kind === 'image' ? makeImageTab(tid, path, r) : r.kind === 'pdf' ? makePdfTab(tid, path, r) : makeTab(tid, path, r, peerTab(tid, path));
-      if (tid === S.idle && !w.restoring) tab.idle = true; // opened while nothing is selected: not the task's (dropIdleTabs)
-      addTab(w, tab, pane || openPane(w));
-      saveOpenFiles(tid);
+      tab = r.kind === 'image' ? makeImageTab(owner, path, r) : r.kind === 'pdf' ? makePdfTab(owner, path, r) : makeTab(owner, path, r, peerTab(owner, path));
+      addTab(work(owner), tab, pane || openPane(w));
+      if (isProjectWs(owner)) dropDuplicates(tab);
+      saveOpenFiles(owner);
     }
   }
   if (show) showTab(tab, focus);
@@ -498,7 +574,7 @@ async function openFile(tid, path, focus = true, pane = null, show = true, exter
 function newUntitled(tid, pane) {
   const n = ++G.untitled;
   const tab = makeTab(tid, `untitled:${n}`, { text: '', version: null, head: null });
-  Object.assign(tab, { untitled: true, name: `Untitled-${n}`, idle: tid === S.idle });
+  Object.assign(tab, { untitled: true, name: `Untitled-${n}` });
   addTab(work(tid), tab, pane);
   showTab(tab, true);
 }
@@ -509,7 +585,7 @@ async function openLink(tid, target) {
   let r;
   try { r = await request('fs.link', { id: tid, target }); } catch (e) { toast(e.message); return; }
   await openFile(tid, r.path);
-  if (r.line) goToLine(work(tid).tabs.find((t) => t.path === r.path), r.line);
+  if (r.line) goToLine(viewTabs(work(tid)).find((t) => t.path === r.path), r.line);
 }
 
 function goToLine(tab, n) {
@@ -520,8 +596,7 @@ function goToLine(tab, n) {
 }
 
 function saveOpenFiles(tid) { // thread tabs are not kept: they are one click away in 1b. Browser tabs: browser.js
-  if (tid.startsWith('project:')) return; // a project without a task (wsId): no task file to keep them
-  send('files.set', { id: tid, paths: work(tid).tabs.filter((t) => isFileTab(t) && !t.idle).map((t) => t.path) });
+  send('files.set', { id: tid, paths: work(tid).tabs.filter(isFileTab).map((t) => t.path) }); // a project's: project.json
 }
 
 // ------------------------------------------------------------------ thread tabs (1b --> 3a)
@@ -577,25 +652,31 @@ function findInConversation(tid, th) {
 }
 
 // The tabs of the task's last session, each in its pane (the grid that the window remembers,
-// grid.js). The terminals come from the backend, which starts them at the select (shells.js).
-async function restoreFiles(tid) {
+// grid.js), after its project's tabs (a file that is one of them is not opened twice). Also the
+// project's tabs alone (`project:<path>`). The terminals come from the backend, which starts them
+// at the select (shells.js). Once per run; the promise of the first call.
+function restoreFiles(tid) {
   const w = work(tid);
-  const task = S.state.tasks[tid];
-  if (w.restored || !task) return;
+  const data = ownerData(tid);
+  if (w.restoreDone || !data) return w.restoreDone || Promise.resolve();
   w.restored = w.restoring = true;
-  const g = w.grid = w.grid || loadGrid(tid);
-  w.want = { ...g.act };
-  try {
-    for (const path of task.openFiles || []) await openFile(tid, path, false, g.at[path] || 1, false);
-    await restoreBrowserTabs(tid, g); // browser.js
-    await restoreFinderTabs(tid, g); // finder.js
-  } finally {
-    w.restoring = false;
-  }
-  if (PANES.includes(g.pane) && paneTabs(w, g.pane).length) usePane(w, g.pane); // its tabs may not have come (a page not saved)
-  applyWant(w);
-  for (const n of Object.keys(w.want)) if (!w.want[n].startsWith('shell#')) delete w.want[n]; // gone since
-  if (tid === wsId()) { renderFiles(); renderExplorer(); }
+  w.restoreDone = (async () => {
+    const g = w.grid = w.grid || loadGrid(tid);
+    w.want = { ...g.act };
+    try {
+      if (!isProjectWs(tid) && wsProject(tid)) await restoreFiles(projectWs(wsProject(tid)));
+      for (const path of data.openFiles || []) await openFile(tid, path, false, g.at[gridKey(tid, path)] || 1, false);
+      await restoreBrowserTabs(tid, g); // browser.js
+      await restoreFinderTabs(tid, g); // finder.js
+    } finally {
+      w.restoring = false;
+    }
+    if (PANES.includes(g.pane) && paneTabs(w, g.pane).length) usePane(w, g.pane); // its tabs may not have come (a page not saved)
+    applyWant(w);
+    for (const n of Object.keys(w.want)) if (!w.want[n].includes('shell#')) delete w.want[n]; // gone since
+    if (inView(tid)) { renderFiles(); renderExplorer(); }
+  })();
+  return w.restoreDone;
 }
 
 // A new task starts with the tabs of the previous one (newTask in app.js). The backend copied
@@ -612,53 +693,38 @@ function copyView(from, to) {
 // × or Cmd+W. A terminal ends its shell; the tab goes when the state no longer lists it.
 // ask false: the caller has asked already (closePane, grid.js). Unsaved edits that a tab of
 // another task holds too are not lost: no question.
+// tid: the view, or the tab's owner. A project tab closes in every task of the project.
 function closeFile(tid, path, ask = true) {
-  const w = work(tid);
-  const tab = w.tabs.find((t) => t.path === path);
+  const tab = viewTabs(work(tid)).find((t) => t.path === path);
   if (!tab) return;
   if (ask && losesEdits(tab) && !confirm(`Discard the unsaved changes to ${tab.untitled ? tab.name : path}?`)) return;
   if (tab.shell) {
-    leavePane(w, tab);
+    leavePane(tab);
     tab.closing = true;
     send('shell.close', { key: tab.key });
   } else {
-    destroyTab(w, tab);
+    destroyTab(work(tab.tid), tab);
   }
-  if (isFileTab(tab)) saveOpenFiles(tid);
-  if (tab.finder) saveFinderTabs(tid);
+  if (isFileTab(tab)) saveOpenFiles(tab.tid);
+  if (tab.finder) saveFinderTabs(tab.tid);
   saveGrid(tid);
+  if (tab.tid !== tid) saveGrid(tab.tid);
   renderFiles();
   renderExplorer();
 }
 
-function destroyTab(w, tab) { // any tab but a terminal
+function destroyTab(w, tab) { // any tab but a terminal; w: its owner
   if (tab.view) tab.view.destroy();
   if (tab.task) tab.task.destroy().catch(() => {});
   if (tab.close) tab.close(); // a browser tab: its native page (browser.js)
   dropTab(w, tab);
 }
 
-// A task is selected after the idle screen (showIdle, app.js): the file tabs opened there were
-// not added to the task whose tabs it showed, so they go. One with unsaved changes that no other
-// tab holds stays, as a tab of that task, rather than lose them; a tab of that file that opens
-// later in any task of the project shows them (peerTab).
-function dropIdleTabs(tid) {
-  const w = S.work && S.work[tid];
-  const idle = w ? w.tabs.filter((t) => t.idle) : [];
-  if (!idle.length) return;
-  for (const tab of idle) {
-    delete tab.idle;
-    if (!losesEdits(tab)) destroyTab(w, tab);
-  }
-  saveOpenFiles(tid);
-  saveGrid(tid);
-}
-
 // An untitled tab: the save panel of macOS, in the project folder. A file outside the project
 // is refused (3a shows files of the project only); the tab stays untitled. The panel asks before
 // it replaces a file, so the write is forced; a tab of that file is replaced by this one.
 async function saveAs(tab) {
-  const w = work(tab.tid);
+  const w = viewWork(tab.tid);
   let r;
   try {
     const where = await request('fs.saveas', { id: tab.tid, name: tab.name });
@@ -666,9 +732,9 @@ async function saveAs(tab) {
     r = await request('fs.write', { id: tab.tid, path: where.path, text: tab.view.state.sliceDoc(), base: null, force: true });
     r = { ...r, ...(await request('fs.read', { id: tab.tid, path: where.path })) }; // its HEAD, for Diff
   } catch (e) { toast(e.message); return; }
-  const old = w.tabs.find((t) => t.path === r.path && t !== tab);
-  if (old) { if (old.view) old.view.destroy(); if (old.task) old.task.destroy().catch(() => {}); dropTab(w, old); }
-  for (const n of PANES) if (w.act[n] === tab.path) w.act[n] = r.path;
+  const old = viewTabs(w).find((t) => t.path === r.path && t !== tab);
+  if (old) { if (old.view) old.view.destroy(); if (old.task) old.task.destroy().catch(() => {}); dropTab(work(old.tid), old); }
+  for (const v of viewsOf(tab)) for (const n of PANES) if (v.act[n] === tab.path) v.act[n] = r.path;
   const peer = peerTab(tab.tid, r.path, tab); // the file is open in another task: its tabs take this text
   if (peer) {
     tab.file = peer.file;
@@ -750,14 +816,14 @@ function renderFileTabs() {
   const tid = wsId();
   const w = tid && work(tid);
   for (const n of PANES) {
-    const task = S.state.tasks[tid];
     const tabs = w ? paneTabs(w, n) : [];
     G.els[n].tabs.innerHTML = tabs.map((t) => {
       // a terminal: the folder where its shell is now (bash tells it, shell_init.bash), else where it started
-      const shell = t.shell && task && task.shells.find((s) => s.key === t.key);
+      const shell = t.shell && shellsOf(t.tid).find((s) => s.key === t.key);
       const title = t.web ? t.url : t.shell ? `Terminal in ${shell && shell.cwd ? shell.cwd : 'the task folder'}` : t.untitled ? 'Not saved yet' : t.finder ? finderTitle(t) : t.path;
-      return `<div class="tab ${t.path === w.act[n] ? 'on' : ''} ${t.gone ? 'gone' : ''}" data-file="${esc(t.path)}" title="${esc(title)}">`
-        + `${t.finder ? `<img class="tab-icon" src="${fdIcon('folder')}" alt="" draggable="false">` : ''}${esc(tabName(t))}${t.dirty ? '<span class="dirty">●</span>' : ''}<span class="x" data-close-file="${esc(t.path)}">×</span></div>`;
+      const proj = isProjectWs(t.tid); // a project tab: a small grey star (Renaud picked it from a mockup, 2026-11-11)
+      return `<div class="tab ${t.path === w.act[n] ? 'on' : ''} ${t.gone ? 'gone' : ''}" data-file="${esc(t.path)}" title="${esc(title)}${proj ? ' (project tab: in every task of the project)' : ''}">`
+        + `${proj ? '<span class="star">★</span>' : ''}${t.finder ? `<img class="tab-icon" src="${fdIcon('folder')}" alt="" draggable="false">` : ''}${esc(tabName(t))}${t.dirty ? '<span class="dirty">●</span>' : ''}<span class="x" data-close-file="${esc(t.path)}">×</span></div>`;
     }).join('') + (tabs.length ? PANE_X : '');
   }
 }
@@ -788,8 +854,9 @@ function renderFiles() {
       if (tabs.length && !paneActive(w, n)) w.act[n] = tabs[tabs.length - 1].path;
     }
   }
+  const shown = new Set(w ? PANES.map((n) => paneActive(w, n)) : []); // the view's: a task's tabs and its project's
   for (const ws of Object.values(S.work || {})) {
-    for (const t of ws.tabs) t.el.style.display = w && t.tid === tid && !t.closing && t.path === w.act[t.pane] ? '' : 'none';
+    for (const t of ws.tabs) t.el.style.display = shown.has(t) && !t.closing ? '' : 'none';
   }
   layoutPanes(w); // grid.js
   renderFileTabs();
@@ -840,7 +907,7 @@ const PLAY_SVG = '<svg viewBox="0 0 16 16" width="11" height="11" aria-hidden="t
 setInterval(async () => {
   const tid = wsId();
   const w = tid && S.mode === 'dev' && S.work && S.work[tid];
-  const fileTabs = w ? w.tabs.filter(isFileTab) : [];
+  const fileTabs = w ? viewTabs(w).filter(isFileTab) : [];
   if (!fileTabs.length) return;
   let v;
   try { v = await request('fs.versions', { id: tid, paths: fileTabs.map((t) => t.path) }); } catch { return; }
@@ -939,8 +1006,9 @@ document.addEventListener('click', (e) => {
   if (closeAll) { closePane(paneOf(closeAll)); return; }
   const tabEl = e.target.closest('#middle .pane-tabs .tab[data-file]');
   if (tabEl && wsId()) {
-    const t = work(wsId()).tabs.find((x) => x.path === tabEl.dataset.file);
-    if (t) showTab(t, true);
+    const t = viewTabs(work(wsId())).find((x) => x.path === tabEl.dataset.file);
+    if (t && e.detail === 2) toggleProjectTab(t); // the second click (see DESIGN_DETAILS.md "Modes")
+    else if (t) showTab(t, true);
     return;
   }
   const act = e.target.closest('[data-file-act]');

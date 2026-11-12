@@ -47,7 +47,7 @@ function ctTabsOf(t) {
   const w = S.work && S.work[t.id];
   const shellOf = (key) => (t.shells || []).find((s) => s.key === key) || {};
   if (w && w.restored) {
-    return w.tabs.filter((x) => !x.closing && !x.idle && !x.thread && !x.untitled && !x.finder).map((x) => { // Finder tabs: not copied
+    return w.tabs.filter((x) => !x.closing && !x.thread && !x.untitled && !x.finder).map((x) => { // Finder tabs: not copied; project tabs are not the task's
       if (x.web) return x.url && x.url !== 'about:blank' ? { kind: 'web', name: webTabName(x), right: x.url, url: x.url, live: x } : null;
       if (x.shell) {
         const s = shellOf(x.key);
@@ -70,7 +70,7 @@ function ctTabsOf(t) {
 function ctSources(tid) {
   const st = S.state;
   const me = st.tasks[tid];
-  const mine = work(tid).tabs.filter((x) => !x.closing);
+  const mine = viewTabs(work(tid)).filter((x) => !x.closing); // the project's tabs too: they are on screen
   const files = new Set(mine.filter((x) => isFileTab(x)).map((x) => x.path));
   const urls = new Set(mine.filter((x) => x.web).map((x) => x.url));
   const when = (t) => Date.parse(t.opened || t.updated || '') || 0;

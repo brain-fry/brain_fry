@@ -43,7 +43,20 @@ def _mac_identity() -> None:
 def _file_menu(get_window) -> list:
     """The File menu of the menu bar. Its items call the page; pywebview runs each one in a
     thread of its own. No key equivalents: a key of the menu bar would never reach the page."""
+    from webview import FileDialog  # noqa: PLC0415
     from webview.menu import Menu, MenuAction  # noqa: PLC0415
+
+    def add_project():
+        """macOS's folder dialog (with its New Folder button), then the page runs bf init on
+        the folder and switches to it (`addProject` in app.js)."""
+        log.info("menu: File > Add New Project...")
+        try:
+            window = get_window()
+            chosen = window.create_file_dialog(FileDialog.FOLDER)
+            if chosen:
+                window.evaluate_js(f"menuAction('project', {json.dumps(chosen[0])})")
+        except Exception:
+            log.warning("menu action failed", exc_info=True)
 
     def refresh_explorer():
         log.info("menu: File > Refresh Explorer")
@@ -52,7 +65,7 @@ def _file_menu(get_window) -> list:
         except Exception:
             log.warning("menu action failed", exc_info=True)
 
-    return [Menu("File", [MenuAction("Refresh Explorer", refresh_explorer)])]
+    return [Menu("File", [MenuAction("Add New Project...", add_project), MenuAction("Refresh Explorer", refresh_explorer)])]
 
 
 def _file_menu_first() -> None:
@@ -103,8 +116,24 @@ def _dark_titlebar(window) -> None:
     AppHelper.callAfter(apply)
 
 
+def _fill_screen(window) -> None:
+    """The window fills its screen without going full screen: the screen's visible frame (menu
+    bar and Dock excluded), as Window > Fill does. pywebview's `maximized=True` takes the whole
+    screen, under the menu bar. Runs from `before_show`, in a thread."""
+    from PyObjCTools import AppHelper  # noqa: PLC0415
+
+    def apply():  # main thread: AppKit
+        try:
+            w = window.native
+            w.setFrame_display_(w.screen().visibleFrame(), True)
+        except Exception:
+            log.debug("could not fill the screen", exc_info=True)
+
+    AppHelper.callAfter(apply)
+
+
 def _menu_titles() -> str:
-    """The menu bar, for the selftest: 'Brain Fry, File (Refresh Explorer), Edit (...), ...'."""
+    """The menu bar, for the selftest: 'Brain Fry, File (Add New Project..., Refresh Explorer), Edit (...), ...'."""
     try:
         from AppKit import NSApp  # noqa: PLC0415
         from PyObjCTools import AppHelper  # noqa: PLC0415
@@ -263,7 +292,6 @@ def run(debug: bool = False, browser: bool = False, selftest: float | None = Non
         _file_menu_first()
         window = webview.create_window(
             "Brain Fry", url, width=1600, height=1000, min_size=(900, 500),
-            fullscreen=selftest is None,  # macOS full screen (own Space); 1600x1000 after leaving it
             background_color="#040510",  # the splash color: no white flash before the page paints
             menu=_file_menu(lambda: window),
         )  # fmt: skip
@@ -279,6 +307,8 @@ def run(debug: bool = False, browser: bool = False, selftest: float | None = Non
 
         window.events.closing += on_closing
         window.events.before_show += lambda: _dark_titlebar(window)
+        if selftest is None:  # a selftest stays 1600x1000: it would cover Renaud's screen
+            window.events.before_show += lambda: _fill_screen(window)
         from .browser import BrowserHost  # noqa: PLC0415 (WebKit: only in the window)
 
         core.browser = BrowserHost(core, window)  # the browser of 3a; sets itself up at its first command

@@ -224,6 +224,79 @@ def _add(staged: list, unstaged: list, xy: str, path: str, orig: str | None) -> 
         unstaged.append({"path": path, "st": y})
 
 
+def _numstat(out: bytes) -> dict[str, tuple[int, int] | None]:
+    """`--numstat -z`: {path: (lines added, lines removed)}, None for a binary file. A rename or a
+    copy is keyed by its new path."""
+    res: dict[str, tuple[int, int] | None] = {}
+    recs = out.split(b"\0")
+    i = 0
+    while i < len(recs):
+        r = _s(recs[i])
+        i += 1
+        if not r:
+            continue
+        a, d, path = r.split("\t", 2)
+        if not path:  # a rename or a copy: the old path, then the new one
+            path = _s(recs[i + 1])
+            i += 2
+        res[path] = None if a == "-" else (int(a), int(d))
+    return res
+
+
+_untracked_lines: dict[str, tuple[int, int, int | None]] = {}  # path --> (size, mtime_ns, lines)
+
+
+def _count_lines(path: Path) -> int | None:
+    """The lines of an untracked file, as git counts them. None for a binary file (a NUL byte in its
+    first 8000 bytes, git's test), a symlink, or a file bigger than the 2 MB that 3b shows. Read
+    again only when its size or mtime changed: the status runs every 2 s."""
+    try:
+        if path.is_symlink() or not path.is_file():
+            return None
+        s = path.stat()
+    except OSError:
+        return None
+    if s.st_size > MAX_TEXT:
+        return None
+    hit = _untracked_lines.get(str(path))
+    if hit and hit[:2] == (s.st_size, s.st_mtime_ns):
+        return hit[2]
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return None
+    n = None if b"\0" in data[:8000] else data.count(b"\n") + (1 if data and not data.endswith(b"\n") else 0)
+    if len(_untracked_lines) > 5000:
+        _untracked_lines.clear()
+    _untracked_lines[str(path)] = (s.st_size, s.st_mtime_ns, n)
+    return n
+
+
+def _put_counts(f: dict, counts: tuple[int, int] | None) -> None:
+    if counts is not None:
+        f["add"], f["del"] = counts
+
+
+def line_counts(tree: Path, st: dict) -> None:
+    """Adds `add` and `del`, the lines added and removed, to the staged and unstaged files of a
+    status, as the diff of 3b counts them. None for a binary file, a conflict, or a folder of
+    untracked files. Only the current worktree pays for it, not the counts of panel 1."""
+    try:
+        staged = _numstat(run(tree, "diff", "--cached", "-M", "--no-ext-diff", "--numstat", "-z"))
+        unstaged = _numstat(run(tree, "diff", "--no-ext-diff", "--numstat", "-z"))
+    except GitError as e:
+        log.warning("numstat of %s failed: %s", tree.name, e)
+        return
+    for f in st["staged"]:
+        _put_counts(f, staged.get(f["path"]))
+    for f in st["unstaged"]:
+        if f["st"] != "?":
+            _put_counts(f, unstaged.get(f["path"]))
+        elif not f["path"].endswith("/"):
+            n = _count_lines(tree / f["path"])
+            _put_counts(f, None if n is None else (n, 0))
+
+
 _counts: dict[str, tuple[float, int]] = {}
 
 
@@ -388,9 +461,10 @@ def commit_info(top: Path, sha: str) -> dict:
     out = _s(run(top, "show", "-s", "--format=%H%x00%P%x00%an%x00%at%x00%B", sha))
     h, p, an, at, body = (out.split("\0") + [""] * 5)[:5]
     parents = p.split()
-    args = ["diff-tree", "-r", "-z", "-M", "--name-status", "--no-commit-id"]
+    args = ["diff-tree", "-r", "-z", "-M", "--no-commit-id"]
     args += [f"{h}^1", h] if parents else ["--root", h]
-    recs = run(top, *args).split(b"\0")
+    counts = _numstat(run(top, *args, "--numstat"))
+    recs = run(top, *args, "--name-status").split(b"\0")
     fl = []
     i = 0
     while i < len(recs):
@@ -404,6 +478,8 @@ def commit_info(top: Path, sha: str) -> dict:
         else:
             fl.append({"st": code[0], "path": _s(recs[i])})
             i += 1
+    for f in fl:
+        _put_counts(f, counts.get(f["path"]))
     return {"h": h, "parents": parents, "author": an, "t": int(at or 0), "message": body.strip("\n"), "files": fl}
 
 
@@ -628,6 +704,7 @@ def state(top: Path, trees: list[dict], cur: dict, tasks: list[dict]) -> dict:
     tree = Path(cur["path"])
     st = status(tree)
     changed_count(cur["path"], st)
+    line_counts(tree, st)
     out_trees = []
     for t in trees:
         mine = [x for x in tasks if x.get("cwd") and _inside(x["cwd"], t["path"])

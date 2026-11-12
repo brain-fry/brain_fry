@@ -252,6 +252,61 @@ function stopFade(el) {
   el.style.pointerEvents = '';
 }
 
+// The card of a switch that fades (auto-advance, a click or a key in 1a, an arrival): the next
+// task's title, the goal line of its digest and the start of my first prompt, over the top of 4a
+// from the pause on, until my first key, click or scroll (Renaud, 2026-11-11, from a mockup: "4B"
+// plus the first prompt). With auto-advance my eyes stay on 4a and never see 1a.
+const CARD_IN_MS = 300; // ease-out, when 4a is empty
+const CARD_OUT_MS = 600; // ease-in, at my first key
+let cardGen = 0; // a newer show or hide wins over the end of an older fade
+let cardAt = 0; // the events from before (the key or click that made the switch) do not close it
+
+function showCard(id) {
+  const el = $('#switch-card');
+  const task = S.state && S.state.tasks[id];
+  if (!task) return hideCard(0);
+  const gen = ++cardGen;
+  cardAt = performance.now();
+  const put = () => {
+    if (gen !== cardGen) return;
+    const goal = task.goal ? `<div class="txt"><span class="lb">Goal</span> ${esc(task.goal)}</div>` : '';
+    const asked = task.firstPrompt ? `<div class="txt asked"><span class="lb">Asked</span> ${esc(task.firstPrompt)}</div>` : '';
+    el.innerHTML = `<div class="head"><span class="dot ${task.status}"></span><span>${esc(task.title)}</span></div>${goal}${asked}`;
+    el.hidden = false;
+    const delay = Math.max(0, fadeAt + FADE_OUT_MS - performance.now());
+    el.animate([{ opacity: 0 }, { opacity: 1 }], { duration: CARD_IN_MS, delay, easing: 'ease-out', fill: 'backwards' });
+  };
+  if (el.hidden) put();
+  else fadeCard(el, FADE_OUT_MS, put); // the old card goes with the old task
+}
+
+function hideCard(ms) { // 0: at once
+  const el = $('#switch-card');
+  ++cardGen;
+  if (el.hidden) return;
+  if (ms) return fadeCard(el, ms, () => {});
+  el.getAnimations().forEach((a) => a.cancel());
+  el.hidden = true;
+}
+
+function fadeCard(el, ms, then) {
+  const gen = cardGen;
+  const from = +getComputedStyle(el).opacity;
+  el.getAnimations().forEach((a) => a.cancel()); // rejects the promise of an older fade: its `then` never runs
+  const a = el.animate([{ opacity: from }, { opacity: 0 }], { duration: ms, easing: 'ease-in', fill: 'forwards' });
+  a.finished.then(() => { if (gen === cardGen) el.hidden = true; a.cancel(); then(); }, () => {});
+}
+
+// my first key (not a modifier alone), click or scroll after the card came: in any part of the window
+function closeCard(e) {
+  if ($('#switch-card').hidden || e.timeStamp < cardAt) return;
+  if (e.type === 'keydown' && ['Shift', 'Meta', 'Control', 'Alt', 'CapsLock'].includes(e.key)) return;
+  hideCard(CARD_OUT_MS);
+}
+window.addEventListener('keydown', closeCard, true);
+window.addEventListener('mousedown', closeCard, true);
+$('#agent').addEventListener('wheel', closeCard, { capture: true, passive: true });
+
 // The new terminal is on screen at opacity 0 from the start of the switch, so that it has the
 // keyboard at once: a key typed during the fade goes to the selected task, never to the old one.
 function showTerm(id) {
@@ -260,6 +315,8 @@ function showTerm(id) {
   S.shownTerm = id;
   if (fade && prev === id) return focusTerm(id); // the same task again: its fade runs on
   if (fade) fadeAt = performance.now();
+  if (fade && id) showCard(id);
+  else hideCard(fade ? FADE_OUT_MS : 0); // the photo, a project with no task: it goes with the old task
   for (const x of S.terms.values()) {
     if (x.shell) continue;
     if (x.id === id) {
@@ -335,7 +392,7 @@ function currentProject() {
 // (it has no open task): `project:<path>`, a work state of files.js that no task file keeps. The
 // backend reads the same id (fs.* commands, /file/).
 function wsId() {
-  return S.selected || S.idle || (S.project ? `project:${S.project}` : null);
+  return S.selected || S.idle || (S.project ? projectWs(S.project) : null);
 }
 
 function wsProject(id) {
@@ -343,6 +400,39 @@ function wsProject(id) {
   const t = S.state && S.state.tasks[id];
   return t ? t.projectPath : null;
 }
+
+// Project tabs (DESIGN_DETAILS.md, "Project tabs"): tabs that belong to a project rather than to
+// one task. Their owner is `project:<path>`, the work state of the project view (files.js), and
+// every view of that project shows them, first in each pane: a task, the idle screen, the project
+// view. A tab's `tid` is its owner: a task, or `project:<path>`. The backend keeps them in
+// <project>/.brain_fry/project.json, and the state lists them under the project (`tabs`).
+const projectWs = (path) => `project:${path}`;
+const isProjectWs = (id) => Boolean(id) && id.startsWith('project:');
+
+// the owners whose tabs are on screen: the view (wsId) and, for a task, its project's tabs
+function viewIds() {
+  const id = wsId();
+  const p = id && !isProjectWs(id) && wsProject(id);
+  return !id ? [] : p ? [id, projectWs(p)] : [id];
+}
+const inView = (tid) => viewIds().includes(tid);
+
+// Where a tab that I open from the view `tid` goes: the selected task's own tabs; with no task
+// selected (the idle screen, the project view), the project's tabs (Renaud, 2026-11-11).
+function ownerFor(tid) {
+  if (!tid || tid === S.selected) return tid;
+  const p = wsProject(tid);
+  return p ? projectWs(p) : tid;
+}
+
+// What the state says of an owner's tabs (openFiles, browserTabs, finderTabs, shells, terminalTabs).
+function ownerData(tid) {
+  if (!S.state || !tid) return null;
+  if (!isProjectWs(tid)) return S.state.tasks[tid] || null;
+  const p = S.state.projects.find((x) => x.path === wsProject(tid));
+  return (p && p.tabs) || null;
+}
+const shellsOf = (tid) => (ownerData(tid) || {}).shells || [];
 
 // archived tasks are done: never landed on (newTask counts them). Never opened (older tasks): the last updated.
 function lastOpened(path, archived = false) {
@@ -368,7 +458,16 @@ function openProject(path) {
   S.starting = null;
   showTerm(null);
   send('select', { id: null });
+  showProjectTabs(projectWs(path));
   render();
+}
+
+// The project's tabs, once per run, as a task's at its first select: its files, pages and Finder
+// tabs here (restoreFiles), its terminals by the backend (`idle` with the project's id).
+function showProjectTabs(id) {
+  restoreFiles(id); // files.js
+  const sh = shellBoxSize();
+  send('idle', { id, shellRows: sh.rows, shellCols: sh.cols });
 }
 
 // the projects of the dropdown, Cmd+P and Cmd+T: without the ones removed with the x of Cmd+P
@@ -496,19 +595,18 @@ function selectNone() {
 // The idle screen (Renaud, 2026-11-11): while nothing is selected, only 4a changes (the photo).
 // The dropdown, 2a and column 3 keep showing the task that I left, or at start the task that I
 // opened last: its project and its layout, terminals and browser tabs included. That task is not
-// selected: no session is started for it, `opened` does not change. A file opened there is not
-// added to it, and goes when a task is selected (dropIdleTabs, files.js).
+// selected: no session is started for it, `opened` does not change. A tab opened there is not
+// added to it: it is a project tab (ownerFor), which every task of the project shows.
 function showIdle(id) {
   S.idle = id && S.state && S.state.tasks[id] ? id : null;
   if (!S.idle) return;
   if (S.mode === 'dev' && !work(id).restored) veil(id); // at start: its tabs fade in once built (veil.js)
-  restoreFiles(id); // files.js: its file and browser tabs, once per run, as at a select
+  restoreFiles(id); // files.js: its file and browser tabs and its project's, once per run, as at a select
   const sh = shellBoxSize();
-  send('idle', { id, shellRows: sh.rows, shellCols: sh.cols }); // the backend starts its terminals, once per run
+  send('idle', { id, shellRows: sh.rows, shellCols: sh.cols }); // the backend starts its terminals and its project's, once per run
 }
 
 function leaveIdle() {
-  if (S.idle) dropIdleTabs(S.idle);
   S.idle = null;
 }
 
@@ -576,10 +674,10 @@ function card(t, pos = 0) {
   const cls = ['card', t.id === S.boardSel ? 'sel' : '', t.status === 'done' ? 'archived' : '', t.unread ? 'unread' : ''].join(' ');
   return `<div class="${cls}" data-card="${t.id}" draggable="true">
     <div class="top">${pos ? `<span class="pos" title="press ${pos} to open">${pos}</span>` : ''}<span class="dot ${t.status}" title="${t.status}"></span>
-      ${t.inbox ? '<span class="inbox-badge">inbox</span>' : ''}${t.pinned ? '<span class="pin-badge">pinned</span>' : ''}<span class="proj" style="--h:${hue(t.project)}">${esc(t.project)}</span></div>
+      ${t.inbox && t.prio === 'working' ? '<span class="inbox-badge">inbox</span>' : ''}${t.pinned ? '<span class="pin-badge">pinned</span>' : ''}<span class="proj" style="--h:${hue(t.project)}">${esc(t.project)}</span></div>
     <div class="title" title="${esc(t.title)}">${esc(t.shortTitle || t.title)}</div>
     ${t.digest || t.notes ? `<div class="desc" title="${esc(t.digest || t.notes)}">${esc(t.digest || t.notes)}</div>` : ''}
-    ${t.inbox && t.line ? `<div class="line need">${esc(t.line)}</div>` : ''}
+    ${t.inbox && t.prio === 'working' && t.line ? `<div class="line need">${esc(t.line)}</div>` : ''}
   </div>`;
 }
 
@@ -601,6 +699,10 @@ function ensureBoardSel(cols) {
 
 function renderBoard(st) {
   $('#show-hidden').checked = S.showHidden;
+  const cur = currentProject(), name = cur && cur.split('/').pop();
+  const park = $('#park-btn');
+  park.disabled = !parkable(st, cur).length;
+  park.title = cur ? `Moves every task of the working column that is not in ${name} to planning: they leave the inbox` : '';
   const cols = boardColumns(st);
   ensureBoardSel(cols);
   $('#columns').innerHTML = cols.map((c) => `
@@ -621,25 +723,63 @@ function openWorking(n) {
   openInDev(id);
 }
 
+// The button of the board bar: the working tasks of the other projects (archived ones too) go to
+// planning, so that only the current project's tasks are in the inbox. The backend chooses
+// them again (actions.park_others); this list only enables the button.
+function parkable(st, cur) {
+  return cur ? Object.values(st.tasks).filter((t) => t.prio === 'working' && t.projectPath !== cur) : [];
+}
+
+async function parkOthers() {
+  const cur = currentProject();
+  if (!cur) return;
+  try {
+    const { ids } = await request('park', { project: cur });
+    if (!ids.length) return;
+    toast(`Moved ${ids.length} task${ids.length > 1 ? 's' : ''} to planning`, {
+      label: 'Undo', run: () => ids.forEach((id) => send('prio', { id, prio: 'working' })),
+    });
+  } catch (e) {
+    toast(`Could not move the tasks: ${e.message}`);
+  }
+}
+
 function setShowHidden(on) {
   S.showHidden = on;
   store('showHidden', on);
   render();
 }
 
+// cards per row: planning shows two (app.css), in reading order
+const perRow = (col) => (col.prio === 'planning' ? 2 : 1);
+
+// The arrows follow the screen: in planning, Left/Right first go to the other card of the row,
+// Up/Down go a whole row. Across columns, the cursor keeps its row.
 function boardMove(dx, dy) {
   const cols = boardColumns(S.state);
   let ci = cols.findIndex((c) => c.ids.includes(S.boardSel));
   if (ci < 0) return render();
   let ri = cols[ci].ids.indexOf(S.boardSel);
+  const n = perRow(cols[ci]), len = cols[ci].ids.length;
   if (dx) {
-    let j = ci + dx;
-    while (j >= 0 && j < cols.length && !cols[j].ids.length) j += dx; // skip empty columns
-    if (j < 0 || j >= cols.length) return;
-    ci = j;
-    ri = Math.min(ri, cols[ci].ids.length - 1);
+    const side = (ri % n) + dx;
+    if (side >= 0 && side < n && ri + dx < len) ri += dx; // the other card of the row
+    else {
+      const row = Math.floor(ri / n);
+      let j = ci + dx;
+      while (j >= 0 && j < cols.length && !cols[j].ids.length) j += dx; // skip empty columns
+      if (j < 0 || j >= cols.length) return;
+      ci = j;
+      const m = perRow(cols[ci]); // from the left: the row's first card; from the right: its last
+      ri = Math.min(row * m + (dx > 0 ? 0 : m - 1), cols[ci].ids.length - 1);
+    }
   } else {
-    ri = Math.max(0, Math.min(cols[ci].ids.length - 1, ri + dy));
+    const next = ri + dy * n;
+    if (next < 0) return;
+    if (next >= len) { // the last row may hold one card: go there, else stay
+      if (Math.floor((len - 1) / n) === Math.floor(ri / n)) return;
+      ri = len - 1;
+    } else ri = next;
   }
   S.boardSel = cols[ci].ids[ri];
   render();
@@ -847,6 +987,16 @@ function openPicker(mode = 'new') {
   }).catch((e) => toast(`Could not read the projects: ${e.message}`));
 }
 
+// File > Add New Project... (main.py: macOS's folder dialog): bf init on the folder, then switch
+// to it as Cmd+P does. A folder that is already a project: a toast, then the switch.
+function addProject(path) {
+  if (S.picker) closePicker();
+  request('project.init', { path }).then((r) => {
+    if (!r.new) toast(`${r.name} is already a project`);
+    openProject(r.path);
+  }).catch((e) => toast(`Could not add ${path}: ${e.message}`));
+}
+
 function pickerStart(p) {
   const i = p.mode === 'open' ? p.items.findIndex((it) => it.path !== currentProject()) : 0;
   return Math.max(0, i);
@@ -1028,6 +1178,7 @@ document.addEventListener('click', (e) => {
 });
 
 $('#new-btn').addEventListener('click', () => openPicker());
+$('#park-btn').addEventListener('click', () => { parkOthers(); $('#board').focus(); }); // the board keys keep working
 
 document.addEventListener('change', (e) => {
   if (e.target.id === 'show-hidden') { setShowHidden(e.target.checked); $('#board').focus(); }

@@ -71,8 +71,8 @@ The spec above is Renaud's: change it only when he asks. Everything below is wri
 ### Files
 
 - Global, in `~/.brain_fry/` (`BRAIN_FRY_HOME` moves it): `projects.json` (projects; its views are ignored in v1), `inbox_prompt.md` (the digest's prompt), `hook.sh` (a copy of `src/brain_fry/hook.sh`), `owned.json`, `selection.json`, `logs/bf.log` and `logs/hook.log`, `extensions/ublock-lite/`, `browser/` (cookies, mode 700).
-- Per project, in `<project>/.brain_fry/` (ignored by `~/.gitignore_global`): one task file per session, `<session-id>.md`; `events/`, the spool that the hook writes (one file per event, deleted once applied); `events.jsonl`, the log of applied events; `consume.lock`; `discarded/`, the patches that Review mode's Discard removed (for Undo).
-- `bf init` creates `.brain_fry/` and registers the project. `bf install`, once per machine and safe to run twice, adds the hook to `~/.claude/settings.json`, copies it, writes `inbox_prompt.md` and installs uBlock Origin Lite. A banner asks for `bf install` when the installed hook differs from the packaged one, so any change to `hook.sh` needs it.
+- Per project, in `<project>/.brain_fry/` (ignored by `~/.gitignore_global`): one task file per session, `<session-id>.md`; `project.json`, the project tabs (below); `events/`, the spool that the hook writes (one file per event, deleted once applied); `events.jsonl`, the log of applied events; `consume.lock`; `discarded/`, the patches that Review mode's Discard removed (for Undo).
+- `bf init` (or File > Add New Project... in the window) creates `.brain_fry/` and registers the project. `bf install`, once per machine and safe to run twice, adds the hook to `~/.claude/settings.json`, copies it, writes `inbox_prompt.md` and installs uBlock Origin Lite. A banner asks for `bf install` when the installed hook differs from the packaged one, so any change to `hook.sh` needs it.
 
 ### Task file
 
@@ -97,7 +97,7 @@ The spec above is Renaud's: change it only when he asks. Everything below is wri
 ### Status, inbox, board
 
 - `prio` is the board column: working, planning, later, more_later, never (the last three are hidden by default). `status` is the color: working (orange), blocked (red), waiting (green), done (gray, archived). `live` is a flag that is not shown: a `claude` process runs for the task.
-- The inbox holds the tasks that have `inbox` set or are `pinned`, never archived ones. Order: `inbox` set first, then red, then prio column, then the most recent. Selecting a task clears `unread`. Answering and archiving clear `inbox`. Archiving also unpins.
+- The inbox holds the tasks of the working column that have `inbox` set or are `pinned`, never archived ones (planning and the hidden columns wait; their flags stay). Order: `inbox` set first, then red, then the most recent. Selecting a task clears `unread`. Answering and archiving clear `inbox`. Archiving also unpins.
 - Auto-advance: after Renaud answers the selected task, the front end selects the next inbox item 1 s later (a switch in the header turns this off); after an archive, at once, whatever the switch. With nothing left, no task is selected and 4a shows a calm photo (`web/calm/`). The photo shows only while nothing needs Renaud: in Dev mode with no task selected, a task that comes into the inbox is selected at once. Only 4a changes (the idle screen): the dropdown, 2a and column 3 keep the project and the layout of the task that Renaud left, or at start of the task opened last, which is not selected (`S.idle`, `showIdle` in `app.js`).
 
 ### Digest
@@ -111,6 +111,7 @@ The spec above is Renaud's: change it only when he asks. Everything below is wri
 - Every request must carry `Host: 127.0.0.1:<port>` or `localhost:<port>`, and an `Origin` header, when present, must be the app's page. Without this check, a web page could drive the shells.
 - The app owns its PTYs: each live session is `claude` in a PTY (`--session-id` for a new task, `--resume` for an existing one, `--resume --fork-session --session-id` for a fork), each terminal tab of column 3 a shell. Children start through `subprocess.Popen` and a small wrapper (the app's threads make `pty.fork()` unsafe), with an environment cleaned of the variables of Claude Code and VS Code (`CHILD_ENV_DROP`).
 - Cmd keys belong to Brain Fry, since a terminal never sends Cmd. While a terminal has the focus, key events go to xterm.js's hidden textarea. Every key is listed by hand in "Show shortcuts" (`#keys` in `index.html`): a new or changed key goes there too.
+- A tab of column 3 belongs to a task or to its project (project tabs, DESIGN_DETAILS.md "2a, 3a, 3b"): every view of the project shows the project's tabs first in each pane, a tab opened with no task selected (idle screen, project view) is one, and a double-click on a tab moves it between the two. A tab's `tid` is its owner (a task id or `project:<path>`); `viewTabs(w)` is what a view shows, `inView(tid)` whether an owner's tabs are on screen.
 - The browser of 3a is made of native WKWebViews laid over the page (`app/browser.py`). They paint above any HTML, so an HTML dialog over column 3 must hide them.
 - Logs: `bf.log` (the app and the `bf` commands) and `hook.log`. The text of prompts and replies, the commands typed in terminals, and browsing history, are never logged.
 
@@ -130,8 +131,8 @@ Brain Fry reads two formats of Claude Code that are internal. It reads them on a
 
 - `uv run pytest`. The JS has no unit tests: check the window with `bf --selftest SECONDS`. It prints the page text, the terminal text and the JS errors; `--selftest-js` runs code in the page.
 - Always run a selftest in a sandbox: `BRAIN_FRY_HOME` (its own projects.json, lock and logs; required while the app runs), `BRAIN_FRY_CLAUDE` (a fake `claude`), `CLAUDE_CONFIG_DIR` (fake transcripts). With the real files, it would resume real sessions and apply real spools. A task file copied into the sandbox needs its `project` and `cwd` rewritten, else the backend writes to the real task.
-- Send key events to the element that has the focus in real use (xterm.js's textarea in 4a), not to `document`. A run whose `document.visibilityState` is `hidden` (the window was covered) does not count: WebKit pauses frames.
-- `spikes/browser/host_check.py` checks the browser in a real window against a local site (`site.py`).
+- Send key events to the element that has the focus in real use (xterm.js's textarea in 4a), not to `document`. A double-click is two clicks (`detail` 1, then 2): look the element up again before the second, since the first may rebuild it (a tab bar), and an event on a detached element never reaches `document`. Do not name the test's variables after the page's globals (`S`, `B`, `G`, `F`, `C`): a `const B` hides the browser's state. A run whose `document.visibilityState` is `hidden` (the window was covered) does not count: WebKit pauses frames.
+- `tests/window/browser/host_check.py` checks the browser in a real window against a local site (`site.py`).
 
 ### Not built yet
 

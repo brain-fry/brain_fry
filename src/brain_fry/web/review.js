@@ -502,8 +502,11 @@ function fileRowHtml(f, act) {
   const dir = f.path.replace(/\/$/, '').split('/').slice(0, -1).join('/');
   const orig = f.orig ? `${f.orig} --> ` : '';
   const btn = act ? `<button class="act" data-rv-act title="${act.title}">${act.label}</button>` : '';
+  // lines added and removed; a zero side is left out, and so is a binary file (no counts)
+  const nums = [f.add ? `<span class="add">+${f.add}</span>` : '', f.del ? `<span class="del">-${f.del}</span>` : ''].filter(Boolean).join(' ');
   return `<div class="rv-file${sel ? ' sel' : ''}" data-side="${f.side}" data-path="${esc(f.path)}" title="${esc(orig + f.path)}">`
-    + `<span class="st st-${stClass(f.st)}">${esc(f.st)}</span><span class="name">${esc(name)}</span><span class="dir">${esc(dir)}</span>${btn}</div>`;
+    + `<span class="st st-${stClass(f.st)}">${esc(f.st)}</span><span class="name">${esc(name)}</span><span class="dir">${esc(dir)}</span>`
+    + `${nums ? `<span class="nums">${nums}</span>` : ''}${btn}</div>`;
 }
 
 function drawFiles() {

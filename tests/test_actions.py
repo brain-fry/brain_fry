@@ -150,13 +150,41 @@ def test_archive_unpins_and_an_archived_task_cannot_be_pinned(project):
 
 
 def test_inbox_order_puts_quiet_pinned_tasks_last(project):
-    def make(prio, **flags):
+    def make(updated, **flags):
         t = actions.new_task(project)
-        return actions._update(t.id, prio=prio, **flags)
+        return actions._update(t.id, updated=updated, **flags)
 
-    quiet = make("working", pinned=True)
-    waiting = make("planning", inbox=True)
-    blocked = make("later", inbox=True, status="blocked")
-    pinned_waiting = make("working", pinned=True, inbox=True)
+    quiet = make("2026-11-11T12:00:00", pinned=True)
+    waiting = make("2026-11-11T10:00:00", inbox=True)
+    blocked = make("2026-11-11T09:00:00", inbox=True, status="blocked")
+    pinned_waiting = make("2026-11-11T11:00:00", pinned=True, inbox=True)
     got = sorted([quiet, waiting, blocked, pinned_waiting], key=views.inbox_order)
     assert [t.id for t in got] == [blocked.id, pinned_waiting.id, waiting.id, quiet.id]
+
+
+def test_only_the_working_column_is_in_the_inbox(project):
+    """Renaud, 2026-11-11: a task in planning (or a hidden column) waits, even pinned or with a
+    reply; its flags stay, so it comes back to the inbox when it moves back to working."""
+    t = actions.new_task(project)
+    actions._update(t.id, inbox=True, unread=True, pinned=True)
+    for prio in ("planning", "later", "more_later", "never"):
+        assert not views.in_inbox(actions.set_prio(t.id, prio))
+    back = actions.set_prio(t.id, "working")
+    assert (back.inbox, back.unread, back.pinned) == (True, True, True) and views.in_inbox(back)
+
+
+def test_park_others_moves_the_working_tasks_of_the_other_projects(project, home):
+    from brain_fry import projects
+
+    other = home / "other"
+    other.mkdir()
+    projects.init(other)
+    mine = actions.new_task(project)
+    theirs = actions._update(actions.new_task(other).id, inbox=True)
+    archived = actions._update(actions.new_task(other).id, status="done")
+    later = actions.set_prio(actions.new_task(other).id, "later")
+    assert sorted(actions.park_others(project)) == sorted([theirs.id, archived.id])
+    prios = {t.id: actions.load(t.id).prio for t in (mine, theirs, archived, later)}
+    assert prios == {mine.id: "working", theirs.id: "planning", archived.id: "planning", later.id: "later"}
+    assert actions.load(theirs.id).inbox and not views.in_inbox(actions.load(theirs.id))
+    assert actions.park_others(project) == []

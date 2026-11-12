@@ -80,11 +80,13 @@
     <div id="calm" hidden></div>
     <div id="sel-chip" hidden></div>
     <div id="overlay" hidden></div>
+    <div id="switch-card" hidden></div>
   </section>
 </main>
 <main id="board" tabindex="-1" hidden>
   <div class="board-bar">
     <label><input type="checkbox" id="show-hidden"> Show later, more later, never and archived (H)</label>
+    <button id="park-btn">Move other projects to planning</button>
   </div>
   <div id="columns"></div>
 </main>
@@ -114,6 +116,7 @@
       <div><kbd>Cmd+J, E, 1-9 / a-z</kbd><span>Keyboard to the explorer, on that row</span></div>
       <div><kbd>Shift+Enter</kbd><span>New line in Claude Code (4a)</span></div>
       <div><kbd>Cmd+click</kbd><span>Open a link of a terminal in a tab</span></div>
+      <div><kbd>Double-click a tab</kbd><span>Project tab (★, in every task of the project), or back to the task</span></div>
     </section>
     <section><h4>Files and PDFs</h4>
       <div><kbd>Cmd+F</kbd><span>Find</span></div>

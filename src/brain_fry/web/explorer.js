@@ -71,8 +71,9 @@ function openCtx(x, y, items) {
 
 function closeCtx() { $('#ctx').hidden = true; }
 
-function menuAction(name) { // the File menu of the menu bar (main.py)
+function menuAction(name, arg) { // the File menu of the menu bar (main.py)
   if (name === 'refresh' && wsId()) refreshTree(wsId());
+  if (name === 'project') addProject(arg); // app.js
 }
 
 // ------------------------------------------------------------------ actions
@@ -159,9 +160,8 @@ async function pasteInto(tid, dir) {
 
 // In the folder, or in the file's folder; pane 3 (bottom left), which opens if it was empty.
 function terminalHere(tid, path) {
-  if (!S.selected) { toast('Start a task first: terminals and browser tabs belong to a task.'); return; } // as Cmd+N T
   uiLog('create: terminal in pane 3, from the explorer');
-  newShell(tid, 3, path);
+  newShell(ownerFor(tid), 3, path); // as Cmd+N T: no task selected, a project tab
 }
 
 async function copyPath(tid, path, relative) {
@@ -180,10 +180,13 @@ function movedPaths(project, pairs) {
   };
   sameProject(project, (id, w) => {
     let moved = false;
+    for (const n of PANES) { // the tab on screen in each pane (grid.js), also a project tab that this view shows
+      const to = w.act[n] && !/^(shell|web|finder|thread|untitled):/.test(w.act[n]) ? map(w.act[n]) : null;
+      if (to !== null) w.act[n] = to;
+    }
     for (const tab of w.tabs) {
       const to = isFileTab(tab) ? map(tab.path) : null;
       if (to === null) continue;
-      for (const n of PANES) if (w.act[n] === tab.path) w.act[n] = to; // the tab on screen in its pane (grid.js)
       if (tab.langC) tab.view.dispatch({ effects: tab.langC.reconfigure(CM.languageFor(to)) });
       if (tab.wrap) { // remembered under the new path (files.js, setWrap)
         try { localStorage.removeItem(wrapKey(id, tab.path)); } catch { /* not remembered */ }

@@ -46,6 +46,21 @@ def owned_file() -> Path:
     return paths.bf_home() / "owned.json"
 
 
+def who(tid: str | None) -> str:
+    """A task or a project's tabs, for the log: the start of the id, or "project <name>"."""
+    return f"project {Path(tid[len(PROJECT_WS) :]).name}" if tid and tid.startswith(PROJECT_WS) else short(tid)
+
+
+class ProjectTabs:
+    """The owner of a project's tabs (`project:<path>`), where a task would be: what shells,
+    terminal tabs and file links need (id, project, cwd, terminal_tabs). DESIGN_DETAILS.md, "Project tabs"."""
+
+    def __init__(self, project: str) -> None:
+        self.id = PROJECT_WS + project
+        self.project = self.cwd = project
+        self.terminal_tabs = actions.project_tabs(project)["terminal_tabs"]
+
+
 class Core:
     def __init__(self) -> None:
         self.loop: asyncio.AbstractEventLoop | None = None
@@ -139,11 +154,14 @@ class Core:
         by_id = {t.id: views.task_json(t, gen := self._live_gen(t.id), shells.get(t.id),
                                        running.get(t.id) if gen is None else None) for t in tasks}  # fmt: skip
         inbox = [t.id for t in sorted(filter(views.in_inbox, tasks), key=views.inbox_order)]
+        projs = views.project_order(projects.load()["projects"], tasks)
+        for p in projs:  # the tabs that every task of the project shows
+            p["tabs"] = views.project_tabs_json(actions.project_tabs(p["path"]), shells.get(PROJECT_WS + p["path"]))
         return {
             "type": "state",
             "tasks": by_id,
             "inbox": inbox,
-            "projects": views.project_order(projects.load()["projects"], tasks),
+            "projects": projs,
             "selected": self.selected,
             "hookInstalled": (hook := self._hook_state())[0],
             "hookOutdated": hook[1],
@@ -411,8 +429,12 @@ class Core:
         return [s for s in self.ptys.values() if s.kind == "shell" and s.task == tid and s.alive]
 
     def _save_terminal_tabs(self, tid: str) -> None:
+        titles = [s.title for s in self._shells_of(tid)]
         try:
-            actions.set_terminal_tabs(tid, [s.title for s in self._shells_of(tid)])
+            if tid.startswith(PROJECT_WS):
+                actions.set_project_tabs(self._project_of(tid), "terminal_tabs", titles)
+            else:
+                actions.set_terminal_tabs(tid, titles)
         except actions.NotFound:
             pass
 
@@ -483,6 +505,33 @@ class Core:
         for _ in range(len(task.terminal_tabs) - len(self._shells_of(task.id))):
             self._new_shell(task, int(msg.get("shellRows") or 12), int(msg.get("shellCols") or cols))
 
+    async def _restore_view_shells(self, owner, msg: dict, cols: int) -> None:
+        """The shells of a task and those of its project's tabs, or those of a project's tabs
+        alone (the project view), as `_restore_shells`."""
+        self._restore_shells(owner, msg, cols)
+        if isinstance(owner, ProjectTabs) or PROJECT_WS + owner.project in self.restored:
+            return
+        try:
+            proj = await asyncio.to_thread(self._owner, PROJECT_WS + owner.project)
+        except actions.NotFound:  # a project no longer registered
+            return
+        self._restore_shells(proj, msg, cols)
+
+    def _set_tabs(self, tid: str, key: str, values: list) -> None:
+        """Blocking: one list of tabs (`key`: open_files, browser_tabs, finder_tabs) of a task, or
+        of a project's tabs (`project:<path>`, kept in project.json)."""
+        if tid.startswith(PROJECT_WS):
+            actions.set_project_tabs(self._project_of(tid), key, values)
+        else:
+            {"open_files": actions.set_open_files, "browser_tabs": actions.set_browser_tabs,
+             "finder_tabs": actions.set_finder_tabs}[key](tid, values)  # fmt: skip
+
+    def _owner(self, tid: str):
+        """Blocking: the task, or the ProjectTabs of `project:<path>` (a registered project only)."""
+        if tid.startswith(PROJECT_WS):
+            return ProjectTabs(self._project_of(tid))
+        return actions.load(tid)
+
     def _start_copied_shells(self, task, msg: dict, cols: int) -> None:
         """A new or forked task copied the terminal tabs of another task: fresh shells, now."""
         self.restored.add(task.id)
@@ -534,6 +583,14 @@ class Core:
             return None
         if cmd == "projects":  # the picker asks each time it opens: projects.json may have changed
             return views.project_order((await run(projects.load))["projects"], await run(actions.all_tasks))
+        if cmd == "project.init":  # File > Add New Project... (main.py's folder dialog): bf init
+            path = Path(str(msg.get("path"))).expanduser().resolve()
+            if not path.is_dir():
+                raise NotADirectoryError(f"not a folder: {path}")
+            new = await run(projects.init, path)
+            log.info("init %s: %s", path, "registered" if new else "already registered")
+            self.request_broadcast()
+            return {"path": str(path), "name": path.name, "new": new}
         if cmd == "project.deactivate":  # the x of a row of Cmd+P; bf init in the folder undoes it
             await run(projects.deactivate, str(msg.get("path")))
             self.request_broadcast()
@@ -572,7 +629,7 @@ class Core:
         if cmd == "fs.versions":
             return await run(files.versions, await run(self._project_of, tid), list(msg.get("paths") or []))
         if cmd == "fs.link":  # Cmd+click on a file link in a terminal: the target as it was written
-            task = await run(actions.load, tid)
+            task = await run(self._owner, tid)  # a project's tabs: its folder is the cwd
             return await run(files.link_target, task.project, task.cwd, str(msg.get("target") or ""))
         # the right-click menu of 2a: they change files, so they are logged
         if cmd == "fs.rename":
@@ -625,7 +682,7 @@ class Core:
             project = await run(self._project_of, tid) if tid else None
             return await run(finder.copy_path, str(msg.get("path") or ""), project, bool(msg.get("relative")))
         if cmd == "finder.tabs.set":  # the Finder tabs of a task: [{root, path}], restored when it is selected
-            await run(actions.set_finder_tabs, tid, list(msg.get("tabs") or []))
+            await run(self._set_tabs, tid, "finder_tabs", list(msg.get("tabs") or []))
             return None
         if cmd == "thread.get":  # one thread in full, for its tab in 3a
             task = await run(actions.load, tid)
@@ -635,7 +692,7 @@ class Core:
                             "question": th.question, "prompt": th.prompt, "reply": th.reply}  # fmt: skip
             raise ValueError(f"no thread {msg.get('n')} in task {tid}")
         if cmd == "files.set":  # the open file tabs of a task, restored when it is selected
-            await run(actions.set_open_files, tid, list(msg.get("paths") or []))
+            await run(self._set_tabs, tid, "open_files", list(msg.get("paths") or []))
             return None
         if cmd == "selection.set":  # the selection in 3a, for the hook: no id or no path clears it
             if tid and msg.get("path"):
@@ -648,7 +705,7 @@ class Core:
 
         # ---- browser (3a): the URLs of a task's tabs here; the pages in the native host
         if cmd == "browser.tabs.set":
-            await run(actions.set_browser_tabs, tid, list(msg.get("urls") or []))
+            await run(self._set_tabs, tid, "browser_tabs", list(msg.get("urls") or []))
             return None
         if cmd == "browser.cookies.info":  # the burger menu: when my Firefox cookies were last copied
             return {"last": await run(firefox.last_import)}
@@ -675,11 +732,12 @@ class Core:
                 task = await run(actions.mark_opened, tid)
                 if self._live_gen(tid) is None and not task.live:
                     self._start_pty(tid, self._resume_argv(task), task.cwd, rows, cols)
-                self._restore_shells(task, msg, cols)
+                await self._restore_view_shells(task, msg, cols)
         elif cmd == "idle":  # nothing needs me: 4a shows a photo, column 3 the tabs of the task that I opened last
-            self._restore_shells(await run(actions.load, tid), msg, cols)  # no session, not selected, not `opened`
+            # no session, not selected, not `opened`; `project:<path>`: the project view (no task)
+            await self._restore_view_shells(await run(self._owner, tid), msg, cols)
         elif cmd == "shell.new":  # path: "Open a terminal here" in 2a; folder: in a Finder tab; else the task's cwd
-            task = await run(actions.load, tid)
+            task = await run(self._owner, tid)  # or a project's tabs: its shells start in its folder
             cwd = None if msg.get("path") is None else await run(self._shell_folder, task.project, str(msg["path"]))
             if msg.get("folder") is not None:
                 cwd = await run(self._finder_folder, str(msg["folder"]))
@@ -696,17 +754,28 @@ class Core:
             self.request_broadcast()
             return {"key": s.key}
         elif cmd == "shell.copy":  # Cmd+N O: a new shell in the folder where the shell `from` is now
-            task = await run(actions.load, tid)
+            task = await run(self._owner, tid)
             src = self.ptys.get(str(msg.get("from")))
             if not src or src.kind != "shell" or not src.alive:
                 raise ValueError("That terminal has ended.")
-            if (await run(actions.load, src.task)).project != task.project:
+            if await run(self._project_of, src.task) != task.project:
                 raise ValueError("That terminal belongs to another project.")
             self.restored.add(tid)
             s = self._new_shell(task, rows, cols, src.folder)
             await run(self._save_terminal_tabs, tid)
             self.request_broadcast()
             return {"key": s.key}
+        elif cmd == "shell.move":  # a double-click on its tab: from a task to its project's tabs, or back
+            s = self.ptys.get(str(msg.get("key")))
+            to = str(msg.get("to") or "")
+            if not s or s.kind != "shell" or not s.alive:
+                raise ValueError("That terminal has ended.")
+            if await run(self._project_of, to) != await run(self._project_of, s.task):
+                raise ValueError("A terminal stays in its project.")
+            old, s.task = s.task, to
+            log.info("shell %s: moved from %s to %s", s.key, who(old), who(to))
+            await run(self._save_terminal_tabs, old)
+            await run(self._save_terminal_tabs, to)
         elif cmd == "shell.close":
             s = self.ptys.get(str(msg.get("key")))
             if s and s.kind == "shell":
@@ -740,6 +809,10 @@ class Core:
             await run(actions.rename, tid, str(msg.get("title", "")))
         elif cmd == "prio":
             await run(actions.set_prio, tid, str(msg.get("prio")))
+        elif cmd == "park":  # Organize mode: the working tasks of the other projects --> planning
+            ids = await run(actions.park_others, Path(msg["project"]))
+            self.request_broadcast()
+            return {"ids": ids}
         else:
             raise ValueError(f"unknown command {cmd!r}")
         self.request_broadcast()

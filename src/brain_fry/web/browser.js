@@ -41,7 +41,7 @@ function makeWebTab(tid, url, key, pane) {
   tab.close = () => forgetWebTab(tab);
   tab.focus = () => focusPage(tab);
   B.tabs.set(key, tab);
-  addTab(work(tid), tab, pane || openPane(work(tid))); // grid.js
+  addTab(work(tid), tab, pane || openPane(viewWork(tid))); // grid.js; tid: its owner, a task or a project's tabs
   return tab;
 }
 
@@ -102,7 +102,7 @@ function updateTools(tab) {
 
 // pane: where it opens (Cmd+N B 2); by default the pane that I used last (openPane, grid.js)
 async function openWebTab(tid, url = '', { activate = true, lazy = false, key = null, native = false, pane = null } = {}) {
-  if (!tid) { toast('Select a task first: browser tabs belong to a task.'); return null; }
+  if (!tid) { toast('Pick a project first: tabs belong to a task or to its project.'); return null; }
   if (B.unavailable) { toast(B.unavailable); return null; }
   const tab = makeWebTab(tid, url, key, pane);
   if (!native) {
@@ -112,12 +112,12 @@ async function openWebTab(tid, url = '', { activate = true, lazy = false, key = 
       if (/only in the Brain Fry window/.test(e.message)) B.unavailable = e.message;
       toast(e.message);
       dropWebTab(tab);
-      if (tid === wsId()) renderFiles();
+      if (inView(tid)) renderFiles();
       return null;
     }
   }
   if (activate) activateWebTab(tab, !url);
-  else if (tid === wsId()) renderFileTabs();
+  else if (inView(tid)) renderFileTabs();
   if (!lazy) saveWebTabs(tid);
   return tab;
 }
@@ -198,12 +198,11 @@ function saveWebTabs(tid) {
 
 // files.js, the first time the task is selected after a start: its tabs come back, each in its
 // pane (grid: the remembered grid, grid.js), and each loads its page when it is first shown
-async function restoreBrowserTabs(tid, grid) {
-  const task = S.state.tasks[tid];
-  const urls = (task && task.browserTabs) || [];
+async function restoreBrowserTabs(tid, grid) { // tid: a task, or a project's tabs
+  const urls = (ownerData(tid) || {}).browserTabs || [];
   for (const [i, url] of urls.entries()) {
     if (B.unavailable) return;
-    await openWebTab(tid, url, { activate: false, lazy: true, pane: grid.at[`web#${i}`] || 1 });
+    await openWebTab(tid, url, { activate: false, lazy: true, pane: grid.at[gridKey(tid, `web#${i}`)] || 1 });
   }
 }
 
@@ -222,9 +221,10 @@ function onBrowser(m) {
   }
   if (m.ev === 'opened') { // a page opened a window (window.open, target=_blank, Cmd+click), or uBlock a tab
     if (B.tabs.has(m.tab)) return;
-    const tid = m.task && S.state && S.state.tasks[m.task] ? m.task : S.selected;
-    if (!tid) { send('browser.close', { tab: m.tab }); return; }
     const opener = m.opener && B.tabs.get(m.opener);
+    // the opener's owner (a project tab opens project tabs), else the backend's guess, else where I would open one
+    const tid = opener && !opener.closing ? opener.tid : ownerData(m.task) ? m.task : ownerFor(wsId());
+    if (!tid) { send('browser.close', { tab: m.tab }); return; }
     const pane = opener && opener.tid === tid && !opener.closing ? opener.pane : null; // beside the page that opened it
     openWebTab(tid, m.url, { native: true, key: m.tab, activate: m.activate !== false, pane });
     return;
@@ -237,7 +237,7 @@ function onBrowser(m) {
     const titleChanged = m.title !== tab.title;
     Object.assign(tab, { url: m.url || tab.url, title: m.title, loading: m.loading, back: m.back, forward: m.forward, error: m.error || null });
     updateTools(tab);
-    if (titleChanged && tab.tid === wsId()) renderFileTabs();
+    if (titleChanged && inView(tab.tid)) renderFileTabs();
     if (urlChanged) saveWebTabs(tab.tid);
   }
 }
@@ -260,7 +260,7 @@ function overwriteCookies() {
 // that had the focus; its pane becomes the one that I use (a click in a page never reaches here).
 function forwardKey(m) {
   const t = m.tab && B.tabs.get(m.tab);
-  if (t && S.work && S.work[t.tid] && !t.closing) usePane(S.work[t.tid], t.pane);
+  if (t && S.work && S.work[t.tid] && !t.closing) usePane(viewWork(t.tid), t.pane);
   document.body.dispatchEvent(new KeyboardEvent('keydown', {
     key: m.key, metaKey: true, shiftKey: m.shift, altKey: m.alt, ctrlKey: m.ctrl, bubbles: true, cancelable: true,
   }));
@@ -285,12 +285,12 @@ function place() {
   const cover = covered();
   for (const tab of B.tabs.values()) {
     let want = { visible: false };
-    if (S.mode === 'dev' && tab.tid === wsId() && tab.el.style.display !== 'none' && tab.el.offsetParent) {
+    if (S.mode === 'dev' && inView(tab.tid) && tab.el.style.display !== 'none' && tab.el.offsetParent) {
       const r = tab.el.getBoundingClientRect();
       if (r.width > 20 && r.height > 20) {
         // alpha 0 while its task is veiled (veil.js): the page is laid out and loads, unseen
         want = { visible: true, x: Math.round(r.left), y: Math.round(r.top), w: Math.round(r.width), h: Math.round(r.height),
-          alpha: veiled(tab.tid) ? 0 : 1 };
+          alpha: veiled(wsId()) ? 0 : 1 }; // a project tab is veiled with the task that shows it
         if (cover) want.visible = shoot(tab);
         else if (tab.shot) clearShot(tab);
       }
@@ -374,7 +374,7 @@ const URL_IN_TEXT = /https?:\/\/[^\s"'<>`]*[^\s"'<>`.,;:!?)\]}]/g;
 function browserTermLinks(term) {
   const open = (e, uri) => {
     if (!e.metaKey) return;
-    if (/^https?:/i.test(uri)) openWebTab(S.selected, uri, { activate: true });
+    if (/^https?:/i.test(uri)) openWebTab(ownerFor(wsId()), uri, { activate: true }); // no task selected: a project tab
     else if (/^file:/i.test(uri) || !/^[a-z][a-z0-9+.-]*:/i.test(uri)) openLink(wsId(), uri); // also on the idle screen (showIdle)
   };
   // allowNonHttpProtocols: else xterm.js drops every OSC 8 target that is not http(s),

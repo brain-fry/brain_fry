@@ -305,5 +305,21 @@ def test_commit_info_and_its_diff(repo):
     assert {(f["st"], f["path"]) for f in info["files"]} == {("M", "a.txt"), ("R", "c.txt")}
     d = git.diff(repo, "commit", "a.txt", sha=sha)
     assert not d["hunkable"] and any(ln[0] == "+" and ln[3] == "changed" for ln in d["hunks"][0]["lines"])
+    assert {f["path"]: (f["add"], f["del"]) for f in info["files"]} == {"a.txt": (1, 30), "c.txt": (0, 0)}
     root = sh(repo, "rev-list", "--max-parents=0", "HEAD").strip()
-    assert git.commit_info(repo, root)["files"] == [{"st": "A", "path": "a.txt"}, {"st": "A", "path": "b.txt"}]
+    assert git.commit_info(repo, root)["files"] == [{"st": "A", "path": "a.txt", "add": 30, "del": 0},
+                                                    {"st": "A", "path": "b.txt", "add": 1, "del": 0}]  # fmt: skip
+
+
+def test_line_counts_of_the_files(repo):
+    three_changes(repo)  # 3 lines changed, unstaged
+    sh(repo, "mv", "b.txt", "c.txt")  # a staged rename: counted under its new path
+    (repo / "new.txt").write_text("1\n2\nno newline")
+    (repo / "img.bin").write_bytes(b"x\0y")
+    top, trees, cur = git.pick(repo)
+    st = git.state(top, trees, cur, [])
+    counts = lambda fl: {f["path"]: (f.get("add"), f.get("del")) for f in fl}  # noqa: E731
+    assert counts(st["staged"]) == {"c.txt": (0, 0)}
+    assert counts(st["unstaged"]) == {"a.txt": (3, 3), "new.txt": (3, 0), "img.bin": (None, None)}
+    (repo / "new.txt").write_text("1\n")  # the cache of untracked files sees the change
+    assert counts(git.state(top, trees, cur, [])["unstaged"])["new.txt"] == (1, 0)

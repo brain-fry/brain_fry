@@ -1,6 +1,6 @@
 """The browser of 3a, without a window: uBlock's installer, the task field, the backend's
 commands, and the helpers of app/browser.py. The native views are checked in the window
-(`bf --selftest`, see spikes/browser/)."""
+(`bf --selftest`, see tests/window/browser/)."""
 
 import json
 import stat

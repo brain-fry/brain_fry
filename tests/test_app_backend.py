@@ -138,6 +138,23 @@ def test_idle_starts_the_terminal_tabs_of_the_task_without_its_session(backend, 
         assert len(st["tasks"][t.id]["shells"]) == 2
 
 
+def test_park_moves_the_other_projects_to_planning(backend, project, home):
+    """The button of Organize mode; Undo sends `prio` for each returned id."""
+    from brain_fry import projects
+
+    core, port = backend
+    other = home / "other"
+    other.mkdir()
+    projects.init(other)
+    mine = actions.new_task(project)
+    theirs = actions._update(actions.new_task(other).id, inbox=True)
+    with connect(f"ws://127.0.0.1:{port}/ctl") as ctl:
+        ctl.recv(timeout=5)
+        assert request(ctl, 1, cmd="park", project=str(project))["data"] == {"ids": [theirs.id]}
+        st = states(ctl, lambda m: m.get("tasks", {}).get(theirs.id, {}).get("prio") == "planning")
+        assert st["tasks"][mine.id]["prio"] == "working" and theirs.id not in st["inbox"]
+
+
 def test_plan_puts_a_card_on_the_board_without_a_session(backend, project):
     """Organize mode: a new task is a card with my title, no `claude`; opening it starts one."""
     core, port = backend
@@ -232,6 +249,31 @@ def test_file_commands_for_a_project_without_a_task(backend, project, tmp_path):
     with pytest.raises(urllib.error.HTTPError) as e:
         urllib.request.urlopen(f"http://127.0.0.1:{port}/file/{urllib.parse.quote(f'project:{tmp_path}', safe='')}/a.png")
     assert e.value.code == 404
+
+
+def test_add_project_from_the_file_menu(backend, project, home, tmp_path):
+    """File > Add New Project...: project.init does bf init on the folder of the dialog."""
+    from brain_fry import projects
+
+    core, port = backend
+    new = tmp_path / "newproj"
+    new.mkdir()
+    with connect(f"ws://127.0.0.1:{port}/ctl") as ctl:
+        ctl.recv(timeout=5)
+        r = request(ctl, 1, cmd="project.init", path=str(new))["data"]
+        assert r == {"path": str(new.resolve()), "name": "newproj", "new": True}
+        assert (new / ".brain_fry").is_dir()
+        assert str(new.resolve()) in [p["path"] for p in projects.load()["projects"]]
+        st = states(ctl, lambda m: m["type"] == "state" and any(p["path"] == str(new.resolve()) for p in m["projects"]))
+        assert st
+        assert request(ctl, 2, cmd="project.init", path=str(project))["data"]["new"] is False  # already registered
+        projects.deactivate(str(new.resolve()))  # removed with the x of Cmd+P: added back
+        assert request(ctl, 3, cmd="project.init", path=str(new))["data"]["new"] is True
+        (tmp_path / "afile").write_text("x")
+        for i, bad in enumerate([tmp_path / "afile", tmp_path / "missing", home], start=4):
+            reply = request(ctl, i, cmd="project.init", path=str(bad))
+            assert not reply["ok"], bad
+        assert not (tmp_path / "missing").exists()
 
 
 def test_save_as_asks_the_save_panel_for_a_path_in_the_project(backend, project):
@@ -716,3 +758,107 @@ def test_commands_of_review_mode(backend, project, monkeypatch):
         assert [r["s"] for r in rows] == ["Uncommitted changes", "first"]
         bad = request(ctl, 7, cmd="git.diff", id=t.id, side="unstaged", path="../x")
         assert not bad["ok"] and "ValueError" in bad["error"]
+
+
+# ---------------------------------------------------------------- project tabs (DESIGN_DETAILS.md, "Project tabs")
+
+
+def test_project_tabs_are_kept_in_project_json(backend, project, home, tmp_path):
+    """The tabs of `project:<path>` go to <project>/.brain_fry/project.json, and the state lists
+    them under the project; a task's lists stay in its task file."""
+    from brain_fry import projects
+
+    core, port = backend
+    pid = f"project:{project}"
+    t = actions.new_task(project)
+    with connect(f"ws://127.0.0.1:{port}/ctl") as ctl:
+        ctl.recv(timeout=5)
+        assert request(ctl, 1, cmd="files.set", id=pid, paths=["a.md", "b.py"])["ok"]
+        assert request(ctl, 2, cmd="browser.tabs.set", id=pid, urls=["https://example.com/"])["ok"]
+        assert request(ctl, 3, cmd="finder.tabs.set", id=pid, tabs=[{"root": str(project), "path": None}])["ok"]
+        assert request(ctl, 4, cmd="files.set", id=t.id, paths=["c.md"])["ok"]
+        bad = request(ctl, 5, cmd="files.set", id=f"project:{tmp_path}", paths=["x"])  # not a registered project
+        assert not bad["ok"] and "NotFound" in bad["error"]
+        ctl.send(json.dumps({"cmd": "idle", "id": pid}))  # any command that pushes the state
+        st = states(ctl, lambda m: m["type"] == "state")
+    tabs = actions.project_tabs(str(project))
+    assert tabs["open_files"] == ["a.md", "b.py"] and tabs["browser_tabs"] == ["https://example.com/"]
+    assert tabs["finder_tabs"] == [{"root": str(project), "path": None}] and tabs["terminal_tabs"] == []
+    assert actions.load(t.id).open_files == ["c.md"]
+    p = next(p for p in st["projects"] if p["path"] == str(project))
+    assert p["tabs"]["openFiles"] == ["a.md", "b.py"] and p["tabs"]["shells"] == []
+    # a missing or broken file: no tabs
+    (project / ".brain_fry" / "project.json").write_text("{not json")
+    assert actions.project_tabs(str(project))["open_files"] == []
+    assert projects.project_paths()  # the project is still registered
+
+
+def test_project_terminals_and_moving_a_terminal(backend, project, home, tmp_path, monkeypatch):
+    """A project's terminal starts in the project folder and is listed under the project. A
+    double-click moves it to the task on screen and back (shell.move): same shell, both lists
+    saved; never to another project."""
+    from brain_fry import projects
+
+    core, port = backend
+    fake_shell = tmp_path / "fake_shell"
+    fake_shell.write_text('#!/bin/bash\necho "SHELL in $(pwd -P)"\nsleep 30\n')
+    fake_shell.chmod(0o755)
+    monkeypatch.setenv("SHELL", str(fake_shell))
+    (project / "sub").mkdir()
+    pid = f"project:{project}"
+    t = actions.new_task(project)
+    other = home / "other"
+    other.mkdir()
+    projects.init(other)
+    t2 = actions.new_task(other)
+    proj_shells = lambda m: next(p for p in m["projects"] if p["path"] == str(project))["tabs"]["shells"]  # noqa: E731
+    with connect(f"ws://127.0.0.1:{port}/ctl") as ctl:
+        ctl.recv(timeout=5)
+        key = request(ctl, 1, cmd="shell.new", id=pid, rows=10, cols=80)["data"]["key"]
+        with connect(f"ws://127.0.0.1:{port}/pty/{key}") as pty:
+            assert f"SHELL in {project.resolve()}\r".encode() in read_pty(pty, b"\r")
+        st = states(ctl, lambda m: proj_shells(m))
+        assert proj_shells(st)[0]["key"] == key and not st["tasks"][t.id]["shells"]
+        assert actions.project_tabs(str(project))["terminal_tabs"] == ["fake_shell"]
+        sub = request(ctl, 2, cmd="shell.new", id=pid, rows=10, cols=80, path="sub")["data"]["key"]  # "Open a terminal here"
+        with connect(f"ws://127.0.0.1:{port}/pty/{sub}") as pty:
+            assert f"SHELL in {(project / 'sub').resolve()}\r".encode() in read_pty(pty, b"\r")
+        # to the task, and back
+        assert request(ctl, 3, cmd="shell.move", key=key, to=t.id)["ok"]
+        st = states(ctl, lambda m: [s["key"] for s in m["tasks"][t.id]["shells"]] == [key])
+        assert [s["key"] for s in proj_shells(st)] == [sub]
+        assert actions.load(t.id).terminal_tabs == ["fake_shell"]
+        assert actions.project_tabs(str(project))["terminal_tabs"] == ["fake_shell"]
+        assert core.ptys[key].alive  # the same shell
+        assert request(ctl, 4, cmd="shell.move", key=key, to=pid)["ok"]
+        states(ctl, lambda m: len(proj_shells(m)) == 2 and not m["tasks"][t.id]["shells"])
+        assert actions.load(t.id).terminal_tabs == []
+        bad = request(ctl, 5, cmd="shell.move", key=key, to=t2.id)
+        assert not bad["ok"] and "stays in its project" in bad["error"]
+        bad = request(ctl, 6, cmd="shell.move", key="shell:nope:1", to=pid)
+        assert not bad["ok"] and "ended" in bad["error"]
+
+
+def test_select_and_idle_start_the_terminals_of_the_project_tabs(backend, project, tmp_path, monkeypatch):
+    """The project's terminal tabs come back as fresh shells, once per run: at the select or the
+    idle screen of a task of the project, or in the project view (`idle` with the project's id)."""
+    core, port = backend
+    fake_shell = tmp_path / "fake_shell"
+    fake_shell.write_text("#!/bin/bash\nsleep 30\n")
+    fake_shell.chmod(0o755)
+    monkeypatch.setenv("SHELL", str(fake_shell))
+    pid = f"project:{project}"
+    actions.set_project_tabs(str(project), "terminal_tabs", ["bash", "bash"])
+    t = actions.new_task(project)
+    actions.set_live(t.id, False)
+    actions._update(t.id, terminal_tabs=["zsh"])
+    proj_shells = lambda m: next(p for p in m["projects"] if p["path"] == str(project))["tabs"]["shells"]  # noqa: E731
+    with connect(f"ws://127.0.0.1:{port}/ctl") as ctl:
+        ctl.recv(timeout=5)
+        ctl.send(json.dumps({"cmd": "idle", "id": t.id, "shellRows": 10, "shellCols": 60}))
+        st = states(ctl, lambda m: len(proj_shells(m)) == 2 and len(m["tasks"][t.id]["shells"]) == 1)
+        assert not st["tasks"][t.id]["pty"]
+        ctl.send(json.dumps({"cmd": "idle", "id": pid}))
+        ctl.send(json.dumps({"cmd": "select", "id": t.id, "rows": 24, "cols": 80}))
+        st = states(ctl, lambda m: m["tasks"][t.id]["pty"])
+        assert len(proj_shells(st)) == 2 and len(st["tasks"][t.id]["shells"]) == 1

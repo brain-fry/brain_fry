@@ -62,22 +62,20 @@ function makeFinderTab(tid, root, chain = []) {
 function newFinder(tid, n) {
   const root = wsProject(tid);
   if (!root) { toast('No project: a Finder tab starts at the project folder.'); return; }
-  const w = work(tid);
+  const w = work(tid); // its owner: a task, or a project's tabs (ownerFor)
   const tab = makeFinderTab(tid, root);
-  if (tid === S.idle && !w.restoring) tab.idle = true; // as a file opened on the idle screen (dropIdleTabs)
   addTab(w, tab, n);
   showTab(tab, true);
   refreshFinder(tab).then(() => saveFinderTabs(tid));
 }
 
 // The tabs of the task file, each in the pane that the window remembers (restoreFiles, files.js).
-async function restoreFinderTabs(tid, grid) {
-  const task = S.state.tasks[tid];
+async function restoreFinderTabs(tid, grid) { // tid: a task, or a project's tabs
   const w = work(tid);
-  for (const [i, t] of ((task && task.finderTabs) || []).entries()) {
+  for (const [i, t] of ((ownerData(tid) || {}).finderTabs || []).entries()) {
     const chain = t.path && t.path.startsWith(`${t.root === '/' ? '' : t.root}/`) ? t.path.slice(t.root.length + (t.root === '/' ? 0 : 1)).split('/') : [];
     const tab = makeFinderTab(tid, t.root, chain);
-    addTab(w, tab, grid.at[`finder#${i}`] || 1);
+    addTab(w, tab, grid.at[gridKey(tid, `finder#${i}`)] || 1);
     await refreshFinder(tab);
   }
 }
@@ -94,11 +92,10 @@ function fdSelected(tab) { // the chain holds names from the root: the path need
   return tab.chain.reduce((p, name) => fJoin(p, name), tab.chain.length ? tab.root : null);
 }
 
-function saveFinderTabs(tid) {
-  if (tid.startsWith('project:')) return; // no task file: kept in memory, as the file tabs of a project
+function saveFinderTabs(tid) { // a project's tabs: in project.json
   clearTimeout(F.saveTimers.get(tid));
   F.saveTimers.set(tid, setTimeout(() => {
-    const tabs = work(tid).tabs.filter((t) => t.finder && !t.idle).map((t) => ({ root: t.root, path: fdSelected(t) }));
+    const tabs = work(tid).tabs.filter((t) => t.finder).map((t) => ({ root: t.root, path: fdSelected(t) }));
     send('finder.tabs.set', { id: tid, tabs });
   }, 500));
 }
@@ -189,7 +186,7 @@ function fdChanged(tab, reveal = true) {
   refreshFinder(tab).then(() => {
     if (reveal) fdReveal(tab);
     saveFinderTabs(tab.tid);
-    if (tab.tid === wsId()) renderFileTabs(); // the tab's name: the folder of the last selection
+    if (inView(tab.tid)) renderFileTabs(); // the tab's name: the folder of the last selection
   });
   renderFinder(tab);
 }
@@ -289,9 +286,9 @@ function fdOpen(tab, i) {
   if (e.dir) { tab.root = path; tab.chain = []; fdChanged(tab); return; }
   const rel = fdRel(tab.tid, path);
   if (rel === null || e.pkg) { send('finder.open', { path }); return; }
-  const w = work(tab.tid);
-  const n = openPane(w); // never over a terminal nor a Finder tab (grid.js)
-  openFile(tab.tid, rel, true, n === tab.pane ? FD_NEIGHBOUR[tab.pane] : n, true, true);
+  const view = wsId(); // the file opens in the view, as from 2a (no task selected: a project tab)
+  const n = openPane(work(view)); // never over a terminal nor a Finder tab (grid.js)
+  openFile(view, rel, true, n === tab.pane ? FD_NEIGHBOUR[tab.pane] : n, true, true);
 }
 
 // Cmd+Up: the enclosing folder becomes the first column; the selection stays.
@@ -455,9 +452,8 @@ async function copyFinderPath(tab, path, relative) {
 
 // As in 2a: a terminal in pane 3, in the folder (or the file's folder).
 function finderTerminal(tab, path) {
-  if (!S.selected) { toast('Start a task first: terminals and browser tabs belong to a task.'); return; } // as Cmd+N T
   uiLog('create: terminal in pane 3, from a Finder tab');
-  newShell(tab.tid, 3, null, path);
+  newShell(ownerFor(wsId()), 3, null, path); // as Cmd+N T
 }
 
 // ------------------------------------------------------------------ events
@@ -566,7 +562,7 @@ document.addEventListener('mouseup', () => {
 setInterval(async () => {
   const w = wsId() && S.mode === 'dev' && document.visibilityState === 'visible' && S.work && S.work[wsId()];
   if (!w || F.renaming) return;
-  const shown = w.tabs.filter((t) => t.finder && t.el.style.display !== 'none');
+  const shown = viewTabs(w).filter((t) => t.finder && t.el.style.display !== 'none');
   for (const tab of shown) {
     const folders = fdColumns(tab).map((c) => c.folder);
     const before = folders.map((f) => JSON.stringify(F.lists.get(f) || null));

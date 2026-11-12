@@ -3,14 +3,16 @@ load-modify-save under the task-file lock. No processes here: the app starts the
 
 from __future__ import annotations
 
+import json
 import logging
+import threading
 import uuid
 from pathlib import Path
 
 from . import paths, projects, taskfile, views
 from .taskfile import PRIOS, Task
 from .logs import short
-from .util import iso
+from .util import iso, write_atomic
 
 log = logging.getLogger(__name__)
 
@@ -107,6 +109,18 @@ def set_prio(task_id: str, prio: str) -> Task:
     return _update(task_id, prio=prio)
 
 
+def park_others(project: Path | str) -> list[str]:
+    """The button of Organize mode: every task of the working column that is not in `project`
+    (archived ones too) moves to planning, and so leaves the inbox. Returns their ids, for Undo."""
+    keep = str(Path(project))
+    moved = []
+    for t in all_tasks():
+        if t.prio == "working" and str(Path(t.project)) != keep:
+            set_prio(t.id, "planning")
+            moved.append(t.id)
+    return moved
+
+
 def set_open_files(task_id: str, open_files: list[str]) -> Task:
     return _update(task_id, open_files=[str(f) for f in open_files])
 
@@ -120,6 +134,10 @@ def set_browser_tabs(task_id: str, urls: list[str]) -> Task:
 
 
 def set_finder_tabs(task_id: str, tabs: list[dict]) -> Task:
+    return _update(task_id, finder_tabs=_finder_tabs(tabs))
+
+
+def _finder_tabs(tabs: list[dict]) -> list[dict]:
     """The Finder tabs of column 3: for each, the folder of its first column (`root`) and the
     selected entry (`path`, or None), both absolute."""
     clean = []
@@ -128,7 +146,45 @@ def set_finder_tabs(task_id: str, tabs: list[dict]) -> Task:
         if not isinstance(root, str) or not root.startswith("/"):
             raise ValueError(f"not a Finder tab: {t!r}")
         clean.append({"root": root, "path": path if isinstance(path, str) and path.startswith("/") else None})
-    return _update(task_id, finder_tabs=clean)
+    return clean
+
+
+# ---------------------------------------------------------------- project tabs
+# The tabs that belong to a project rather than to one task (DESIGN_DETAILS.md, "Project tabs"):
+# they show in every task of the project, on the idle screen and in the project view. Kept in
+# <project>/.brain_fry/project.json, with the same lists as a task file.
+
+PROJECT_TAB_LISTS = ("open_files", "terminal_tabs", "browser_tabs", "finder_tabs")
+_PROJECT_LOCK = threading.Lock()
+
+
+def project_tabs(project: str) -> dict:
+    """The project's tabs: each list of PROJECT_TAB_LISTS, empty when the file is missing or broken."""
+    try:
+        data = json.loads(paths.project_tabs_file(project).read_text())
+    except (OSError, ValueError):
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+    return {k: data[k] if isinstance(data.get(k), list) else [] for k in PROJECT_TAB_LISTS}
+
+
+def set_project_tabs(project: str, key: str, values: list) -> dict:
+    """One list of the project's tabs (`key`: one of PROJECT_TAB_LISTS)."""
+    if key not in PROJECT_TAB_LISTS:
+        raise ValueError(f"not a list of project tabs: {key}")
+    clean = _finder_tabs(values) if key == "finder_tabs" else [str(v) for v in values]
+    with _PROJECT_LOCK:
+        data = project_tabs(project)
+        old, data[key] = data[key], clean
+        if old != clean:
+            file = paths.project_tabs_file(project)
+            file.parent.mkdir(exist_ok=True)
+            write_atomic(file, json.dumps(data, indent=2) + "\n")
+    if old != clean:
+        text = f"{len(old)} -> {len(clean)}" if key in PRIVATE_LISTS else f"{_brief(old)} -> {_brief(clean)}"
+        log.info("project %s: %s %s", Path(project).name, key, text)
+    return data
 
 
 def set_live(task_id: str, live: bool) -> Task:

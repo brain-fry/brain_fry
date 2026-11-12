@@ -24,6 +24,11 @@ def project_dir(project: Path) -> Path:
     return Path(project) / ".brain_fry"
 
 
+def project_tabs_file(project: Path) -> Path:
+    """The tabs that belong to the project, not to one task (actions.project_tabs)."""
+    return project_dir(project) / "project.json"
+
+
 def spool_dir(project: Path) -> Path:
     """One file per hook event, written by hook.sh, deleted by the reader once applied."""
     return project_dir(project) / "events"

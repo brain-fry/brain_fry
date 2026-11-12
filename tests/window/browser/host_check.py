@@ -2,9 +2,9 @@
 keys (the monitor), popups and window.close(), a download, uBlock's popup, session cookies,
 the sound of a closed tab, and the copy of my Firefox cookies (from a fake profile in WORKDIR).
 
-    uv run python spikes/browser/host_check.py PORT WORKDIR
+    uv run python tests/window/browser/host_check.py PORT WORKDIR
 
-PORT: spikes/browser/site.py runs there. WORKDIR: a scratch folder; it becomes $HOME (for
+PORT: tests/window/browser/site.py runs there. WORKDIR: a scratch folder; it becomes $HOME (for
 ~/Downloads) and the Brain Fry home (BRAIN_FRY_HOME: its own browser profile), so nothing
 of mine is touched. uBlock is loaded if WORKDIR/.brain_fry/extensions/ublock-lite exists.
 The window is ordered in off screen: key events need a real window.

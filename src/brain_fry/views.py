@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from pathlib import Path
 
@@ -18,15 +19,16 @@ def epoch(ts: str) -> float:
 
 
 def in_inbox(t: Task) -> bool:
-    """The `inbox` flag (a reply or a block waits for me), or pinned. Never an archived task."""
-    return (t.inbox or t.pinned) and t.status != "done"
+    """The `inbox` flag (a reply or a block waits for me), or pinned. Only a task of the working
+    column (Renaud, 2026-11-11: planning and the hidden columns wait), never an archived one."""
+    return (t.inbox or t.pinned) and t.status != "done" and t.prio == "working"
 
 
 def inbox_order(t: Task):
-    """What needs me first (the `inbox` flag): red first, then prio column, then most recent
-    first. DESIGN_DETAILS.md "Status, inbox, board". Then the pinned tasks that need nothing now,
+    """What needs me first (the `inbox` flag): red first, then most recent first.
+    DESIGN_DETAILS.md "Status, inbox, board". Then the pinned tasks that need nothing now,
     in the same order."""
-    return (not t.inbox, t.status != "blocked", PRIO_ORDER.get(t.prio, 99), -epoch(t.updated))
+    return (not t.inbox, t.status != "blocked", -epoch(t.updated))
 
 
 def board_order(t: Task):
@@ -68,11 +70,47 @@ def inbox_line(t: Task, width: int = 160) -> str:
     return line if len(line) <= width else line[: width - 3] + "..."
 
 
+def goal_line(digest: str) -> str:
+    """What the task is about, for the card of 4a at a switch: the "Goal:" line of the task's
+    digest (its prompt asks for the goal first), without the label; else the digest's first line."""
+    lines = [line.strip() for line in digest.splitlines() if line.strip()]
+    for line in lines:
+        if line.lower().startswith("goal:"):
+            return line[5:].strip()
+    return lines[0] if lines else ""
+
+
+PASTE_TAG = re.compile(r"</?pasted_content\b[^>]*>")  # a pasted text arrives inside it (seen in the task files)
+IMAGE_REF = re.compile(r"\[Image #\d+\]")
+
+
+def first_prompt(t: Task, width: int = 300) -> str:
+    """The start of the first prompt that I typed, on one line, for the card of 4a at a switch (the
+    card shows two lines of it). A planned task that never started: its notes. Empty until the
+    first digest, since the title shown then is already that prompt's first line (display_title)."""
+    if not t.title:
+        return ""
+    text = next((th.prompt for th in t.threads if th.prompt.strip()), "") or t.notes
+    text = " ".join(IMAGE_REF.sub(" ", PASTE_TAG.sub(" ", text)).split())
+    return text if len(text) <= width else text[: width - 3] + "..."
+
+
 def first_line(text: str, width: int = 100) -> str:
     for line in text.strip().splitlines():
         line = line.strip()
         return line if len(line) <= width else line[: width - 3] + "..."
     return ""
+
+
+def project_tabs_json(tabs: dict, shells: list[dict] | None = None) -> dict:
+    """The tabs of a project (actions.project_tabs), with the names of a task's (task_json)."""
+    return {
+        "openFiles": tabs["open_files"],
+        "browserTabs": tabs["browser_tabs"],
+        "finderTabs": tabs["finder_tabs"],
+        "shells": shells or [],
+        "terminalTabs": len(tabs["terminal_tabs"]),
+    }
 
 
 def task_json(t: Task, pty_gen: int | None, shells: list[dict] | None = None, elsewhere: dict | None = None) -> dict:
@@ -94,6 +132,8 @@ def task_json(t: Task, pty_gen: int | None, shells: list[dict] | None = None, el
         "parent": t.parent,
         "digest": t.digest,
         "notes": t.notes,  # a planned task: the card's text until the first digest
+        "goal": goal_line(t.digest),  # the card of 4a at a switch
+        "firstPrompt": first_prompt(t),  # ditto
         "line": inbox_line(t),
         "kind": last.kind if last else None,
         "question": last.question if last else None,
