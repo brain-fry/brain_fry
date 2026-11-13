@@ -214,6 +214,8 @@ def make_handlers(core: Core):
                     s.write(m["d"].encode("latin-1"))
                 elif m["t"] == "resize":
                     s.resize(int(m["rows"]), int(m["cols"]))
+                elif m["t"] == "clear":
+                    s.clear_replay()
         finally:
             s.queues.discard(q)
             sender.cancel()

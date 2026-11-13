@@ -9,11 +9,12 @@
 //   pane. No digit within 1 s: pane 1. Nothing is created and then moved. Cmd+N O: the list
 //   that copies a tab of another task into the pane that I use (copytab.js).
 // - Cmd+J (jump), then a digit 1-4: the keyboard goes to that pane; C: to Claude Code (4a); E: to
-//   the explorer, whose rows on screen show a key each, 1-9 then a-z (explorer.js). No key within 2 s, or
-//   another key: nothing.
+//   the explorer, whose rows on screen show a key each, 1-9 then a-z (explorer.js); I: the same on
+//   the rows of the inbox, a key selects that task (app.js). No key within 2 s, or another key: nothing.
 // - Cmd+1 to Cmd+9: the n-th tab of the pane that I use (showTabAt).
 // - Drag a tab onto another pane: it moves there. Onto the edge of a pane whose neighbour is
-//   empty: the neighbour opens with it (to the right of a single column: two columns).
+//   empty: the neighbour opens with it, and only that pane splits (to the right of a single
+//   column: two columns; at the bottom of the left one of two columns: the right one keeps its height).
 // - The × at the right end of a pane's tab bar: all its tabs close, after one question.
 // Uses S, $, store, stored, toast (app.js) and work,
 // renderFiles, renderExplorer, focusTab, saveOpenFiles, newUntitled, closeFile, tabName (files.js), openWebTab,
@@ -30,17 +31,15 @@ function buildGrid() {
   const pane = (n) => `<div class="pane" data-pane="${n}"><div class="tabs pane-tabs"></div><div class="pane-bar"></div>`
     + '<div class="pane-body"></div></div>'; // an empty pane 1 shows nothing: no hint (Renaud, 2026-11-11: "disturbing")
   const mid = $('#middle');
-  mid.innerHTML = `<div class="grid-row" data-row="0">${pane(1)}<div class="split v" data-split="gridTop"></div>${pane(2)}</div>`
-    + '<div class="split h" data-split="gridRows"></div>'
-    + `<div class="grid-row" data-row="1">${pane(3)}<div class="split v" data-split="gridBottom"></div>${pane(4)}</div>`;
+  // all positioned by layoutPanes: a change of shape moves no element (terminals, editors, pages stay put)
+  mid.innerHTML = PANES.map(pane).join('') + '<div class="split grid" hidden></div>'.repeat(3);
   for (const n of PANES) {
     const el = mid.querySelector(`.pane[data-pane="${n}"]`);
     G.els[n] = { pane: el, tabs: el.querySelector('.pane-tabs'), bar: el.querySelector('.pane-bar'), body: el.querySelector('.pane-body') };
     new ResizeObserver(() => fitPaneShell(n)).observe(G.els[n].body);
   }
-  G.els.rows = [...mid.querySelectorAll('.grid-row')];
-  G.els.splits = { gridTop: mid.querySelector('[data-split="gridTop"]'), gridBottom: mid.querySelector('[data-split="gridBottom"]'),
-    gridRows: mid.querySelector('[data-split="gridRows"]') };
+  const [outer, ...inner] = mid.querySelectorAll('.split.grid');
+  G.els.splits = { outer, inner };
 }
 
 // ------------------------------------------------------------------ panes of a task
@@ -86,6 +85,7 @@ function showTab(tab, focus = false) {
   usePane(w, tab.pane);
   saveGrid(w.id);
   if (!inView(tab.tid)) return;
+  if (focus) revealColumn('middle'); // hidden by Cmd+Option+3 (layout.js)
   renderFiles();
   renderExplorer();
   if (focus) focusTab(tab);
@@ -150,28 +150,64 @@ function closePane(n) {
   for (const t of tabs) closeFile(tid, t.path, false);
 }
 
-// Which panes and rows show, and their sizes (fractions of column 3, remembered by the window).
+// The shape of the grid (a view's `cols`, remembered with its grid): two lines of two panes,
+// rows first (1|2 over 3|4) or columns first (1 over 3, beside 2 over 4). A pane alone in its
+// line takes the whole line, so 3 panes make an L: rows first, 3 alone takes the bottom; columns
+// first, 2 alone takes the right side. An edge drop sets the shape (dropTarget). Each split keeps
+// its fraction of column 3 (layout.js), the outer one across, the inner ones along each line.
+const SHAPES = {
+  rows: { lines: [[1, 2], [3, 4]], outer: 'gridRows', inner: ['gridTop', 'gridBottom'] },
+  cols: { lines: [[1, 3], [2, 4]], outer: 'gridCols', inner: ['gridLeft', 'gridRight'] },
+};
+const SPLIT_PX = 4; // the thickness of a splitter
+const AXIS = { x: ['left', 'width'], y: ['top', 'height'] };
+
+// A stretch of column 3 along one axis, as CSS [start, size]: part 0 the share f before the
+// splitter, part 1 the rest after it, null all of it.
+function stretch(part, f) {
+  if (part === null) return ['0px', '100%'];
+  const room = `(100% - ${SPLIT_PX}px)`;
+  return part === 0 ? ['0px', `calc(${room} * ${f})`] : [`calc(${room} * ${f} + ${SPLIT_PX}px)`, `calc(${room} * ${1 - f})`];
+}
+const splitAt = (f) => [`calc((100% - ${SPLIT_PX}px) * ${f})`, `${SPLIT_PX}px`];
+
+function setStretch(el, axis, [start, size]) {
+  el.style[AXIS[axis][0]] = start;
+  el.style[AXIS[axis][1]] = size;
+}
+
+// Which panes and splitters show, and where (fractions of column 3, remembered by the window).
 function layoutPanes(w) {
   const shown = shownPanes(w);
   const on = (n) => shown.includes(n);
   const L = S.layout;
-  const rows = [on(1) || on(2), on(3) || on(4)];
-  G.els.rows[0].hidden = !rows[0];
-  G.els.rows[1].hidden = !rows[1];
-  const both = rows[0] && rows[1];
-  G.els.splits.gridRows.hidden = !both;
-  // alone, a pane or a row takes all: a flex-grow below 1 would leave the rest of the space empty
-  G.els.rows[0].style.flexGrow = both ? L.gridRows : 1;
-  G.els.rows[1].style.flexGrow = both ? 1 - L.gridRows : 1;
-  const sides = [[1, 2, 'gridTop'], [3, 4, 'gridBottom']];
-  for (const [a, b, key] of sides) {
+  const cols = Boolean(w && w.cols);
+  const { lines, outer, inner } = cols ? SHAPES.cols : SHAPES.rows;
+  const across = cols ? 'x' : 'y', along = cols ? 'y' : 'x'; // the axis of the outer split, of the inner ones
+  const lineOn = lines.map((l) => l.some(on));
+  const both = lineOn[0] && lineOn[1];
+  const s = G.els.splits;
+  s.outer.hidden = !both;
+  s.outer.className = `split grid ${cols ? 'v' : 'h'}`;
+  s.outer.dataset.split = outer;
+  setStretch(s.outer, across, splitAt(L[outer]));
+  setStretch(s.outer, along, stretch(null));
+  lines.forEach(([a, b], i) => {
+    const line = stretch(both ? i : null, L[outer]); // a line alone takes all
     const pair = on(a) && on(b);
-    G.els[a].pane.hidden = !on(a);
-    G.els[b].pane.hidden = !on(b);
-    G.els.splits[key].hidden = !pair;
-    G.els[a].pane.style.flexGrow = pair ? L[key] : 1;
-    G.els[b].pane.style.flexGrow = pair ? 1 - L[key] : 1;
-  }
+    const sp = s.inner[i];
+    sp.hidden = !pair;
+    sp.className = `split grid ${cols ? 'h' : 'v'}`;
+    sp.dataset.split = inner[i];
+    setStretch(sp, across, line);
+    setStretch(sp, along, splitAt(L[inner[i]]));
+    [a, b].forEach((n, j) => {
+      const el = G.els[n].pane;
+      el.hidden = !on(n);
+      setStretch(el, across, line);
+      setStretch(el, along, stretch(pair ? j : null, L[inner[i]])); // a pane alone takes its line
+    });
+  });
   $('#middle').classList.toggle('multi', shown.length > 1);
   for (const n of PANES) G.els[n].pane.classList.toggle('used', Boolean(w) && w.pane === n);
 }
@@ -214,7 +250,7 @@ function gridRecord(w) {
     const id = (t && tabId(t)) || w.want[n];
     if (id) act[n] = id;
   }
-  return { pane: w.pane, act, at };
+  return { pane: w.pane, act, at, cols: Boolean(w.cols) };
 }
 
 function saveGrid(tid) {
@@ -255,16 +291,18 @@ function chordKey(e) {
   }
   if (['meta', 'shift', 'alt', 'control', 'capslock'].includes(k)) return false; // a modifier alone: still waiting
   const c = G.chord;
-  if (k === 'escape') { endChord(c.kind === 'jump' || c.kind === 'tree' ? 'jump: Esc' : ''); return true; }
+  if (k === 'escape') { endChord(c.kind === 'jump' || LABELS[c.kind] ? 'jump: Esc' : ''); return true; }
   if (c.kind === 'jump') { // no default, unlike Cmd+N (Renaud)
     if (k === 'j' && e.metaKey) { clearTimeout(c.timer); c.timer = jumpTimer(); } // pressed again: wait again
     else if (/^[1-4]$/.test(k)) jumpTo(Number(k));
     else if (k === 'c') jumpToClaude();
     else if (k === 'e') startTreeHints(); // explorer.js
+    else if (k === 'i') startInboxHints(); // app.js
     else endChord(`jump: cancelled by the key ${k}`);
     return true;
   }
   if (c.kind === 'tree') { treeHintKey(k); return true; } // explorer.js
+  if (c.kind === 'inbox') { inboxHintKey(k); return true; } // app.js
   if (!c.kind) {
     if (k === 't' || k === 'b' || k === 'f' || k === 'e') {
       clearTimeout(c.timer);
@@ -286,8 +324,21 @@ function endChord(why = '') {
   G.chord = null;
   if (c) clearTimeout(c.timer);
   if (c && c.kind === 'tree') clearTreeHints(); // explorer.js
+  if (c && c.kind === 'inbox') clearInboxHints(); // app.js
   if (why) uiLog(why);
 }
+
+// The labels of Cmd+J E (explorer.js) and Cmd+J I (app.js) stay until a key (chordKey), a click,
+// or the window loses the keyboard. They have no time limit: they show that the chord waits.
+const LABELS = { tree: 'explorer', inbox: 'inbox' };
+document.addEventListener('mousedown', () => {
+  const c = G.chord;
+  if (c && LABELS[c.kind]) endChord(`jump: ${LABELS[c.kind]}, cancelled by a click`);
+}, true);
+window.addEventListener('blur', () => {
+  const c = G.chord;
+  if (c && LABELS[c.kind]) endChord(`jump: ${LABELS[c.kind]}, the window lost the keyboard`);
+});
 
 function jumpTimer() { return setTimeout(() => endChord(`jump: no key within ${CHORD_KIND_MS / 1000} s`), CHORD_KIND_MS); }
 
@@ -311,14 +362,15 @@ function showTabAt(n) {
 function jumpToClaude() {
   const t = S.mode === 'dev' && S.selected && S.terms.get(S.selected);
   endChord(`jump: Claude Code${t ? '' : ' (no task)'}`);
-  if (t) t.term.focus();
+  if (t) { revealColumn('agent'); t.term.focus(); } // hidden by Cmd+Option+4: the ResizeObserver of 4a fits it
 }
 
 function create(kind, n) {
   endChord();
   if (!wsId() || S.mode !== 'dev') { toast('Pick a project first: tabs belong to a task or to its project.'); return; }
   const tid = ownerFor(wsId()); // with no task selected (idle screen, project view): a project tab
-  uiLog(`create: ${{ t: 'terminal', b: 'browser', f: 'new file', e: 'Finder' }[kind]} in pane ${n}${isProjectWs(tid) ? ', project tab' : ''}`);
+  revealColumn('middle'); // hidden by Cmd+Option+3 (layout.js): the new tab must show
+  uiLog(`create:${{ t: 'terminal', b: 'browser', f: 'new file', e: 'Finder' }[kind]} in pane ${n}${isProjectWs(tid) ? ', project tab' : ''}`);
   if (kind === 't') newShell(tid, n);
   else if (kind === 'b') openWebTab(tid, '', { pane: n });
   else if (kind === 'e') newFinder(tid, n); // finder.js
@@ -381,6 +433,7 @@ document.addEventListener('mouseup', () => {
   const t = d.target;
   if (!t || (t.pane === d.tab.pane && !t.before)) return;
   if (t.before === d.tab) return;
+  if (t.cols !== undefined) work(wsId()).cols = t.cols; // an edge drop: the shape that splits only that pane (layoutPanes)
   moveTab(d.tab, t.pane, t.before);
 });
 
@@ -409,9 +462,12 @@ function endDrag() {
   document.body.classList.remove('tab-dragging');
 }
 
-// {pane, before, rect}: where the tab goes, and the rectangle to mark. Over a tab bar: into that
-// pane, before the tab under the mouse. Over a pane, near an edge whose neighbour is empty: into
-// the neighbour (it opens). Elsewhere in a pane: into that pane.
+// {pane, before, rect, cols}: where the tab goes, the rectangle to mark, and for an edge drop the
+// shape of the grid. Over a tab bar: into that pane, before the tab under the mouse. Over a pane,
+// near an edge whose neighbour is empty: into the neighbour (it opens), and only that pane splits
+// (Renaud, 2026-11-13: two columns, a tab dropped at the bottom of the left one must not make a
+// row across): a left or right edge makes the shape rows first, a top or bottom edge columns
+// first. Elsewhere in a pane: into that pane.
 function dropTarget(x, y) {
   const w = work(wsId());
   for (const n of shownPanes(w)) {
@@ -429,14 +485,14 @@ function dropTarget(x, y) {
     const fx = (x - r.left) / r.width, fy = (y - r.top) / r.height;
     const [row, col] = CELL[n];
     const at = (rr, cc) => rr * 2 + cc + 1;
-    const edges = [ // [distance to the edge, neighbour, the half of the pane to mark]
-      [1 - fx, at(row, 1), { left: r.left + r.width / 2, top: r.top, width: r.width / 2, height: r.height }],
-      [fx, at(row, 0), { left: r.left, top: r.top, width: r.width / 2, height: r.height }],
-      [1 - fy, at(1, col), { left: r.left, top: r.top + r.height / 2, width: r.width, height: r.height / 2 }],
-      [fy, at(0, col), { left: r.left, top: r.top, width: r.width, height: r.height / 2 }],
+    const edges = [ // [distance to the edge, neighbour, the half of the pane to mark, columns first]
+      [1 - fx, at(row, 1), { left: r.left + r.width / 2, top: r.top, width: r.width / 2, height: r.height }, false],
+      [fx, at(row, 0), { left: r.left, top: r.top, width: r.width / 2, height: r.height }, false],
+      [1 - fy, at(1, col), { left: r.left, top: r.top + r.height / 2, width: r.width, height: r.height / 2 }, true],
+      [fy, at(0, col), { left: r.left, top: r.top, width: r.width, height: r.height / 2 }, true],
     ].filter(([d, m]) => d < EDGE && m !== n && !paneTabs(w, m).filter((t) => t !== G.drag.tab).length);
     edges.sort((a, b) => a[0] - b[0]);
-    if (edges.length) return { pane: edges[0][1], before: null, rect: edges[0][2] };
+    if (edges.length) return { pane: edges[0][1], before: null, rect: edges[0][2], cols: edges[0][3] };
     return { pane: n, before: null, rect: r };
   }
   return null;

@@ -160,7 +160,13 @@ function docChanged(tab, changes) {
   } finally {
     syncing = false;
   }
-  if (!tab.dirty) { tab.dirty = true; renderFileTabs(); }
+  if (!tab.dirty) { tab.dirty = true; renderFileTabs(); renderBars(); } // the bars: Save follows `dirty`
+}
+
+// the bars of the panes on screen (setBar skips those that did not change)
+function renderBars() {
+  const w = wsId() && work(wsId());
+  for (const n of PANES) renderBar(n, w && paneActive(w, n));
 }
 
 function tabName(t) {
@@ -182,15 +188,17 @@ function fileOnScreen(w) {
 
 // ------------------------------------------------------------------ explorer (2a)
 
-async function loadDir(tid, path) {
+// quiet: a refresh, where a folder that fails to load was deleted (its parent's new list drops
+// it), so it is forgotten without a toast
+async function loadDir(tid, path, quiet = false) {
   const w = work(tid);
   if (w.loading.has(path)) return;
   w.loading.add(path);
   try {
     w.kids.set(path, await request('fs.list', { id: tid, path }));
   } catch (e) {
-    w.kids.set(path, []);
-    toast(e.message);
+    if (quiet) w.kids.delete(path);
+    else { w.kids.set(path, []); toast(e.message); }
   } finally {
     w.loading.delete(path);
   }
@@ -199,7 +207,7 @@ async function loadDir(tid, path) {
 
 function refreshTree(tid) {
   const w = work(tid);
-  for (const path of ['', ...w.open]) if (w.kids.has(path)) loadDir(tid, path);
+  for (const path of ['', ...w.open]) if (w.kids.has(path)) loadDir(tid, path, true);
 }
 
 function renderExplorer() {
@@ -208,8 +216,11 @@ function renderExplorer() {
   const task = tid && S.state.tasks[tid];
   const project = tid && wsProject(tid);
   const el = $('#tree');
+  const landed = S.mode === 'dev' && tid !== S.treeWs; // another layout on screen (S.idle keeps the one that I left)
+  if (S.mode === 'dev') S.treeWs = tid;
   if (!project) { el.innerHTML = ''; return; }
   const w = work(tid);
+  if (landed && w.kids.has('')) refreshTree(tid); // its tree is as it was when last on screen: files changed since
   if (task && task.updated !== w.lastUpdated) { // an event arrived: the agent may have added files
     const first = w.lastUpdated === null;
     w.lastUpdated = task.updated;
@@ -663,6 +674,7 @@ function restoreFiles(tid) {
   w.restoreDone = (async () => {
     const g = w.grid = w.grid || loadGrid(tid);
     w.want = { ...g.act };
+    w.cols = Boolean(g.cols); // the shape of its grid (layoutPanes, grid.js)
     try {
       if (!isProjectWs(tid) && wsProject(tid)) await restoreFiles(projectWs(wsProject(tid)));
       for (const path of data.openFiles || []) await openFile(tid, path, false, g.at[gridKey(tid, path)] || 1, false);
@@ -822,8 +834,8 @@ function renderFileTabs() {
       const shell = t.shell && shellsOf(t.tid).find((s) => s.key === t.key);
       const title = t.web ? t.url : t.shell ? `Terminal in ${shell && shell.cwd ? shell.cwd : 'the task folder'}` : t.untitled ? 'Not saved yet' : t.finder ? finderTitle(t) : t.path;
       const proj = isProjectWs(t.tid); // a project tab: a small grey star (Renaud picked it from a mockup, 2026-11-11)
-      return `<div class="tab ${t.path === w.act[n] ? 'on' : ''} ${t.gone ? 'gone' : ''}" data-file="${esc(t.path)}" title="${esc(title)}${proj ? ' (project tab: in every task of the project)' : ''}">`
-        + `${proj ? '<span class="star">★</span>' : ''}${t.finder ? `<img class="tab-icon" src="${fdIcon('folder')}" alt="" draggable="false">` : ''}${esc(tabName(t))}${t.dirty ? '<span class="dirty">●</span>' : ''}<span class="x" data-close-file="${esc(t.path)}">×</span></div>`;
+      return `<div class="tab ${t.path === w.act[n] ? 'on' : ''} ${t.gone ? 'gone' : ''} ${t.dirty ? 'dirty' : ''}" data-file="${esc(t.path)}" title="${esc(title)}${proj ? ' (project tab: in every task of the project)' : ''}">`
+        + `${proj ? '<span class="star">★</span>' : ''}${t.finder ? `<img class="tab-icon" src="${fdIcon('folder')}" alt="" draggable="false">` : ''}${esc(tabName(t))}<span class="x" data-close-file="${esc(t.path)}">×</span></div>`;
     }).join('') + (tabs.length ? PANE_X : '');
   }
 }

@@ -5,7 +5,7 @@
 const $ = (sel) => document.querySelector(sel);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const KINDS = new Set(['review', 'answer', 'rule', 'FYI', 'wait', 'blocked']);
-const PRIOS = ['working', 'planning', 'later', 'more_later', 'never'];
+const PRIOS = ['working', 'next', 'planning', 'later', 'more_later', 'never'];
 const HIDDEN_PRIOS = new Set(['later', 'more_later', 'never']);
 const OUR_KEYS = new Set(['arrowdown', 'arrowup', 'n', 't', 'j', 'p', 'd', 'e', 'b', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'g']);
 
@@ -114,6 +114,7 @@ function onState(st) {
     S.newFrom = null;
     if (from && st.tasks[from] && st.tasks[from].projectPath === task.projectPath) copyView(from, task.id); // files.js
     setMode('dev', false);
+    revealColumn('agent'); // hidden by Cmd+Option+4 (layout.js): showTerm then gives it the keyboard
     swapAtOnce(); // no fade in 4a: neither the old task (or the photo) nor the new one
     return select(st.selected, false);
   }
@@ -169,7 +170,13 @@ function ensureTerm(id, container = $('#terms'), shell = false) {
   term.onResize(({ cols, rows }) => wsSend(t, { t: 'resize', cols, rows }));
   term.attachCustomKeyEventHandler((e) => {
     if (!live()) return false;
-    if (e.metaKey && OUR_KEYS.has(e.key.toLowerCase())) return false;
+    if (e.metaKey && (OUR_KEYS.has(e.key.toLowerCase()) || columnKey(e))) return false;
+    // Cmd+K in a terminal tab: clear it, scrollback too, as VS Code and Terminal.app. The
+    // backend forgets it as well, so a reloaded page does not replay it
+    if (shell && e.metaKey && !e.shiftKey && !e.altKey && !e.ctrlKey && e.key.toLowerCase() === 'k') {
+      if (e.type === 'keydown') { term.clear(); wsSend(t, { t: 'clear' }); }
+      return false;
+    }
     if (!shell && e.key === 'Enter' && e.shiftKey && !e.metaKey) { // new line in Claude Code: ESC CR
       if (e.type === 'keydown') wsSend(t, { t: 'in', d: '\x1b\r' });
       return false;
@@ -702,7 +709,7 @@ function renderBoard(st) {
   const cur = currentProject(), name = cur && cur.split('/').pop();
   const park = $('#park-btn');
   park.disabled = !parkable(st, cur).length;
-  park.title = cur ? `Moves every task of the working column that is not in ${name} to planning: they leave the inbox` : '';
+  park.title = cur ? `Moves every task of the working column that is not in ${name} to Next: they leave the inbox` : '';
   const cols = boardColumns(st);
   ensureBoardSel(cols);
   $('#columns').innerHTML = cols.map((c) => `
@@ -724,7 +731,7 @@ function openWorking(n) {
 }
 
 // The button of the board bar: the working tasks of the other projects (archived ones too) go to
-// planning, so that only the current project's tasks are in the inbox. The backend chooses
+// next, so that only the current project's tasks are in the inbox. The backend chooses
 // them again (actions.park_others); this list only enables the button.
 function parkable(st, cur) {
   return cur ? Object.values(st.tasks).filter((t) => t.prio === 'working' && t.projectPath !== cur) : [];
@@ -736,7 +743,7 @@ async function parkOthers() {
   try {
     const { ids } = await request('park', { project: cur });
     if (!ids.length) return;
-    toast(`Moved ${ids.length} task${ids.length > 1 ? 's' : ''} to planning`, {
+    toast(`Moved ${ids.length} task${ids.length > 1 ? 's' : ''} to Next`, {
       label: 'Undo', run: () => ids.forEach((id) => send('prio', { id, prio: 'working' })),
     });
   } catch (e) {
@@ -880,6 +887,66 @@ function renderInbox(st) {
   $('#inbox-count').textContent = waiting ? `(${waiting})` : '';
   // An empty inbox: only its heading, no text, and no Threads section (Renaud, 2026-11-10)
   $('#inbox').innerHTML = ids.map((id) => row(st.tasks[id], st.inbox.includes(id) ? '' : 'current')).join('');
+  drawInboxHints(); // the rows are new: their labels again
+}
+
+// ------------------------------------------------------------------ Cmd+J I: a key on each inbox row
+// Cmd+J, then I (grid.js, asked by Renaud on 2026-11-13): each row of 1a on screen shows a label,
+// 1 to 9 then a to z from the top, as Cmd+J E in the explorer (HINT_KEYS, explorer.js). Pinned
+// rows and the selected task kept at the top have one too. Typing a label selects that task, and
+// the keyboard goes to its Claude Code (4a). A label stays on its task while the rows move (a new
+// reply, a block); a task that comes in meanwhile has none. The labels stay until a key, a click,
+// or the window loses the keyboard (grid.js); Esc, another key or a key with no row: nothing.
+
+let inboxHints = []; // the labelled task ids, in their order on screen when the labels came
+
+function startInboxHints() {
+  const c = G.chord;
+  clearTimeout(c.timer);
+  c.timer = null;
+  revealColumn('side'); // hidden by Cmd+Option+1 (layout.js): the labels need its rows on screen
+  const box = $('#side').getBoundingClientRect();
+  inboxHints = [...$('#inbox').querySelectorAll('.row[data-id]')].filter((r) => {
+    const b = r.getBoundingClientRect();
+    const mid = (b.top + b.bottom) / 2;
+    return mid > box.top && mid < box.bottom;
+  }).slice(0, HINT_KEYS.length).map((r) => r.dataset.id);
+  if (!inboxHints.length) { endChord('jump: inbox (no row on screen)'); return; }
+  c.kind = 'inbox';
+  drawInboxHints();
+}
+
+function drawInboxHints() {
+  if (!G.chord || G.chord.kind !== 'inbox') return;
+  for (const h of $('#inbox').querySelectorAll('.inbox-hint')) h.remove();
+  inboxHints.forEach((id, i) => {
+    const title = $('#inbox').querySelector(`.row[data-id="${id}"] .title`);
+    if (!title) return; // it left the inbox
+    const s = document.createElement('span');
+    s.className = 'inbox-hint';
+    s.textContent = HINT_KEYS[i];
+    title.prepend(s); // before the title (Renaud chose it from a mockup, 2026-11-13)
+  });
+}
+
+function clearInboxHints() {
+  for (const h of $('#inbox').querySelectorAll('.inbox-hint')) h.remove();
+  inboxHints = [];
+}
+
+function inboxHintKey(k) {
+  const i = k.length === 1 ? HINT_KEYS.indexOf(k) : -1;
+  const id = i >= 0 ? inboxHints[i] : null;
+  const n = inboxHints.length;
+  if (!id || !$('#inbox').querySelector(`.row[data-id="${id}"]`)) {
+    endChord(i < 0 ? `jump: inbox, cancelled by the key ${k}` : `jump: inbox, no row ${k}`);
+    return;
+  }
+  endChord(`jump: inbox, row ${k} of ${n}`);
+  revealColumn('agent'); // hidden by Cmd+Option+4: the keyboard must not go to a hidden terminal
+  select(id);
+  const t = S.terms.get(id);
+  if (t) t.term.focus(); // at once, as Cmd+J C: showTerm's own focus waits for a frame
 }
 
 function renderThreads(st) {
@@ -1118,6 +1185,15 @@ document.addEventListener('keydown', (e) => {
   // it has the focus whenever a terminal (4a, 3b) has it, and the terminal's Cmd keys are ours
   const field = e.target.matches && e.target.matches('input, select, textarea');
   if (field && !e.target.classList.contains('xterm-helper-textarea')) return;
+  // Cmd+Option+1 to 4: show or hide a column (layout.js). Review mode: its side panel and 4a, as Cmd+1 and Cmd+4
+  const col = columnKey(e);
+  if (col) {
+    if (S.mode === 'dev') toggleColumn(col);
+    else if (S.mode === 'review' && col === 1) toggleLayout('rvSide');
+    else if (S.mode === 'review' && col === 4) toggleReviewAgent();
+    e.preventDefault(); e.stopPropagation();
+    return;
+  }
   if (S.mode === 'organize' && !e.metaKey && !e.ctrlKey && !e.altKey) {
     const k = e.key;
     if (k === 'ArrowLeft') e.shiftKey ? movePrio(-1) : boardMove(-1, 0);

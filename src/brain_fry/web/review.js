@@ -574,6 +574,7 @@ function drawDiff() {
   if (f.side === 'unstaged' || f.side === 'untracked') top.push(['discard-file', f.side === 'untracked' ? 'Move to Trash' : 'Discard file', 'discard'], ['stage-file', 'Stage file', '']);
   if (f.side === 'staged') top.push(['unstage-file', 'Unstage file', '']);
   if (f.side === 'conflict') top.push(['stage-file', 'Mark resolved', '']);
+  if (openable(f)) top.push(['open', 'Open', '']);
   const n = d ? d.hunks.length : 0;
   const right = pick && n ? `hunk ${R.cursor + 1} of ${n}` : d && d.truncated ? `${d.total} lines` : '';
   setHtml('rv-diffbar', `<span class="path" title="${esc(f.path)}">${esc(f.orig ? `${f.orig} --> ${f.path}` : f.path)}</span>`
@@ -755,6 +756,7 @@ $('#review').addEventListener('click', (e) => {
     if (a === 'show-all') { R.full = true; R.diffKey = null; return refreshReview(); }
     if (a === 'discard-file') return discardFile(R.file);
     if (a === 'stage-file' || a === 'unstage-file') return stageFile(R.file);
+    if (a === 'open') return openReviewFile(R.file);
   }
   const hb = t.closest('[data-rv-hunk]');
   if (hb) return hunkAction(hb.dataset.rvHunk, Number(hb.closest('.rv-hunk').dataset.h));
@@ -807,6 +809,26 @@ $('#rv-rows').addEventListener('scroll', () => {
   }
 });
 
+// the path of a file of 2b relative to the task's project, or null when the file is outside it
+function relPath(f) {
+  if (!R.st) return null;
+  const task = S.state.tasks[R.key];
+  const abs = `${R.st.tree}/${f.path}`.replace(/\/$/, '');
+  const proj = task ? task.projectPath : '';
+  return proj && abs.startsWith(`${proj}/`) ? abs.slice(proj.length + 1) : null;
+}
+
+// Open (the menu of 2b, the button of 3b): a file of the work tree, not a deleted one, a folder or a file of a commit
+function openable(f) {
+  return Boolean(relPath(f)) && f.st !== 'D' && f.side !== 'commit' && !f.path.endsWith('/');
+}
+
+function openReviewFile(f) {
+  const rel = relPath(f);
+  setMode('dev');
+  openFile(R.key, rel);
+}
+
 // the right-click menu of a file of 2b (openCtx: explorer.js)
 $('#review').addEventListener('contextmenu', (e) => {
   const fileEl = e.target.closest('.rv-file');
@@ -816,13 +838,9 @@ $('#review').addEventListener('contextmenu', (e) => {
   if (!f) return;
   selectFile(f);
   focusPanel('files');
-  const task = S.state.tasks[R.key];
-  const abs = `${R.st.tree}/${f.path}`.replace(/\/$/, '');
-  const proj = task ? task.projectPath : '';
-  const rel = proj && abs.startsWith(`${proj}/`) ? abs.slice(proj.length + 1) : null;
-  const gone = f.st === 'D' || f.side === 'commit';
+  const rel = relPath(f);
   openCtx(e.clientX, e.clientY, [
-    { label: 'Open', disabled: !rel || gone || f.path.endsWith('/'), run: () => { setMode('dev'); openFile(R.key, rel); } },
+    { label: 'Open', disabled: !openable(f), run: () => openReviewFile(f) },
     { label: f.side === 'untracked' ? 'Move to Trash' : 'Discard changes', key: '⌘⌫', disabled: f.side !== 'unstaged' && f.side !== 'untracked', run: () => discardFile(f) },
     '-',
     { label: 'Copy path', disabled: !rel, run: () => copyPath(R.key, rel, false) },

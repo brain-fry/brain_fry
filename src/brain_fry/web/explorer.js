@@ -1,14 +1,16 @@
 'use strict';
 // The right-click menu of the explorer (2a) and its keys, as in VS Code on macOS: Enter (or F2)
 // renames the selected entry, Cmd+Backspace moves it to the Trash, Ctrl+C copies its relative path. Cut / Copy / Paste move or copy
-// files and folders, also between projects. See DESIGN_DETAILS.md "2a, 3a, 3b: files and terminals".
-// Uses S, $, esc, request, send, toast, store, uiLog (app.js), work, refreshTree, renderExplorer,
-// renderFiles, saveOpenFiles, closeFile (files.js) and newShell (shells.js).
+// files and folders, also between projects. New File... / New Folder... into the folder that was
+// right-clicked, the file's folder, or the project folder (the empty space).
+// See DESIGN_DETAILS.md "2a, 3a, 3b: files and terminals".
+// Uses S, $, esc, request, send, toast, store, uiLog (app.js), work, loadDir, refreshTree, renderExplorer,
+// renderFiles, saveOpenFiles, closeFile, openFile (files.js) and newShell (shells.js).
 
 // What Cut or Copy put aside for Paste: { tid, project, paths, cut }. Kept in Brain Fry only,
 // not on the clipboard of macOS: Finder cannot paste it.
 S.fileClip = null;
-S.treeRename = null; // { tid, path } while a name field is open in the tree
+S.treeRename = null; // { tid, path } or { tid, dir } while a name field is open in the tree (Rename, New File..., New Folder...)
 
 const nameOf = (path) => path.split('/').pop();
 const parentOf = (path) => path.split('/').slice(0, -1).join('/');
@@ -39,8 +41,14 @@ function ctxItems(tid, path, dir) {
   const into = path === null ? '' : dir ? path : parentOf(path);
   const paste = { label: c ? `Paste ${nameOf(c.paths[0])}${c.cut ? ' (move)' : ''}` : 'Paste', disabled: !c, run: () => pasteInto(tid, into) };
   const refresh = { label: 'Refresh', run: () => refreshTree(tid) };
-  if (path === null) return [paste, '-', refresh];
+  const create = [ // into the folder, the file's folder, or the project folder (asked by Renaud on 2026-11-12)
+    { label: 'New File...', run: () => startCreate(tid, into, false) },
+    { label: 'New Folder...', run: () => startCreate(tid, into, true) },
+    '-',
+  ];
+  if (path === null) return [...create, paste, '-', refresh];
   return [
+    ...create,
     { label: dir ? 'Open in Finder' : 'Open in default app', run: () => send('fs.open', { id: tid, path }) },
     { label: 'Open a terminal here', run: () => terminalHere(tid, path) },
     '-',
@@ -108,6 +116,69 @@ function startRename(tid, path) {
     if (e.key === 'Escape') { e.preventDefault(); finish(false, true); }
   });
   input.addEventListener('blur', () => finish(true, false)); // a click elsewhere keeps the name, as VS Code
+}
+
+// New File... / New Folder...: a name field in a new row where the entry will show, as in VS Code:
+// first in the folder for a folder, after its folders for a file. `dir` '' is the project folder.
+// Enter creates it (a file opens with the keyboard, a folder is selected), a click elsewhere
+// creates it and leaves the rest as it is, Esc or an empty name: nothing.
+async function startCreate(tid, dir, isDir) {
+  if (tid !== wsId() || S.treeRename) return;
+  const w = work(tid);
+  if (dir) w.open.add(dir);
+  if (!w.kids.has(dir)) await loadDir(tid, dir);
+  if (tid !== wsId() || S.treeRename) return;
+  renderExplorer();
+  const tree = $('#tree');
+  const rows = [...tree.querySelectorAll('.node[data-node]')];
+  const dirRow = dir ? treeRow(dir) : null;
+  if (dir && !dirRow) return;
+  let anchor; // the new row goes before it (null: at the end)
+  if (isDir) anchor = dirRow ? dirRow.nextSibling : tree.firstChild;
+  else {
+    const file = (w.kids.get(dir) || []).find((e) => !e.dir);
+    const after = rows.slice(dirRow ? rows.indexOf(dirRow) + 1 : 0);
+    anchor = file ? treeRow(file.path) : after.find((r) => dir && !r.dataset.node.startsWith(`${dir}/`)) || null;
+  }
+  const row = document.createElement('div');
+  row.className = `node ${isDir ? 'dir' : 'file'}`;
+  row.style.paddingLeft = `${8 + (dir ? dir.split('/').length : 0) * 14}px`;
+  row.innerHTML = `<span class="caret">${isDir ? '▸' : ''}</span>`;
+  const input = document.createElement('input');
+  input.className = 'tree-rename';
+  input.spellcheck = false;
+  row.appendChild(input);
+  tree.insertBefore(row, anchor);
+  S.treeRename = { tid, dir };
+  input.focus();
+  row.scrollIntoView({ block: 'nearest' });
+  let over = false;
+  const finish = async (save, enter) => {
+    if (over) return;
+    over = true;
+    S.treeRename = null;
+    const name = input.value.trim();
+    let path = null;
+    if (save && name) {
+      try { path = await request('fs.new', { id: tid, dir, name, folder: isDir }); } catch (e) { toast(errText(e)); }
+    }
+    if (path === null) {
+      renderExplorer();
+      if (enter) $('#tree').focus();
+      return;
+    }
+    for (let p = parentOf(path); p && p !== dir; p = parentOf(p)) w.open.add(p); // made by a name with /
+    if (enter) w.treeSel = path;
+    treesChanged(wsProject(tid));
+    if (enter && !isDir) openFile(tid, path, true);
+    else if (enter) $('#tree').focus();
+  };
+  input.addEventListener('keydown', (e) => {
+    e.stopPropagation();
+    if (e.key === 'Enter') { e.preventDefault(); finish(true, true); }
+    if (e.key === 'Escape') { e.preventDefault(); finish(false, true); }
+  });
+  input.addEventListener('blur', () => finish(true, false));
 }
 
 async function renamePath(tid, path, name) {
@@ -290,6 +361,7 @@ function startTreeHints() {
   c.timer = null;
   const tid = wsId();
   if (!tid || !wsProject(tid)) { endChord('jump: explorer (no project)'); return; }
+  revealColumn('explorer'); // hidden by Cmd+Option+2 (layout.js): the hints need its rows on screen
   c.kind = 'tree';
   drawTreeHints();
   if (!hintRows.length) endChord('jump: explorer (no row on screen)');
@@ -338,9 +410,4 @@ function pickTreeHint(i) {
 }
 
 $('#tree').addEventListener('scroll', () => { if (G.chord && G.chord.kind === 'tree') drawTreeHints(); });
-document.addEventListener('mousedown', () => {
-  if (G.chord && G.chord.kind === 'tree') endChord('jump: explorer, cancelled by a click');
-}, true);
-window.addEventListener('blur', () => {
-  if (G.chord && G.chord.kind === 'tree') endChord('jump: explorer, the window lost the keyboard');
-});
+// a click or the window losing the keyboard ends the labels: grid.js (LABELS)

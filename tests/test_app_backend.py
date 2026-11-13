@@ -138,7 +138,7 @@ def test_idle_starts_the_terminal_tabs_of_the_task_without_its_session(backend, 
         assert len(st["tasks"][t.id]["shells"]) == 2
 
 
-def test_park_moves_the_other_projects_to_planning(backend, project, home):
+def test_park_moves_the_other_projects_to_next(backend, project, home):
     """The button of Organize mode; Undo sends `prio` for each returned id."""
     from brain_fry import projects
 
@@ -151,7 +151,7 @@ def test_park_moves_the_other_projects_to_planning(backend, project, home):
     with connect(f"ws://127.0.0.1:{port}/ctl") as ctl:
         ctl.recv(timeout=5)
         assert request(ctl, 1, cmd="park", project=str(project))["data"] == {"ids": [theirs.id]}
-        st = states(ctl, lambda m: m.get("tasks", {}).get(theirs.id, {}).get("prio") == "planning")
+        st = states(ctl, lambda m: m.get("tasks", {}).get(theirs.id, {}).get("prio") == "next")
         assert st["tasks"][mine.id]["prio"] == "working" and theirs.id not in st["inbox"]
 
 
@@ -328,6 +328,11 @@ def test_commands_of_the_explorer_menu(backend, project, monkeypatch):
         assert request(ctl, 5, cmd="fs.trash", id=t.id, path="docs/todo.md")["ok"]
         assert request(ctl, 6, cmd="fs.copypath", id=t.id, path="docs", relative=True)["data"] == "docs"
         assert request(ctl, 7, cmd="fs.copypath", id=t.id, path="docs", relative=False)["data"] == str(project / "docs")
+        assert request(ctl, 8, cmd="fs.new", id=t.id, dir="docs", name="a.md")["data"] == "docs/a.md"
+        assert request(ctl, 9, cmd="fs.new", id=t.id, dir="", name="lib", folder=True)["data"] == "lib"
+        assert (project / "docs" / "a.md").is_file() and (project / "lib").is_dir()
+        taken = request(ctl, 10, cmd="fs.new", id=t.id, dir="", name="lib", folder=False)
+        assert not taken["ok"] and taken["error"].startswith("FileExistsError")
     assert trashed == [(project / "docs").resolve() / "todo.md"]
     assert clip == ["docs", str(project / "docs")]
 

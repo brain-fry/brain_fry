@@ -107,6 +107,35 @@ def test_rename_in_place_refuses_a_taken_name_and_bad_names(repo):
         files.rename(repo, "", "x")  # the project folder itself
 
 
+def test_new_file_and_folder_never_replace_and_make_the_folders_on_the_way(repo, tmp_path):
+    assert files.create(repo, "src", "b.py", is_dir=False) == "src/b.py"
+    assert (repo / "src" / "b.py").read_text() == ""
+    assert files.create(repo, "", "docs", is_dir=True) == "docs"
+    assert (repo / "docs").is_dir()
+    assert files.create(repo, "", " lib/x/c.py ", is_dir=False) == "lib/x/c.py"  # as VS Code
+    assert (repo / "lib" / "x" / "c.py").is_file()
+    assert files.create(repo, "lib", "x/y/", is_dir=True) == "lib/x/y"
+    for name in ("src/a.py", "README.md", "src"):
+        with pytest.raises(FileExistsError):
+            files.create(repo, "", name, is_dir=False)
+    assert (repo / "src" / "a.py").read_text() == "x = 1\n"
+    with pytest.raises(NotADirectoryError):
+        files.create(repo, "", "README.md/x.py", is_dir=False)
+    with pytest.raises(NotADirectoryError):
+        files.create(repo, "README.md", "x.py", is_dir=False)
+    for bad in ("", " ", "/", ".", "..", "a/../b", "a\0b"):
+        with pytest.raises(ValueError):
+            files.create(repo, "", bad, is_dir=False)
+    with pytest.raises(PermissionError):
+        files.create(repo, "..", "x.py", is_dir=False)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    os.symlink(outside, repo / "out")
+    with pytest.raises(PermissionError):
+        files.create(repo, "", "out/x.py", is_dir=False)  # a link on the way leads out of the project
+    assert not (outside / "x.py").exists()
+
+
 def test_a_symlink_is_renamed_and_trashed_as_a_link_never_its_target(repo, monkeypatch):
     os.symlink("README.md", repo / "link.md")
     assert files.rename(repo, "link.md", "other.md") == "other.md"

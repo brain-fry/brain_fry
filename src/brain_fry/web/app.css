@@ -87,17 +87,28 @@ body.resizing-v, body.resizing-v * { cursor: row-resize !important; user-select:
 .ctx-menu button:hover:not(:disabled) kbd { color: rgba(255, 255, 255, .85); }
 .ctx-menu hr { border: none; border-top: 1px solid var(--line); margin: 4px 6px; }
 
-/* the middle column gives way first when the window is narrow; 4a keeps at least 360 px */
-#middle { flex: 0 1 var(--w-middle, 480px); display: flex; flex-direction: column; min-height: 0; min-width: 280px; }
-/* the grid of column 3 (grid.js): two rows of two panes; flex-grow holds the fractions of layout.js */
-.grid-row { flex: 1 1 0; display: flex; min-height: 0; }
-.pane { flex: 1 1 0; display: flex; flex-direction: column; min-width: 0; min-height: 0; background: #000; }
+/* the middle column gives way first when the window is narrow, down to nothing (Renaud, 2026-11-12); 4a keeps at least 360 px */
+#middle { flex: 0 1 var(--w-middle, 480px); position: relative; min-height: 0; min-width: 0; overflow: hidden; }
+/* Cmd+Option+1 to 4 hide column 1, 2a, column 3, 4a (layout.js), each with the splitter at its right;
+   4a hidden: column 3 takes its place. Review mode hides 1, 2a and column 3 itself, and shows 4a on its own key */
+#dev.no-side > #side, #dev.no-side > [data-split="side"], #dev.no-explorer > #explorer, #dev.no-explorer > [data-split="explorer"],
+#dev.no-middle > #middle, #dev.no-middle > [data-split="middle"], #dev.no-agent > [data-split="middle"],
+#dev.no-agent:not(.review) > #agent { display: none; }
+#dev.no-agent > #middle { flex: 1 1 0; }
+/* the grid of column 3 (grid.js): four panes and three splitters, each placed by layoutPanes (rows
+   first or columns first, the fractions of layout.js); until then a pane fills column 3 */
+.pane { position: absolute; left: 0; top: 0; width: 100%; height: 100%; display: flex; flex-direction: column; background: #000; }
+.split.grid { position: absolute; }
 .pane-body { flex: 1; position: relative; min-height: 0; }
 /* the pane that I use, when there are several: its tab on screen keeps the accent, the others' turn grey */
 #middle.multi .pane:not(.used) .tabs .tab.on { box-shadow: inset 0 2px 0 #5c6370; }
 /* files are pure black (Renaud, 2026-11-10): the ids beat the scoped classes of CodeMirror's One Dark (#282c34) */
 #middle .pane .tabs .tab.on, #middle .pane-body .cm-editor, #middle .pane-body .cm-gutters, #middle .pane-body .viewer.image-viewer { background: #000; }
 #middle .pane-body .term { background: #1e1e1e; }
+/* inline code in markdown (Renaud, 2026-11-13, option 2 of a mockup): a faint pill, dark grey backticks.
+   The marks come from frontend/codemirror.js; `*` reaches One Dark's span inside a backtick, whose green it beats */
+.cm-editor .cm-inline-code { background: rgba(255, 255, 255, .10); border-radius: 3px; }
+.cm-editor .cm-inline-code-mark, .cm-editor .cm-inline-code-mark * { color: #4b5263; }
 /* a tab dragged to another pane: its name follows the mouse, the place where it goes is marked */
 .tab-ghost { position: fixed; left: 0; top: 0; z-index: 50; pointer-events: none; padding: 4px 10px; font-size: 12px;
   color: var(--text); background: var(--panel-2); border: 1px solid var(--accent); border-radius: 4px; }
@@ -110,7 +121,9 @@ body.tab-dragging, body.tab-dragging * { cursor: grabbing !important; user-selec
 .tabs .tab.gone { text-decoration: line-through; }
 .tabs .tab .x { opacity: .5; padding: 0 2px; }
 .tabs .tab .x:hover { opacity: 1; color: #fff; }
-.tabs .tab .dirty { color: #e9d38a; }
+/* unsaved edits: the name in italics (Renaud, 2026-11-12: replaces the dot) */
+.tabs .tab.dirty { font-style: italic; }
+.tabs .tab.dirty .x, .tabs .tab.dirty .star { font-style: normal; }
 /* a project tab (in every task of the project): a small grey star at 60% (Renaud chose it from a mockup, 2026-11-11) */
 .tabs .tab .star { font-size: 9px; color: rgba(160, 163, 173, .6); margin-right: -2px; }
 /* close all tabs of a pane (grid.js): at the right end of its tab bar, still there when the tabs scroll */
@@ -124,7 +137,7 @@ body.tab-dragging, body.tab-dragging * { cursor: grabbing !important; user-selec
 .pane-bar .path { min-width: 60px; }
 .pane-bar .note { color: #e9d38a; white-space: nowrap; }
 .pane-bar button { font-size: 11px; padding: 1px 8px; white-space: nowrap; flex: none; }
-.pane-bar button.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+.pane-bar button.on { background: #3a3d44; border-color: var(--dim); color: var(--text); } /* gray, pressed: blue was too loud */
 .pane-bar button.run { color: #89d185; padding: 1px 6px; } /* VS Code's green of Run */
 .pane-bar button.run svg { vertical-align: -1px; }
 .editor { position: absolute; inset: 0; }
@@ -151,8 +164,12 @@ body.tab-dragging, body.tab-dragging * { cursor: grabbing !important; user-selec
 .list .row.sel { background: #2f3540; border-left-color: var(--accent); }
 .list .row.current { opacity: .75; }
 .list .row .marks { display: flex; flex-direction: column; align-items: center; gap: 4px; padding-top: 4px; }
+/* Cmd+J I: a key on each inbox row, before the title (app.js) */
+.list .row .inbox-hint { display: inline-block; vertical-align: 1px; margin-right: 5px; padding: 0 3px; border-radius: 3px;
+  background: var(--accent); color: #0b1220; font: 600 10px/14px ui-monospace, Menlo, monospace; pointer-events: none; }
 .list .row .main { min-width: 0; flex: 1; }
-.list .row .title { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* two lines (Renaud, 2026-11-13: "it would help me read a little more") */
+.list .row .title { overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow-wrap: anywhere; }
 .list .row.unread .title { font-weight: 700; }
 .list .row .meta { color: var(--dim); font-size: 11px; }
 .list .row .line { color: #b9bac0; font-size: 12px; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
@@ -187,13 +204,14 @@ body.tab-dragging, body.tab-dragging * { cursor: grabbing !important; user-selec
 #sel-chip .x:hover { color: var(--text); }
 #overlay .big { font-size: 15px; color: var(--text); }
 /* the card of a switch: what the next task is about, over the old scrollback at the top of 4a,
-   until my first key or click (app.js, showCard). Clicks go through it, to what lies under it. */
-#switch-card { position: absolute; top: 12px; left: 12px; right: 12px; z-index: 21; padding: 12px 14px; pointer-events: none;
-  background: var(--panel); border: 1px solid var(--line); border-radius: 8px; box-shadow: 0 10px 30px #000a; }
-#switch-card .head { display: flex; align-items: center; gap: 9px; font-size: 15px; font-weight: 600; }
-#switch-card .txt { margin-top: 7px; color: #c9cad0; }
+   until my first key or click (app.js, showCard). Clicks go through it, to what lies under it.
+   Edge to edge, flush with the top of 4a, only the bottom corners rounded (Renaud, 2026-11-13, option 1 of a mockup). */
+#switch-card { position: absolute; top: 0; left: 0; right: 0; z-index: 21; padding: 14px 16px; pointer-events: none;
+  background: var(--panel); border: 1px solid var(--line); border-top: none; border-radius: 0 0 6px 6px; box-shadow: 0 6px 16px #0008; }
+#switch-card .head { display: flex; align-items: center; gap: 9px; font-size: 16px; font-weight: 600; }
+#switch-card .txt { margin-top: 7px; color: #c9cad0; font-size: 14px; }
 #switch-card .asked { color: #b9bac0; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
-#switch-card .lb { margin-right: 4px; color: var(--dim); font-size: 11px; text-transform: uppercase; letter-spacing: .05em; }
+#switch-card .lb { margin-right: 4px; color: var(--dim); font-size: 12px; text-transform: uppercase; letter-spacing: .05em; }
 
 /* z-index: above #tree-collapse (2), #sel-chip (20) and #switch-card (21), below the toast and the menus */
 .modal { position: fixed; inset: 0; z-index: 40; background: #0008; display: flex; align-items: flex-start; justify-content: center; padding-top: 12vh; }

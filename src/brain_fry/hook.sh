@@ -1,16 +1,16 @@
 #!/bin/bash
 # Brain Fry hook. Installed by `bf install` as ~/.brain_fry/hook.sh and registered in
 # ~/.claude/settings.json for UserPromptSubmit, Stop, Notification and SessionEnd.
-# See DESIGN.md, "Hooks".
+# See DESIGN.md, "Hooks", and DESIGN_DETAILS.md, "Hooks".
 #
-# Writes the payload, plus bf_ts (epoch seconds) and bf_project, as one file in
+# Writes the payload, plus bf_ts (epoch seconds), as one file in
 # <project>/.brain_fry/events/, where <project> is the nearest folder above cwd that
 # has .brain_fry/. Temp file + rename: the reader never sees half an event.
 # Appends one line per written event, and each error, to ~/.brain_fry/logs/hook.log.
 #
 # Always exits 0: a failing hook must never get in Claude's way. Prints nothing, except on
 # UserPromptSubmit the text that I selected in Brain Fry's editor, when the prompt goes to the
-# task of that editor: Claude Code adds that stdout to the model's context (DESIGN.md,
+# task of that editor: Claude Code adds that stdout to the model's context (DESIGN_DETAILS.md,
 # "Selection as context"). Brain Fry writes the selection to ~/.brain_fry/selection.json.
 
 [ -n "$BRAIN_FRY_INTERNAL" ] && exit 0
@@ -51,7 +51,7 @@ while [ -n "$dir" ] && [ "$dir" != "/" ] && [ "$dir" != "$HOME" ]; do
     mkdir -p "$spool" 2>/dev/null || { note "ERROR cannot create $spool: $event ${sid:0:8} lost"; exit 0; }
     name="$(date +%s)-$$-$RANDOM"
     if printf '%s' "$payload" \
-        | jq -c --arg project "$dir" '. + {bf_ts: now, bf_project: $project}' \
+        | jq -c '. + {bf_ts: now}' \
           > "$spool/.$name.tmp" 2>/dev/null \
         && mv "$spool/.$name.tmp" "$spool/$name.json" 2>/dev/null; then
       note "$event ${sid:0:8} --> $dir$selnote"

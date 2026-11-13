@@ -25,7 +25,7 @@ def test_writes_one_event_in_the_nearest_project(home):
     assert (r.returncode, r.stdout, r.stderr) == (0, "", "")
     [ev] = spooled(proj)
     assert ev["session_id"] == "s1" and ev["last_assistant_message"] == "a\nb"
-    assert ev["bf_project"] == str(proj) and isinstance(ev["bf_ts"], float)
+    assert isinstance(ev["bf_ts"], float)
     assert not list((proj / ".brain_fry" / "events").glob(".*.tmp"))
     assert f"Stop s1 --> {proj}" in (home / ".brain_fry" / "logs" / "hook.log").read_text()
 

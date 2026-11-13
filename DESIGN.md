@@ -9,10 +9,11 @@ numbered from the left to right (1,2,3, ...) and top to bottom (a,b,c, ...)
 a kanban-style *board*. each T is assigned to a project. the columns are the prio of a T; the status of a T is a small color on its card (see Concepts)
 
 1: working
-2: planning
-3: later (by default, these Ts are hidden. shortcut to toggle them, together with "more later", "never" and archived Ts)
-4: more later (ditto)
-5: never (ditto)
+2: next
+3: planning
+4: later (by default, these Ts are hidden. shortcut to toggle them, together with "more later", "never" and archived Ts)
+5: more later (ditto)
+6: never (ditto)
 
 archived Ts stay in their prio column, gray, and are hidden like "later"
 
@@ -42,7 +43,7 @@ open files and terminal tabs belong to the selected T and are restored with it
 - brain_fry (BF): the app (a Mac window).
 - task (T): corresponds to a CC session, with some of my metadata (prio, status, summaries). lives in <project>/.brain_fry/<session-id>.md
 - task thread (TT): correspond to a single question-answer (a conversation thread) with CC. belongs to a single task
-- prio: the column of a T on the board: working, planning, later, more later, never. changes only by my keystroke
+- prio: the column of a T on the board: working, next, planning, later, more later, never. changes only by my keystroke
 - status: set automatically by CC hooks: working (orange), blocked (red), waiting for me (green), done / archived (gray). live: a separate dot, not a status
 - fork (split): a new T that starts from a copy of an existing T's conversation (`claude --resume <id> --fork-session`)
 - layout: everything that is open in the four panes of column 3: all their tabs (files, terminals, browser pages, threads, whatever comes in a pane) and where each one sits. never files only
@@ -83,7 +84,7 @@ The spec above is Renaud's: change it only when he asks. Everything below is wri
 
 ### Hooks
 
-- One bash + jq script, registered in `~/.claude/settings.json` for UserPromptSubmit, Stop, Notification and SessionEnd, so it runs in every project. It walks up from the payload's `cwd` to the nearest folder that has `.brain_fry/` (it stops below `$HOME`) and writes the payload, plus `bf_ts` and `bf_project`, as one file in that spool (temp file, then rename). It always exits 0, and exits at once when `BRAIN_FRY_INTERNAL` is set (Brain Fry's own `claude -p` calls). Its only output is Renaud's editor selection on UserPromptSubmit (DESIGN_DETAILS.md, "Selection as context").
+- One bash + jq script, registered in `~/.claude/settings.json` for UserPromptSubmit, Stop, Notification and SessionEnd, so it runs in every project. It walks up from the payload's `cwd` to the nearest folder that has `.brain_fry/` (it stops below `$HOME`) and writes the payload, plus `bf_ts`, as one file in that spool (temp file, then rename). It always exits 0, and exits at once when `BRAIN_FRY_INTERNAL` is set (Brain Fry's own `claude -p` calls). Its only output is Renaud's editor selection on UserPromptSubmit (DESIGN_DETAILS.md, "Selection as context").
 - The app applies the spools every 0.5 s (`events.py`, under `consume.lock`). Event --> task:
   - UserPromptSubmit: a new thread, status working, `inbox` and `unread` off.
   - Stop: the reply (`last_assistant_message`), thread `pending`, status waiting, `inbox` and `unread` on. A bare `close` (or `x`) prompt whose reply ends with `closed :-)` archives the task.
@@ -96,8 +97,8 @@ The spec above is Renaud's: change it only when he asks. Everything below is wri
 
 ### Status, inbox, board
 
-- `prio` is the board column: working, planning, later, more_later, never (the last three are hidden by default). `status` is the color: working (orange), blocked (red), waiting (green), done (gray, archived). `live` is a flag that is not shown: a `claude` process runs for the task.
-- The inbox holds the tasks of the working column that have `inbox` set or are `pinned`, never archived ones (planning and the hidden columns wait; their flags stay). Order: `inbox` set first, then red, then the most recent. Selecting a task clears `unread`. Answering and archiving clear `inbox`. Archiving also unpins.
+- `prio` is the board column: working, next, planning, later, more_later, never (the last three are hidden by default). `status` is the color: working (orange), blocked (red), waiting (green), done (gray, archived). `live` is a flag that is not shown: a `claude` process runs for the task.
+- The inbox holds the tasks of the working column that have `inbox` set or are `pinned`, never archived ones (next, planning and the hidden columns wait; their flags stay). Order: `inbox` set first, then red, then the most recent. Selecting a task clears `unread`. Answering and archiving clear `inbox`. Archiving also unpins.
 - Auto-advance: after Renaud answers the selected task, the front end selects the next inbox item 1 s later (a switch in the header turns this off); after an archive, at once, whatever the switch. With nothing left, no task is selected and 4a shows a calm photo (`web/calm/`). The photo shows only while nothing needs Renaud: in Dev mode with no task selected, a task that comes into the inbox is selected at once. Only 4a changes (the idle screen): the dropdown, 2a and column 3 keep the project and the layout of the task that Renaud left, or at start of the task opened last, which is not selected (`S.idle`, `showIdle` in `app.js`).
 
 ### Digest
@@ -130,6 +131,7 @@ Brain Fry reads two formats of Claude Code that are internal. It reads them on a
 ### Testing
 
 - `uv run pytest`. The JS has no unit tests: check the window with `bf --selftest SECONDS`. It prints the page text, the terminal text and the JS errors; `--selftest-js` runs code in the page.
+- The scripts of `web/` share one global scope: a top-level name declared in two of them is no error, and the script loaded last replaces it for every caller. `tests/test_web_globals.py` fails on such a name.
 - Always run a selftest in a sandbox: `BRAIN_FRY_HOME` (its own projects.json, lock and logs; required while the app runs), `BRAIN_FRY_CLAUDE` (a fake `claude`), `CLAUDE_CONFIG_DIR` (fake transcripts). With the real files, it would resume real sessions and apply real spools. A task file copied into the sandbox needs its `project` and `cwd` rewritten, else the backend writes to the real task.
 - Send key events to the element that has the focus in real use (xterm.js's textarea in 4a), not to `document`. A double-click is two clicks (`detail` 1, then 2): look the element up again before the second, since the first may rebuild it (a tab bar), and an event on a detached element never reaches `document`. Do not name the test's variables after the page's globals (`S`, `B`, `G`, `F`, `C`): a `const B` hides the browser's state. A run whose `document.visibilityState` is `hidden` (the window was covered) does not count: WebKit pauses frames.
 - `tests/window/browser/host_check.py` checks the browser in a real window against a local site (`site.py`).

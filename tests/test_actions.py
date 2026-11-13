@@ -163,11 +163,11 @@ def test_inbox_order_puts_quiet_pinned_tasks_last(project):
 
 
 def test_only_the_working_column_is_in_the_inbox(project):
-    """Renaud, 2026-11-11: a task in planning (or a hidden column) waits, even pinned or with a
+    """Renaud, 2026-11-11: a task in planning (or next, or a hidden column) waits, even pinned or with a
     reply; its flags stay, so it comes back to the inbox when it moves back to working."""
     t = actions.new_task(project)
     actions._update(t.id, inbox=True, unread=True, pinned=True)
-    for prio in ("planning", "later", "more_later", "never"):
+    for prio in ("next", "planning", "later", "more_later", "never"):
         assert not views.in_inbox(actions.set_prio(t.id, prio))
     back = actions.set_prio(t.id, "working")
     assert (back.inbox, back.unread, back.pinned) == (True, True, True) and views.in_inbox(back)
@@ -185,6 +185,6 @@ def test_park_others_moves_the_working_tasks_of_the_other_projects(project, home
     later = actions.set_prio(actions.new_task(other).id, "later")
     assert sorted(actions.park_others(project)) == sorted([theirs.id, archived.id])
     prios = {t.id: actions.load(t.id).prio for t in (mine, theirs, archived, later)}
-    assert prios == {mine.id: "working", theirs.id: "planning", archived.id: "planning", later.id: "later"}
+    assert prios == {mine.id: "working", theirs.id: "next", archived.id: "next", later.id: "later"}
     assert actions.load(theirs.id).inbox and not views.in_inbox(actions.load(theirs.id))
     assert actions.park_others(project) == []

@@ -302,6 +302,19 @@ def rename(path: str, name: str) -> str:
     return str(folder / files.rename(folder, old, name))
 
 
+def create(folder: str, is_dir: bool) -> str:
+    """New Folder, as Finder's (and New File, which Finder lacks): an empty entry in `folder` under
+    a free name, "untitled folder", "untitled folder 2", ..., or "untitled file". The front end
+    then opens its name field. Returns its path."""
+    d = absolute(folder)
+    base = "untitled folder" if is_dir else "untitled file"
+    name, n = base, 1
+    while os.path.lexists(d / name):
+        n += 1
+        name = f"{base} {n}"
+    return str(d / files.create(d, "", name, is_dir))
+
+
 def trash(path: str) -> None:
     folder, name = _split(path)
     files._move_to_trash(files.entry(folder, name))

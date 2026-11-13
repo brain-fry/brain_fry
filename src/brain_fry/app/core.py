@@ -637,6 +637,12 @@ class Core:
             new = await run(files.rename, project, msg["path"], str(msg.get("name") or ""))
             log.info("renamed %s to %s in %s", msg["path"], new, Path(project).name)
             return new
+        if cmd == "fs.new":  # New File... / New Folder...: `dir` is the folder, "" the project folder
+            project = await run(self._project_of, tid)
+            is_dir = bool(msg.get("folder"))
+            new = await run(files.create, project, msg.get("dir") or "", str(msg.get("name") or ""), is_dir)
+            log.info("new %s %s in %s", "folder" if is_dir else "file", new, Path(project).name)
+            return new
         if cmd == "fs.trash":
             project = await run(self._project_of, tid)
             await run(files.trash, project, msg["path"])
@@ -668,6 +674,11 @@ class Core:
         if cmd == "finder.rename":
             new = await run(finder.rename, str(msg.get("path") or ""), str(msg.get("name") or ""))
             log.info("renamed %s to %s (Finder tab)", msg.get("path"), Path(new).name)
+            return new
+        if cmd == "finder.new":  # New File / New Folder: in `dir`, under a free name that the tab then renames
+            is_dir = bool(msg.get("folder"))
+            new = await run(finder.create, str(msg.get("dir") or ""), is_dir)
+            log.info("new %s %s (Finder tab)", "folder" if is_dir else "file", new)
             return new
         if cmd == "finder.trash":
             await run(finder.trash, str(msg.get("path") or ""))
@@ -809,7 +820,7 @@ class Core:
             await run(actions.rename, tid, str(msg.get("title", "")))
         elif cmd == "prio":
             await run(actions.set_prio, tid, str(msg.get("prio")))
-        elif cmd == "park":  # Organize mode: the working tasks of the other projects --> planning
+        elif cmd == "park":  # Organize mode: the working tasks of the other projects --> next
             ids = await run(actions.park_others, Path(msg["project"]))
             self.request_broadcast()
             return {"ids": ids}

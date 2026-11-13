@@ -20,7 +20,8 @@ def epoch(ts: str) -> float:
 
 def in_inbox(t: Task) -> bool:
     """The `inbox` flag (a reply or a block waits for me), or pinned. Only a task of the working
-    column (Renaud, 2026-11-11: planning and the hidden columns wait), never an archived one."""
+    column (Renaud, 2026-11-11: planning and the hidden columns wait; next too, 2026-11-13),
+    never an archived one."""
     return (t.inbox or t.pinned) and t.status != "done" and t.prio == "working"
 
 

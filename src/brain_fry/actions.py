@@ -111,12 +111,13 @@ def set_prio(task_id: str, prio: str) -> Task:
 
 def park_others(project: Path | str) -> list[str]:
     """The button of Organize mode: every task of the working column that is not in `project`
-    (archived ones too) moves to planning, and so leaves the inbox. Returns their ids, for Undo."""
+    (archived ones too) moves to next, and so leaves the inbox. Returns their ids, for Undo.
+    Next, not planning (Renaud, 2026-11-13): they are interrupted work, not plans."""
     keep = str(Path(project))
     moved = []
     for t in all_tasks():
         if t.prio == "working" and str(Path(t.project)) != keep:
-            set_prio(t.id, "planning")
+            set_prio(t.id, "next")
             moved.append(t.id)
     return moved
 

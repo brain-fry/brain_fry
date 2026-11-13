@@ -363,7 +363,8 @@ document.addEventListener('keydown', (e) => {
 // ------------------------------------------------------------------ links in the terminals
 
 // Cmd+click on a URL in 4a or 3b opens it in a browser tab of the task, as Cmd+click opens a
-// link in VS Code's terminal. A plain click selects text, as before. app.js calls this for
+// link in VS Code's terminal. A plain click selects text (or, in Claude Code's fullscreen
+// mode, goes to Claude Code, which ignores it on a link). app.js calls this for
 // every new terminal. Limits: a URL in the text that wraps onto the next line is cut at the
 // line end (an OSC 8 link is not: its target is in the escape sequence).
 // An OSC 8 link to a file (Claude Code writes one for a Markdown link, `[x](src/x.py#L2)`,
@@ -392,4 +393,35 @@ function browserTermLinks(term) {
       callback(links.length ? links : undefined);
     },
   });
+  // While the program tracks the mouse (Claude Code's fullscreen mode, `"tui": "fullscreen"`;
+  // vim or htop in 3b), xterm.js sends it the press, the program redraws the row, xterm.js
+  // builds a new link object for it, and its own check at mouseup (the same link at press and
+  // release) fails: nothing opens. So a Cmd+press on a link is handled here, before xterm.js
+  // sees it, and neither the press nor its release reaches the program.
+  let held = false;
+  const linkAt = (e) => {
+    const scr = term.element.querySelector('.xterm-screen');
+    if (!scr) return null;
+    const r = scr.getBoundingClientRect();
+    const x = Math.floor((e.clientX - r.left) / (r.width / term.cols)) + 1;
+    const y = Math.floor((e.clientY - r.top) / (r.height / term.rows)) + 1 + term.buffer.active.viewportY;
+    if (x < 1 || x > term.cols || y < 1) return null;
+    const from = (p) => y > p.y || (y === p.y && x >= p.x), upTo = (p) => y < p.y || (y === p.y && x <= p.x);
+    let hit = null;
+    for (const p of term._core._linkProviderService.linkProviders) { // internal: no public lookup; both providers answer at once
+      p.provideLinks(y, (links) => { for (const l of links || []) if (!hit && from(l.range.start) && upTo(l.range.end)) hit = l; });
+    }
+    return hit;
+  };
+  const stop = (e) => { e.preventDefault(); e.stopPropagation(); };
+  term.element.addEventListener('mousedown', (e) => {
+    held = false;
+    if (!e.metaKey || e.button !== 0 || term.modes.mouseTrackingMode === 'none') return;
+    const link = linkAt(e);
+    if (!link) return;
+    stop(e);
+    held = true;
+    link.activate(e, link.text);
+  }, true);
+  term.element.addEventListener('mouseup', (e) => { if (held) { held = false; stop(e); } }, true);
 }

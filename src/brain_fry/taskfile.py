@@ -20,7 +20,7 @@ import yaml
 from . import paths
 from .util import write_atomic
 
-PRIOS = ("working", "planning", "later", "more_later", "never")
+PRIOS = ("working", "next", "planning", "later", "more_later", "never")
 PARTS = ("digest", "question", "prompt", "reply")
 
 # Held around every load-modify-save of a task file: the reader, the digest worker and

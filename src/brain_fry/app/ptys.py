@@ -173,6 +173,11 @@ class PtySession:
                 return
             data = data[n:]
 
+    def clear_replay(self) -> None:
+        """Cmd+K in a terminal tab: forget the output, but keep the line of the cursor (the
+        prompt), as xterm.js's clear() does. A reloaded view then replays only that line."""
+        del self.replay[: self.replay.rfind(b"\n") + 1]
+
     def resize(self, rows: int, cols: int) -> None:
         if self.alive:
             try:

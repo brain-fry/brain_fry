@@ -12,7 +12,7 @@
 // - Keys, as Finder: arrows, type a name to select it, Enter renames, Cmd+Backspace moves to the
 //   Trash, Cmd+Up adds the enclosing folder on the left. Ctrl+C copies the relative path, as in 2a.
 // - Right-click: the menu of 2a (explorer.js), on absolute paths. Cut / Copy / Paste work between
-//   2a and the Finder tabs (S.fileClip).
+//   2a and the Finder tabs (S.fileClip). New File / New Folder work as Finder's New Folder.
 // - Double-click on the path bar: that folder becomes the first column, the selection stays.
 // - The grip at the bottom of a divider resizes its column; with Option, every column.
 // - The folders on screen are read again every 2 s (the agent adds files).
@@ -392,6 +392,23 @@ async function fdRenameEntry(tab, folder, name, to) {
   saveFinderTabs(tab.tid);
 }
 
+// New File / New Folder (asked by Renaud on 2026-11-12), as Finder's New Folder: the entry is made
+// at once under a free name ("untitled folder", "untitled file"), selected, and its name field
+// opens. Esc keeps that name, as in Finder.
+async function fdNew(tab, folder, isDir) {
+  let path;
+  try { path = await request('finder.new', { dir: folder, folder: isDir }); } catch (e) { toast(errText(e)); return; }
+  fdProjectChanged(tab.tid, [], []); // 2a shows it too
+  const i = fdColumns(tab).findIndex((c) => c.folder === folder);
+  if (i >= 0) tab.chain = [...tab.chain.slice(0, i), fBase(path)];
+  await refreshFinder(tab, true);
+  fdReveal(tab);
+  saveFinderTabs(tab.tid);
+  if (inView(tab.tid)) renderFileTabs(); // the tab's name: the folder of the last selection
+  startFinderRename(tab);
+  refreshFinders(); // the other Finder tabs (this one keeps its name field)
+}
+
 async function fdTrash(tab, path, dir) {
   if (!confirm(`Move ${fBase(path)}${dir ? '/ and everything in it' : ''} to the Trash?`)) return;
   try { await request('finder.trash', { path }); } catch (e) { toast(errText(e)); return; }
@@ -510,11 +527,17 @@ function finderMenu(tab, e) {
   const refresh = { label: 'Refresh', run: () => refreshFinder(tab, true) };
   const paste = (into) => ({ label: clip ? `Paste ${fBase(fdClipPaths().paths[0] || '')}${clip.cut ? ' (move)' : ''}` : 'Paste',
     disabled: !clip, run: () => fdPaste(tab, into) });
-  if (!row) { openCtx(e.clientX, e.clientY, [paste(c.folder), '-', refresh]); return; }
+  const create = (into) => [ // into the folder, the file's folder, or the column's folder, as Paste
+    { label: 'New File', run: () => fdNew(tab, into, false) },
+    { label: 'New Folder', run: () => fdNew(tab, into, true) },
+    '-',
+  ];
+  if (!row) { openCtx(e.clientX, e.clientY, [...create(c.folder), paste(c.folder), '-', refresh]); return; }
   if (tab.chain[i] !== row.dataset.name) { tab.chain = [...tab.chain.slice(0, i), row.dataset.name]; fdChanged(tab, false); }
   const ent = c.list.entries.find((x) => x.name === row.dataset.name);
   const path = fJoin(c.folder, ent.name);
   openCtx(e.clientX, e.clientY, [
+    ...create(ent.dir ? path : c.folder),
     { label: ent.dir ? 'Open in Finder' : 'Open in default app', run: () => send('finder.open', { path }) },
     { label: 'Open a terminal here', run: () => finderTerminal(tab, path) },
     '-',

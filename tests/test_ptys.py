@@ -55,3 +55,15 @@ def test_ctrl_c_reaches_the_child():
         if proc.poll() is None:
             proc.kill()
         os.close(fd)
+
+
+def test_clear_replay_keeps_the_line_of_the_cursor():
+    from brain_fry.app.ptys import PtySession
+
+    s = PtySession.__new__(PtySession)  # the method reads only the replay
+    s.replay = bytearray(b"old output\r\nmore\r\n\x1b]7771;cwd;/x\x07$ ls -")
+    s.clear_replay()
+    assert bytes(s.replay) == b"\x1b]7771;cwd;/x\x07$ ls -"
+    s.replay = bytearray(b"$ ")  # no newline yet: nothing to forget
+    s.clear_replay()
+    assert bytes(s.replay) == b"$ "

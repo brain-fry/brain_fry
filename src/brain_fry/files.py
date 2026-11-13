@@ -228,6 +228,34 @@ def rename(project: str | Path, rel: str, name: str) -> str:
     return _join(rel.strip("/").rpartition("/")[0], name)
 
 
+def create(project: str | Path, folder: str, name: str, is_dir: bool) -> str:
+    """New File... / New Folder...: an empty file, or a folder, `name` in `folder` ("" is the
+    project folder). As in VS Code, a name with `/` also makes the folders on the way ("a/b.py").
+    Never replaces anything. Returns the new path."""
+    parts = [p for p in name.strip().split("/") if p]
+    if not parts or "\0" in name or any(p in (".", "..") for p in parts):
+        raise ValueError(f"not a valid name: {name!r}")
+    base = resolve(project, folder)
+    if not base.is_dir():
+        raise NotADirectoryError(f"not a folder: {folder}")
+    rel = _join(folder, "/".join(parts))
+    target = base.joinpath(*parts)
+    if os.path.lexists(target):
+        raise FileExistsError(f"{'/'.join(parts)} already exists here")
+    d = base
+    for p in parts[:-1]:
+        d = d / p
+        if os.path.lexists(d) and not d.is_dir():
+            raise NotADirectoryError(f"{p} is a file, not a folder")
+    resolve(project, rel)  # the folders on the way may be links that lead out of the project
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if is_dir:
+        target.mkdir()
+    else:
+        target.open("x").close()
+    return rel
+
+
 def trash(project: str | Path, rel: str) -> None:
     """Moves the file or folder `rel` to the Trash of macOS, from where Finder can put it back."""
     _move_to_trash(entry(project, rel))

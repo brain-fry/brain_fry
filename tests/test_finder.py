@@ -78,6 +78,19 @@ def test_rename_trash_paste_on_absolute_paths(tree, tmp_path, monkeypatch):
         finder.trash("/")
 
 
+def test_new_file_and_folder_take_a_free_untitled_name(tree):
+    assert finder.create(str(tree / "sub"), is_dir=True) == str(tree / "sub" / "untitled folder")
+    assert finder.create(str(tree / "sub"), is_dir=True) == str(tree / "sub" / "untitled folder 2")
+    assert (tree / "sub" / "untitled folder 2").is_dir()
+    assert finder.create(str(tree), is_dir=False) == str(tree / "untitled file")
+    assert (tree / "untitled file").read_text() == ""
+    assert finder.create(str(tree), is_dir=False) == str(tree / "untitled file 2")
+    with pytest.raises(NotADirectoryError):
+        finder.create(str(tree / "A.md"), is_dir=False)
+    with pytest.raises(ValueError):
+        finder.create("relative", is_dir=True)
+
+
 def test_copy_path_relative_only_inside_the_project(tree, monkeypatch):
     copied = []
     monkeypatch.setattr(files, "copy_to_clipboard", copied.append)
@@ -122,6 +135,7 @@ def test_backend_commands_and_icon_route(backend, project, tmp_path, monkeypatch
                 urllib.request.urlopen(f"http://127.0.0.1:{port}{bad}")
         assert request(ctl, 2, cmd="finder.rename", path=str(out / "n.py"), name="m.py")["data"] == str(out / "m.py")
         assert not request(ctl, 3, cmd="finder.list", path="relative")["ok"]
+        assert request(ctl, 7, cmd="finder.new", dir=str(out / "deep"), folder=True)["data"] == str(out / "deep" / "untitled folder")
         tabs = [{"root": str(out), "path": str(out / "m.py")}]
         assert request(ctl, 4, cmd="finder.tabs.set", id=t.id, tabs=tabs)["ok"]
         assert actions.load(t.id).finder_tabs == tabs
