@@ -345,3 +345,34 @@ def copy_path(path: str, project: str | None, relative: bool) -> str:
         text = p.relative_to(root).as_posix() if p != root else "."
     files.copy_to_clipboard(text)
     return text
+
+
+# ---------------------------------------------------------------- Open With (2a and the Finder tabs)
+
+def apps_for(p: Path) -> list[dict]:
+    """The apps that macOS offers to open `p`, as Finder's Open With lists them: the default app
+    first (`default: True`), then the others in Finder's order of names. One row per app: an app
+    installed twice (two versions, two folders) shows once, under the path that macOS ranks first."""
+    from AppKit import NSWorkspace  # noqa: PLC0415
+    from Foundation import NSURL, NSBundle, NSFileManager  # noqa: PLC0415
+
+    if not p.exists():
+        raise FileNotFoundError(p.name)
+    ws, fm = NSWorkspace.sharedWorkspace(), NSFileManager.defaultManager()
+    url = NSURL.fileURLWithPath_(str(p))
+    d = ws.URLForApplicationToOpenURL_(url)
+    default = str(d.path()) if d is not None else None
+    urls = ([d] if d is not None else []) + list(ws.URLsForApplicationsToOpenURL_(url) or [])
+    seen, apps = set(), []
+    for u in urls:
+        path = str(u.path())
+        b = NSBundle.bundleWithPath_(path)
+        key = str(b.bundleIdentifier()) if b is not None and b.bundleIdentifier() else path
+        if key in seen:
+            continue
+        seen.add(key)
+        name = str(fm.displayNameAtPath_(path))
+        apps.append({"path": path, "name": name[:-4] if name.endswith(".app") else name, "default": path == default})
+    first = [a for a in apps if a["default"]]
+    order = {n: i for i, n in enumerate(_sorted_names([a["name"] for a in apps if not a["default"]]))}
+    return first + sorted((a for a in apps if not a["default"]), key=lambda a: order[a["name"]])

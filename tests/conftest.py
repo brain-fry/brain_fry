@@ -1,6 +1,14 @@
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _no_forgotten_sessions(monkeypatch):
+    """events.FORGOTTEN (the sessions of deleted tasks) lives as long as the process: each test starts with none."""
+    from brain_fry import events
+
+    monkeypatch.setattr(events, "FORGOTTEN", set())
+
+
 @pytest.fixture
 def home(tmp_path, monkeypatch):
     """A fake $HOME with its own ~/.brain_fry/, so that no test touches the real ones."""

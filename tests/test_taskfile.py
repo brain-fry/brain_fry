@@ -1,3 +1,7 @@
+import pytest
+import yaml
+
+from brain_fry import taskfile
 from brain_fry.taskfile import Task, Thread, dumps, loads
 
 NASTY = """Here is the plan.
@@ -70,6 +74,19 @@ def test_unquoted_timestamp_from_a_hand_edit():
     text = dumps(make_task()).replace("created: '2026-11-09T14:00:00+01:00'", "created: 2026-11-09T14:00:00+01:00")
     assert "created: 2026-11-09T14:00:00+01:00" in text
     assert isinstance(loads(text).created, str)
+
+
+def test_frontmatter_loader_is_safe_and_as_the_pure_python_one(monkeypatch):
+    """libyaml's safe loader when PyYAML has it, else the pure-Python one: the same task either way,
+    and a Python tag is refused with a YAML error (which all_tasks skips)."""
+    assert taskfile._YAML_LOADER is (yaml.CSafeLoader if yaml.__with_libyaml__ else yaml.SafeLoader)
+    text = dumps(make_task())
+    evil = text.replace("prio: planning", "prio: !!python/object/apply:os.getcwd []")
+    for loader in (taskfile._YAML_LOADER, yaml.SafeLoader):
+        monkeypatch.setattr(taskfile, "_YAML_LOADER", loader)
+        assert loads(text) == make_task()
+        with pytest.raises(yaml.YAMLError):
+            loads(evil)
 
 
 def test_display_title_falls_back_to_first_prompt():

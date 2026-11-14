@@ -12,7 +12,8 @@ from pathlib import Path
 from . import paths, projects
 from .util import write_atomic
 
-HOOK_EVENTS = ("UserPromptSubmit", "Stop", "Notification", "SessionEnd")
+# StopFailure since 2026-11-14: a turn that ends on an API error fires it instead of Stop.
+HOOK_EVENTS = ("UserPromptSubmit", "Stop", "StopFailure", "Notification", "SessionEnd")
 IGNORE_LINE = ".brain_fry/"
 
 
@@ -35,6 +36,38 @@ def hook_command() -> str:
 
 def _ours(hook: dict) -> bool:
     return hook.get("command") == hook_command()
+
+
+def _has_ours(groups) -> bool:
+    """The hook groups of one event in settings.json run our hook."""
+    return isinstance(groups, list) and any(
+        isinstance(g, dict) and isinstance(h, dict) and _ours(h) for g in groups for h in g.get("hooks") or [])
+
+
+def missing_events(settings_text: str) -> list[str]:
+    """The events of HOOK_EVENTS that the settings.json do not run our hook for: an install
+    by an older version of Brain Fry. Empty when the file cannot be read as JSON (cannot tell)."""
+    try:
+        data = json.loads(settings_text)
+    except ValueError:
+        return []
+    hooks = data.get("hooks") if isinstance(data, dict) else None
+    hooks = hooks if isinstance(hooks, dict) else {}
+    return [e for e in HOOK_EVENTS if not _has_ours(hooks.get(e))]
+
+
+def hook_state(settings: Path | None = None) -> tuple[bool, bool]:
+    """(installed, outdated), for the app's banner. Installed: ~/.brain_fry/hook.sh exists and
+    settings.json runs it. Outdated: that copy differs from this version's hook.sh, or an event
+    of HOOK_EVENTS lacks it. Either way `bf install` fixes it."""
+    settings = settings or default_settings()
+    try:
+        text = settings.read_text()
+        if not (paths.hook_file().exists() and hook_command() in text):
+            return False, False
+        return True, paths.hook_file().read_text() != packaged_hook() or bool(missing_events(text))
+    except OSError:
+        return False, False
 
 
 def _backup(path: Path) -> Path:
@@ -61,7 +94,7 @@ def install(settings: Path | None = None, gitignore: Path | None = None) -> list
     added = []
     for event in HOOK_EVENTS:
         groups = hooks.setdefault(event, [])
-        if not any(_ours(h) for g in groups for h in g.get("hooks", [])):
+        if not _has_ours(groups):
             groups.append({"hooks": [{"type": "command", "command": hook_command(), "timeout": 10}]})
             added.append(event)
     if added:

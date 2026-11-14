@@ -58,9 +58,10 @@ function makeFinderTab(tid, root, chain = []) {
   return tab;
 }
 
-// Cmd+N E (grid.js): a Finder tab at the project folder, in pane n.
-function newFinder(tid, n) {
-  const root = wsProject(tid);
+// Cmd+N E (grid.js): a Finder tab at the project folder, in pane n. `folder`: at that folder,
+// anywhere on the disk (a folder dropped from Finder on a pane, drop.js).
+function newFinder(tid, n, folder = null) {
+  const root = folder || wsProject(tid);
   if (!root) { toast('No project: a Finder tab starts at the project folder.'); return; }
   const w = work(tid); // its owner: a task, or a project's tabs (ownerFor)
   const tab = makeFinderTab(tid, root);
@@ -69,7 +70,7 @@ function newFinder(tid, n) {
   refreshFinder(tab).then(() => saveFinderTabs(tid));
 }
 
-// The tabs of the task file, each in the pane that the window remembers (restoreFiles, files.js).
+// The tabs of the task file, each in the pane that the grid remembers (restoreFiles, files.js).
 async function restoreFinderTabs(tid, grid) { // tid: a task, or a project's tabs
   const w = work(tid);
   for (const [i, t] of ((ownerData(tid) || {}).finderTabs || []).entries()) {
@@ -276,19 +277,20 @@ function fdSelect(tab, i, name) {
   fdChanged(tab);
 }
 
-// Double-click or Cmd+Down. A folder becomes the first column; a file of the project opens in a tab
-// of column 3, any other file, or an app, in its default app (as Finder does).
+// Double-click or Cmd+Down. A folder becomes the first column; a file opens in a tab of column 3
+// (outside the project: by its absolute path, files.tab_path), an app in itself, and a file that
+// the editor cannot show (binary, too large) in its default app.
 function fdOpen(tab, i) {
   const c = fdColumns(tab)[i];
   const e = fdEntry(tab, i);
   if (!c || !e) return;
   const path = fJoin(c.folder, e.name);
   if (e.dir) { tab.root = path; tab.chain = []; fdChanged(tab); return; }
+  if (e.pkg) { send('finder.open', { path }); return; }
   const rel = fdRel(tab.tid, path);
-  if (rel === null || e.pkg) { send('finder.open', { path }); return; }
   const view = wsId(); // the file opens in the view, as from 2a (no task selected: a project tab)
   const n = openPane(work(view)); // never over a terminal nor a Finder tab (grid.js)
-  openFile(view, rel, true, n === tab.pane ? FD_NEIGHBOUR[tab.pane] : n, true, true);
+  openFile(view, rel === null ? path : rel, true, n === tab.pane ? FD_NEIGHBOUR[tab.pane] : n, true, true);
 }
 
 // Cmd+Up: the enclosing folder becomes the first column; the selection stays.
@@ -532,13 +534,17 @@ function finderMenu(tab, e) {
     { label: 'New Folder', run: () => fdNew(tab, into, true) },
     '-',
   ];
-  if (!row) { openCtx(e.clientX, e.clientY, [...create(c.folder), paste(c.folder), '-', refresh]); return; }
+  // Open in Finder as in 2a's menu (explorer.js): a folder opens, a file shows selected in its folder
+  const inFinder = (p, reveal) => ({ label: 'Open in Finder', run: () => send('finder.open', { path: p, reveal }) });
+  if (!row) { openCtx(e.clientX, e.clientY, [...create(c.folder), inFinder(c.folder, false), '-', paste(c.folder), '-', refresh]); return; }
   if (tab.chain[i] !== row.dataset.name) { tab.chain = [...tab.chain.slice(0, i), row.dataset.name]; fdChanged(tab, false); }
   const ent = c.list.entries.find((x) => x.name === row.dataset.name);
   const path = fJoin(c.folder, ent.name);
   openCtx(e.clientX, e.clientY, [
     ...create(ent.dir ? path : c.folder),
-    { label: ent.dir ? 'Open in Finder' : 'Open in default app', run: () => send('finder.open', { path }) },
+    ...(ent.dir ? [] : [{ label: 'Open in default app', run: () => send('finder.open', { path }) }]),
+    { label: 'Open With', sub: () => openWithItems('finder.apps', { path }, (app) => send('finder.open', { path, app })) },
+    inFinder(path, !ent.dir),
     { label: 'Open a terminal here', run: () => finderTerminal(tab, path) },
     '-',
     { label: 'Cut', run: () => setFinderClip(tab, path, true) },

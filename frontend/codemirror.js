@@ -8,7 +8,10 @@ import { indentWithTab } from '@codemirror/commands';
 import { StreamLanguage, syntaxTree } from '@codemirror/language';
 import { openSearchPanel, searchPanelOpen, selectMatches, SearchQuery } from '@codemirror/search';
 import { unifiedMergeView } from '@codemirror/merge';
-import { oneDark } from '@codemirror/theme-one-dark';
+import { oneDark, oneDarkHighlightStyle } from '@codemirror/theme-one-dark';
+import { highlightCode } from '@lezer/highlight';
+import { StyleModule } from 'style-mod';
+import { markdownToHTML, escHTML } from './markdown_html.js';
 import { python } from '@codemirror/lang-python';
 import { javascript } from '@codemirror/lang-javascript';
 import { json } from '@codemirror/lang-json';
@@ -74,6 +77,25 @@ export function languageFor(name) {
   const make = BY_EXT[ext];
   return make ? make() : [];
 }
+
+// The markdown preview (web/mdpreview.js): the HTML of a markdown text, its fenced blocks colored
+// as One Dark colors them in the editor, for the languages of the editor (```py, ```python ...).
+const FENCE_ALIAS = { python: 'py', javascript: 'js', typescript: 'ts', shell: 'sh', console: 'sh', jsonc: 'json' };
+function highlightFence(code, lang) {
+  const make = BY_EXT[FENCE_ALIAS[lang] || lang];
+  if (!make) return null;
+  let ext = make();
+  if (Array.isArray(ext)) ext = ext[0]; // markdown: [language, the inline code marks]
+  const parser = ext && (ext.language || ext).parser; // a LanguageSupport, or a StreamLanguage
+  if (!parser) return null;
+  if (typeof document !== 'undefined' && oneDarkHighlightStyle.module) StyleModule.mount(document, oneDarkHighlightStyle.module);
+  let out = '';
+  highlightCode(code, parser.parse(code), oneDarkHighlightStyle,
+    (text, classes) => { out += classes ? `<span class="${classes}">${escHTML(text)}</span>` : escHTML(text); },
+    () => { out += '\n'; });
+  return out;
+}
+export const markdownHTML = (text) => markdownToHTML(text, highlightFence);
 
 // Cmd+G (asked by Renaud on 2026-11-11): every occurrence selected, to edit them all at once, as
 // VS Code's Select All Occurrences (Cmd+Shift+L). From the find field: every match of the query,

@@ -2,6 +2,7 @@
 
 Order per event file: apply it to the task file, append it to events.jsonl, delete it.
 A crash between the first and the last step applies that event twice on the next run.
+An event that cannot be applied (apply raises) goes to events/failed/ and the reader goes on.
 """
 
 from __future__ import annotations
@@ -20,7 +21,12 @@ from .util import iso
 log = logging.getLogger(__name__)
 
 BLOCKING = {"permission_prompt", "elicitation_dialog"}
-CREATING = {"UserPromptSubmit", "Stop", "Notification"}  # SessionEnd alone creates no task
+CREATING = {"UserPromptSubmit", "Stop", "Notification"}  # SessionEnd or StopFailure alone creates no task
+FORGOTTEN: set[str] = set()  # the sessions of the tasks deleted in this run (actions.delete): no event creates them again
+
+
+def forget(session_ids) -> None:
+    FORGOTTEN.update(session_ids)
 
 
 def pending(project: Path) -> list[tuple[Path, dict]]:
@@ -40,8 +46,9 @@ def consume(project: Path, on_event=None) -> list[str]:
     """Apply every pending event of the project. Returns the ids of the tasks that changed.
     on_event(task_id, event) is called after each applied event (the app's auto-advance).
 
-    The lock lets one reader at a time work on a project. Without it, the app's reader and
-    `bf list` or `bf consume` run by hand could both read a file before either deletes it,
+    The lock lets one reader at a time work on a project. The app has one reader, but two apps
+    with different BRAIN_FRY_HOME (bf.lock is per home) can list the same project: a sandbox that
+    points at a real project. Without the lock, both could read a file before either deletes it,
     and apply it twice. flock is released when its holder exits, even after a crash."""
     if not paths.spool_dir(project).is_dir():  # project folder moved or deleted
         return []
@@ -49,15 +56,30 @@ def consume(project: Path, on_event=None) -> list[str]:
     with paths.consume_lock(project).open("w") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         for f, ev in pending(project):
-            task_id = apply(Path(project), ev)
-            with paths.event_log(project).open("a") as log:
-                log.write(json.dumps(ev, ensure_ascii=False) + "\n")
+            try:
+                task_id = apply(Path(project), ev)
+            except Exception:
+                _set_aside(Path(project), f, ev)
+                continue
+            with paths.event_log(project).open("a") as out:
+                out.write(json.dumps(ev, ensure_ascii=False) + "\n")
             f.unlink()
             if task_id and on_event:
                 on_event(task_id, ev)
             if task_id and task_id not in changed:
                 changed.append(task_id)
     return changed
+
+
+def _set_aside(project: Path, f: Path, ev: dict) -> None:
+    """An event that cannot be applied leaves the spool for events/failed/, at its first failure, and
+    the events behind it are applied. Before 2026-11-14 it stayed: the reader failed on it every 0.5 s,
+    and every later event of the project waited (a task file that named a folder that was gone).
+    Nothing reads events/failed/. To apply such an event again, move its file back to events/."""
+    log.exception("event %s %s in %s: not applied, set aside as events/failed/%s", ev.get("hook_event_name"),
+                  short(ev.get("session_id")), project.name, f.name)  # fmt: skip
+    paths.failed_dir(project).mkdir(exist_ok=True)
+    f.replace(paths.failed_dir(project) / f.name)
 
 
 def apply(project: Path, ev: dict) -> str | None:
@@ -70,10 +92,13 @@ def _apply(project: Path, ev: dict) -> str | None:
     if not sid or not name:
         return None
     ts = iso(ev.get("bf_ts", time.time()))
-    path = paths.task_path(project, sid)
+    path = taskfile.path_of(project, sid)  # open or archived: a prompt in an archived task brings it back
     if path.exists():
         task = taskfile.load(path)
         before = _tracked(task)
+    elif sid in FORGOTTEN:  # a file put back from the Trash is found above, and its events apply again
+        log.info("event %s %s in %s: ignored, its task was deleted", name, short(sid), project.name)
+        return None
     elif name in CREATING:
         task = Task(session_ids=[sid], project=str(project), cwd=ev.get("cwd") or str(project), created=ts)
         _import_history(task, name, ev)
@@ -86,15 +111,20 @@ def _apply(project: Path, ev: dict) -> str | None:
     task.updated = ts
 
     if name == "UserPromptSubmit":
-        if task.threads and task.threads[-1].kind == "working":
-            task.threads[-1].kind = "interrupted"
-        task.threads.append(Thread(n=len(task.threads) + 1, ts=ts, prompt=ev.get("prompt") or ""))
+        if not typed_by_me(ev) and in_turn(task):
+            # The result of a background agent or shell, delivered while the turn runs (2026-11-14):
+            # nobody interrupted the turn. It goes on, and its Stop puts the reply in the open thread.
+            log.info("task %s: a background result during the turn: no thread of its own", short(task.id))
+        else:
+            if task.threads and task.threads[-1].kind == "working":
+                task.threads[-1].kind = "interrupted"
+            task.threads.append(Thread(n=len(task.threads) + 1, ts=ts, prompt=ev.get("prompt") or ""))
         _set(task, status="working", live=True, inbox=False, unread=False, notification=None, held=False)
 
     elif name == "Stop":
         # A turn can start without a prompt: a background task that finishes, or hooks
         # installed in the middle of a session. Then the thread has no prompt.
-        if not task.threads or task.threads[-1].kind != "working":
+        if not task.threads or not _open(task.threads[-1]):
             task.threads.append(Thread(n=len(task.threads) + 1, ts=ts))
         thread = task.threads[-1]
         thread.reply = ev.get("last_assistant_message") or ""
@@ -119,9 +149,27 @@ def _apply(project: Path, ev: dict) -> str | None:
         else:
             _set(task, status="waiting", live=True, inbox=True, unread=True, notification=None)
 
+    elif name == "StopFailure":
+        # The turn ended on an API error (rate limit, overload, ...): Claude Code fires this
+        # instead of Stop. The error is the thread's reply, and the kind `interrupted` keeps the
+        # digest off it: the inbox line shows the error itself (views.inbox_line).
+        if not task.threads or not _open(task.threads[-1]):
+            task.threads.append(Thread(n=len(task.threads) + 1, ts=ts))
+        task.threads[-1].reply, task.threads[-1].kind = error_text(ev), "interrupted"
+        _set(task, status="waiting", live=True, inbox=True, unread=True, notification=None, held=False)
+
     elif name == "Notification":
-        if ev.get("notification_type") in BLOCKING:
+        kind = ev.get("notification_type")
+        if kind in BLOCKING:
             _set(task, status="blocked", live=True, inbox=True, unread=True, notification=ev.get("message"), held=False)
+        elif kind == "idle_prompt" and task.status == "working" and task.threads and task.threads[-1].kind == "working":
+            # Claude Code waits for my input (it sends this only when no query runs, no background
+            # agent runs and no dialog is open), but no Stop came: the turn ended without one (Esc,
+            # an error). Over, as a turn cut off by a session end, but the session stays live.
+            # A Stop that comes after all fills the thread (_open).
+            task.threads[-1].kind = "interrupted"
+            _set(task, status="waiting", live=True, inbox=True, unread=True, notification=None)
+            log.info("task %s: idle, and no Stop since the prompt: the turn is over", short(task.id))
         else:
             task.live = True
 
@@ -147,6 +195,28 @@ def typed_by_me(ev: dict) -> bool:
     if source is not None:
         return source == "user"
     return not (ev.get("prompt") or "").lstrip().startswith(MACHINE_PROMPTS)
+
+
+def in_turn(task: Task) -> bool:
+    """A turn runs: its prompt opened the last thread, and no Stop, error, idle notice or
+    session end has closed it since. Blocked counts: the dialog is part of the turn."""
+    return task.status in ("working", "blocked") and bool(task.threads) and task.threads[-1].kind == "working"
+
+
+def _open(thread: Thread) -> bool:
+    """The thread that a Stop or a StopFailure fills: the turn in progress, or a turn marked
+    over without its reply (an idle notice, a session end) whose end comes after all."""
+    return thread.kind == "working" or (thread.kind == "interrupted" and not thread.reply)
+
+
+def error_text(ev: dict) -> str:
+    """The reply of a turn that ended on an API error: Claude Code's own text ("API Error:
+    Rate limit reached"), else the error's kind and details ("API error: rate_limit (429 ...)")."""
+    text = (ev.get("last_assistant_message") or "").strip()
+    if text:
+        return text
+    details = ev.get("error_details")
+    return f"API error: {ev.get('error') or 'unknown'}" + (f" ({details})" if details else "")
 
 
 IN_FLIGHT = {"running", "pending"}
@@ -229,12 +299,13 @@ TRACKED = ("status", "live", "inbox", "unread")
 
 
 def _tracked(task: Task) -> dict:
-    return {k: getattr(task, k) for k in TRACKED} | {"threads": len(task.threads)}
+    return {k: getattr(task, k) for k in TRACKED} | {"threads": len(task.threads),
+                                                      "kind": task.threads[-1].kind if task.threads else None}
 
 
 def _log(name: str, ev: dict, project: Path, task: Task, before: dict | None) -> None:
     """One line per applied event: what it was, and what it changed in the task."""
-    detail = ev.get("notification_type") or ev.get("reason") or ""
+    detail = ev.get("notification_type") or ev.get("reason") or ev.get("error") or ""
     if name == "Notification" and ev.get("message"):
         detail += f": {ev['message']}"
     after = _tracked(task)
@@ -242,7 +313,7 @@ def _log(name: str, ev: dict, project: Path, task: Task, before: dict | None) ->
         change = "new task, " + ", ".join(f"{k} {after[k]}" for k in TRACKED)
     else:
         change = ", ".join(f"{k} {before[k]} -> {after[k]}" for k in TRACKED if before[k] != after[k]) or "no change"
-    if task.threads and (before is None or after["threads"] != before["threads"] or name == "Stop"):
+    if task.threads and (before is None or name == "Stop" or (after["threads"], after["kind"]) != (before["threads"], before["kind"])):
         th = task.threads[-1]
         change += f"; thread {th.n} {th.kind}"
     log.info("event %s%s %s %r in %s: %s", name, f" ({detail[:120]})" if detail else "", short(task.id),

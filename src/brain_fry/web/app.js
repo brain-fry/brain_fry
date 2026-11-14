@@ -9,11 +9,23 @@ const PRIOS = ['working', 'next', 'planning', 'later', 'more_later', 'never'];
 const HIDDEN_PRIOS = new Set(['later', 'more_later', 'never']);
 const OUR_KEYS = new Set(['arrowdown', 'arrowup', 'n', 't', 'j', 'p', 'd', 'e', 'b', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'g']);
 
+// The window's settings (sizes of the panels, hidden columns, switches, the wrap of each file): a
+// key --> value map in ~/.brain_fry/window.json. The backend serves it as /window.js, which runs
+// before this script (index.html), so `stored` answers at once, while the scripts load. `store`
+// sends each change (window.set); null forgets a key. Kept as JSON text, so that a caller never
+// holds the map's own object. WebKit's localStorage is wiped at each start (DESIGN_DETAILS.md, "App").
+const SETTINGS = new Map(Object.entries(window.__windowSettings || {}).map(([k, v]) => [k, JSON.stringify(v)]));
+const unsentSettings = new Map(); // stored before the connection: sent when it opens (connectCtl)
+
 function stored(key, fallback) {
-  try { const v = localStorage.getItem(key); return v === null ? fallback : JSON.parse(v); } catch { return fallback; }
+  const v = SETTINGS.get(key);
+  return v === undefined ? fallback : JSON.parse(v);
 }
 function store(key, value) {
-  try { localStorage.setItem(key, JSON.stringify(value)); } catch { /* private mode: not remembered */ }
+  if (value === null || value === undefined) SETTINGS.delete(key); else SETTINGS.set(key, JSON.stringify(value));
+  const v = SETTINGS.has(key) ? JSON.parse(SETTINGS.get(key)) : null;
+  if (ctl && ctl.readyState === WebSocket.OPEN) send('window.set', { key, value: v });
+  else unsentSettings.set(key, v);
 }
 
 const S = {
@@ -22,6 +34,7 @@ const S = {
   selected: null, // the task in Dev mode (4a)
   boardSel: null, // the card under the cursor in Organize mode
   showHidden: stored('showHidden', false),
+  search: '', // the text of the board's search field (boardColumns), in memory only
   starting: null, // task id: select sent, waiting for its session to start
   terms: new Map(), // task id -> {id, el, term, fit, search, gen, ws}
   picker: null, // {mode, items, index, moved}; mode 'new' (Cmd+T: new task) or 'open' (Cmd+P: switch project)
@@ -46,12 +59,19 @@ const targetId = () => (S.mode === 'organize' ? S.boardSel : S.selected);
 let ctl;
 function connectCtl() {
   ctl = new WebSocket(`ws://${location.host}/ctl`);
-  ctl.onopen = () => { for (const m of window.__errors) reportError(m); }; // errors from before the connection
+  ctl.onopen = () => {
+    for (const m of window.__errors) reportError(m); // errors from before the connection
+    for (const [key, value] of unsentSettings) send('window.set', { key, value });
+    unsentSettings.clear();
+    archiveAsked = null; // a new connection: tell the backend again (an older page may have asked)
+    askArchive();
+  };
   ctl.onmessage = (ev) => {
     const m = JSON.parse(ev.data);
     if (m.type === 'state') onState(m);
     else if (m.type === 'prompted') onPrompted(m);
     else if (m.type === 'browser') onBrowser(m); // browser.js
+    else if (m.type === 'open') onShellOpen(m); // `bf <file>` in a terminal tab (files.js)
     else if (m.type === 'reply') {
       const p = pending.get(m.req);
       if (p) { pending.delete(m.req); if (m.ok) p.resolve(m.data); else p.reject(new Error(m.error)); }
@@ -362,6 +382,8 @@ function setMode(mode, doRender = true) {
     if (w > 100) S.agentWidth = Math.round(w);
   }
   S.mode = mode;
+  // a hidden field keeps the focus in WebKit, and a field keeps its keys: Cmd+B would not come back
+  if (document.activeElement === $('#board-search')) $('#board-search').blur();
   if (mode === 'dev') swapAtOnce(); // the selects that follow in this frame swap 4a at once (showTerm)
   $('#dev').hidden = mode === 'organize'; // Review mode shows its panels in #dev, beside 4a
   $('#board').hidden = mode !== 'organize';
@@ -668,9 +690,19 @@ function hue(name) {
   return h;
 }
 
+// The search of the board (Renaud, 2026-11-14): a card stays when every word of the field occurs,
+// ignoring case, in what the state holds for its task. While the field has text, the hidden columns
+// and the archived tasks show too (old tasks are there), whatever H says.
+const searchWords = () => S.search.toLowerCase().split(/\s+/).filter(Boolean);
+const searchText = (t) => [t.title, t.shortTitle, t.project, t.digest, t.notes,
+  ...(t.threads || []).flatMap((th) => [th.digest, th.prompt])].join('\n').toLowerCase();
+
 function boardColumns(st) {
-  const tasks = Object.values(st.tasks).filter((t) => S.showHidden || t.status !== 'done');
-  return PRIOS.filter((p) => S.showHidden || !HIDDEN_PRIOS.has(p)).map((prio) => ({
+  const words = searchWords();
+  const all = S.showHidden || words.length > 0;
+  const match = (t) => { const text = searchText(t); return words.every((w) => text.includes(w)); };
+  const tasks = Object.values(st.tasks).filter((t) => (all || t.status !== 'done') && (!words.length || match(t)));
+  return PRIOS.filter((p) => all || !HIDDEN_PRIOS.has(p)).map((prio) => ({
     prio,
     ids: tasks.filter((t) => t.prio === prio).sort((a, b) => Date.parse(b.updated) - Date.parse(a.updated)).map((t) => t.id),
   }));
@@ -734,7 +766,7 @@ function openWorking(n) {
 // next, so that only the current project's tasks are in the inbox. The backend chooses
 // them again (actions.park_others); this list only enables the button.
 function parkable(st, cur) {
-  return cur ? Object.values(st.tasks).filter((t) => t.prio === 'working' && t.projectPath !== cur) : [];
+  return cur ? Object.values(st.tasks).filter((t) => t.prio === 'working' && t.projectPath !== cur && t.status !== 'done') : [];
 }
 
 async function parkOthers() {
@@ -754,6 +786,27 @@ async function parkOthers() {
 function setShowHidden(on) {
   S.showHidden = on;
   store('showHidden', on);
+  render();
+}
+
+// The backend sends every archived task only while the board can show them (Organize mode, with H
+// on or a search), so that the state stays lean in Dev mode, where the hook events arrive. Otherwise
+// it sends the archived tasks that this run touched; `ids` names the ones that the page holds now
+// (an archived card opened in Dev mode, the task that Cmd+Up goes back to).
+let archiveAsked = null; // what the backend was told last; null: nothing yet on this connection
+function askArchive() {
+  const on = S.mode === 'organize' && (S.showHidden || searchWords().length > 0);
+  if (on === archiveAsked || !ctl || ctl.readyState !== WebSocket.OPEN) return;
+  archiveAsked = on;
+  send('archive.show', { on, ids: [S.selected, S.idle, S.lastAnswered].filter(Boolean) });
+}
+
+// The search field of the board bar: typing filters the cards (boardColumns). Esc clears it and
+// gives the keyboard back to the board; Enter gives it to the board, the cursor on the first card
+// that matches (Enter there opens it). `/` on the board puts the cursor in it.
+function setSearch(text) {
+  S.search = text;
+  $('#board-search').value = text;
   render();
 }
 
@@ -819,6 +872,7 @@ function newTask(projectPath) { // also called by the selftest
 function render() {
   const st = S.state;
   if (!st) return;
+  askArchive(); // the mode, H or the search may have changed
   if (S.dragging && S.mode === 'organize') return; // replacing the dragged card would end the drag; dragend renders
   for (const b of document.querySelectorAll('.mode')) b.classList.toggle('on', b.dataset.mode === S.mode);
   if (S.mode === 'organize') ensureBoardSel(boardColumns(st));
@@ -990,18 +1044,27 @@ function renderAgent(st) {
 }
 
 // The empty 4a (no task selected): a calm photo, no text, nothing to watch or start (Renaud,
-// 2026-11-10). A different photo each time it appears. Credits: web/calm/CREDITS.md.
-const CALM_PHOTOS = ['beech-forest-fog', 'lone-tree-fog', 'tree-mist-reflection', 'snowy-lake-fog',
-  'snowfield-mist', 'misty-hills', 'peak-in-cloud', 'argentine-ridge', 'diablerets-summit',
-  'diablerets-rampart', 'creux-de-champ'];
+// 2026-11-10). A different photo each time it appears. The photos are the files of web/calm/,
+// which is not in git (Renaud, 2026-11-13): without it, 4a stays dark. Credits: web/calm/CREDITS.md.
+let calmPhotos = [];
+fetch('calm.json').then((r) => r.json()).then((names) => {
+  calmPhotos = names;
+  const el = $('#calm');
+  if (!el.hidden && !el.dataset.photo) pickPhoto(el); // the photo of the start came before the list
+}).catch(() => {});
+
+function pickPhoto(el) {
+  const others = calmPhotos.filter((p) => p !== el.dataset.photo);
+  if (!others.length) return;
+  el.dataset.photo = others[Math.floor(Math.random() * others.length)];
+  el.style.backgroundImage = `url(calm/${el.dataset.photo})`;
+}
 
 function calm(on) {
   const el = $('#calm');
   if (on && (el.hidden || el.fadingOut)) { // fading out: back, with the same photo
     if (el.hidden) {
-      const others = CALM_PHOTOS.filter((p) => p !== el.dataset.photo);
-      el.dataset.photo = others[Math.floor(Math.random() * others.length)];
-      el.style.backgroundImage = `url(calm/${el.dataset.photo}.jpg)`;
+      pickPhoto(el);
       el.hidden = false;
     }
     fadeIn(el, PHOTO_IN_MS, 'ease-in-out'); // after the task's fade out and the pause (showTerm)
@@ -1185,7 +1248,13 @@ document.addEventListener('keydown', (e) => {
   // it has the focus whenever a terminal (4a, 3b) has it, and the terminal's Cmd keys are ours
   const field = e.target.matches && e.target.matches('input, select, textarea');
   if (field && !e.target.classList.contains('xterm-helper-textarea')) return;
-  // Cmd+Option+1 to 4: show or hide a column (layout.js). Review mode: its side panel and 4a, as Cmd+1 and Cmd+4
+  // the right-click menu of a card: Esc closes it (explorer.js), no other key acts on the board meanwhile
+  if (S.mode === 'organize' && !$('#ctx').hidden) {
+    if (e.key !== 'Escape') { e.preventDefault(); e.stopPropagation(); }
+    return;
+  }
+  // Cmd+Option+1 to 4: show or hide a column, 5: columns 1 and 4a (layout.js). Review mode: its side
+  // panel and 4a, as Cmd+1 and Cmd+4; 5 does nothing there
   const col = columnKey(e);
   if (col) {
     if (S.mode === 'dev') toggleColumn(col);
@@ -1204,6 +1273,7 @@ document.addEventListener('keydown', (e) => {
     else if (/^[1-9]$/.test(k)) openWorking(Number(k));
     else if (k === 'Escape') setMode('dev');
     else if (k === 'h' || k === 'H') setShowHidden(!S.showHidden);
+    else if (k === '/') $('#board-search').focus(); // the search of the board bar (preventDefault: no "/" in it)
     else if (k === 'e') act('archive');
     else if (k === 'f') act('fork');
     else if (k === 'n') openPicker();
@@ -1253,8 +1323,67 @@ document.addEventListener('click', (e) => {
   if (e.target.id === 'picker') return closePicker();
 });
 
+// The right-click menu of a card (Renaud, 2026-11-14): Archive (Unarchive on an archived card) and
+// Delete. The menu of the explorer (#ctx, openCtx in explorer.js); the cursor moves to the card first.
+$('#columns').addEventListener('contextmenu', (e) => {
+  e.preventDefault(); // WebKit's own menu
+  const cardEl = e.target.closest('.card');
+  const id = cardEl && cardEl.dataset.card;
+  const t = id && S.state && S.state.tasks[id];
+  if (!t) return;
+  S.boardSel = id;
+  $('#board').focus();
+  render();
+  openCtx(e.clientX, e.clientY, [
+    { label: t.status === 'done' ? 'Unarchive' : 'Archive', key: 'E', run: () => send('archive', { id }) },
+    { label: 'Delete', run: () => deleteTask(id) },
+  ]);
+});
+
+// Delete: the task file goes to the Trash of macOS (Finder's Put Back brings it back), its session
+// and its terminal tabs end (the command `delete` of core.py). The cursor moves to the next card of
+// its column, or to the one above.
+async function deleteTask(id) {
+  const t = S.state && S.state.tasks[id];
+  if (!t) return;
+  const name = t.shortTitle || t.title || 'untitled';
+  if (!confirm(`Move the task "${name}" to the Trash?${t.pty ? ' Its Claude Code session ends.' : ''}`)) return;
+  const col = boardColumns(S.state).find((c) => c.ids.includes(id));
+  const ids = col ? col.ids : [];
+  const i = ids.indexOf(id);
+  try { await request('delete', { id }); } catch (e) { toast(`Could not delete the task: ${e.message}`); return; }
+  delete S.state.tasks[id]; // no flash of its card before the state push
+  S.state.inbox = S.state.inbox.filter((x) => x !== id);
+  if (S.boardSel === id) S.boardSel = ids[i + 1] || ids[i - 1] || null;
+  if (S.lastAnswered === id) S.lastAnswered = null;
+  if (S.selected === id || S.idle === id) { // as at start: the idle screen shows the task that I opened last
+    S.selected = null;
+    S.starting = null;
+    showTerm(null);
+    showIdle(lastOpenedAny());
+  }
+  const term = S.terms.get(id); // its Claude Code terminal (4a)
+  if (term) { if (term.ws) { term.ws.onclose = null; term.ws.close(); } term.term.dispose(); term.el.remove(); S.terms.delete(id); }
+  render();
+}
+
 $('#new-btn').addEventListener('click', () => openPicker());
 $('#park-btn').addEventListener('click', () => { parkOthers(); $('#board').focus(); }); // the board keys keep working
+$('#board-search').addEventListener('input', (e) => { S.search = e.target.value; render(); });
+$('#board-search').addEventListener('keydown', (e) => { // the document's handler leaves a text field its keys
+  if (e.isComposing) return;
+  if (e.key === 'Escape') {
+    e.preventDefault();
+    setSearch('');
+    $('#board').focus();
+  } else if (e.key === 'Enter') {
+    e.preventDefault();
+    const first = S.state && boardColumns(S.state).find((c) => c.ids.length);
+    if (first) S.boardSel = first.ids[0];
+    $('#board').focus();
+    render();
+  }
+});
 
 document.addEventListener('change', (e) => {
   if (e.target.id === 'show-hidden') { setShowHidden(e.target.checked); $('#board').focus(); }

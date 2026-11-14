@@ -1,4 +1,4 @@
-"""What the inbox and the app show for a task. Shared by `bf list` and the app."""
+"""What the inbox and the app show for a task."""
 
 from __future__ import annotations
 
@@ -6,9 +6,7 @@ import re
 from datetime import datetime
 from pathlib import Path
 
-from .taskfile import PRIOS, Task
-
-PRIO_ORDER = {p: i for i, p in enumerate(PRIOS)}
+from .taskfile import Task
 
 
 def epoch(ts: str) -> float:
@@ -32,19 +30,17 @@ def inbox_order(t: Task):
     return (not t.inbox, t.status != "blocked", -epoch(t.updated))
 
 
-def board_order(t: Task):
-    return (PRIO_ORDER.get(t.prio, 99), -epoch(t.updated))
-
-
-def project_order(projects: list[dict], tasks: list[Task]) -> list[dict]:
+def project_order(projects: list[dict], tasks: list[Task], archived: dict[str, tuple] | None = None) -> list[dict]:
     """The projects of the dropdown, Cmd+P and Cmd+T, the most recently used first: by the
     last `opened` of their tasks (archived ones too), then, for projects whose tasks were
     never opened, by their last `updated`; projects without tasks keep the order of
-    projects.json. Each project gets `last`: that time, as ISO text, or None."""
+    projects.json. Each project gets `last`: that time, as ISO text, or None. `tasks`: the open
+    ones; `archived`: project path --> (opened, updated, ISO text) of its latest archived task
+    (actions.archive_times), so that a project whose tasks are all archived keeps its place."""
     latest: dict[str, tuple[float, float, str]] = {}  # project path -> (opened, updated, ISO text) of its latest task
-    for t in tasks:
-        k = str(Path(t.project))
-        cand = (epoch(t.opened or ""), epoch(t.updated or ""), t.opened or t.updated)
+    cands = [(str(Path(t.project)), (epoch(t.opened or ""), epoch(t.updated or ""), t.opened or t.updated)) for t in tasks]
+    cands += [(str(Path(k)), v) for k, v in (archived or {}).items()]
+    for k, cand in cands:
         if k not in latest or cand[:2] > latest[k][:2]:
             latest[k] = cand
 
@@ -111,6 +107,7 @@ def project_tabs_json(tabs: dict, shells: list[dict] | None = None) -> dict:
         "finderTabs": tabs["finder_tabs"],
         "shells": shells or [],
         "terminalTabs": len(tabs["terminal_tabs"]),
+        "grid": tabs.get("grid") or {},
     }
 
 
@@ -152,4 +149,5 @@ def task_json(t: Task, pty_gen: int | None, shells: list[dict] | None = None, el
         "finderTabs": t.finder_tabs,
         "shells": shells or [],  # terminal tabs (3b) that run now: {key, gen, title}
         "terminalTabs": len(t.terminal_tabs),  # the shells that the select starts: veil.js waits for them
+        "grid": t.grid,  # where each tab sits (grid.js, loadGrid)
     }

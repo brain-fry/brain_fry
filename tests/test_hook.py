@@ -30,6 +30,18 @@ def test_writes_one_event_in_the_nearest_project(home):
     assert f"Stop s1 --> {proj}" in (home / ".brain_fry" / "logs" / "hook.log").read_text()
 
 
+def test_any_event_passes_through(home):
+    """StopFailure (a turn that ended on an API error) is written like any other event."""
+    proj = home / "proj"
+    (proj / ".brain_fry").mkdir(parents=True)
+    r = run_hook(home, {"session_id": "s1", "hook_event_name": "StopFailure", "cwd": str(proj), "error": "rate_limit",
+                        "error_details": "429 Too Many Requests", "last_assistant_message": "API Error: Rate limit reached"})
+    assert (r.returncode, r.stdout) == (0, "")
+    [ev] = spooled(proj)
+    assert (ev["hook_event_name"], ev["error"], ev["last_assistant_message"]) == (
+        "StopFailure", "rate_limit", "API Error: Rate limit reached")
+
+
 def test_nested_project_wins(home):
     outer, inner = home / "outer", home / "outer" / "inner"
     (outer / ".brain_fry").mkdir(parents=True)

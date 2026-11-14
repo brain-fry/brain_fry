@@ -170,10 +170,6 @@ def needs_call(task: Task) -> bool:
     return any(th.kind == "pending" for th in task.threads)
 
 
-def pending_tasks(project: Path) -> list[Task]:
-    return [t for t in taskfile.all_tasks(project) if needs_call(t)]
-
-
 def digest_task(task: Task, call=call_sonnet) -> Task:
     instructions = paths.inbox_prompt_file()
     if instructions.exists():
@@ -190,7 +186,7 @@ def digest_task(task: Task, call=call_sonnet) -> Task:
         _release(task)
         raise
     with taskfile.LOCK:
-        fresh = taskfile.load(paths.task_path(Path(task.project), task.id))
+        fresh = taskfile.load(taskfile.path_of(Path(task.project), task.id))  # archived meanwhile: in the archive
         held = fresh.held
         apply_result(fresh, result, sent)
         taskfile.save(fresh)
@@ -207,20 +203,8 @@ def _release(task: Task) -> None:
     """The digest failed: a held reply goes to the inbox all the same (it must never wait
     for a digest that does not come)."""
     with taskfile.LOCK:
-        fresh = taskfile.load(paths.task_path(Path(task.project), task.id))
+        fresh = taskfile.load(taskfile.path_of(Path(task.project), task.id))
         if fresh.held:
             actions.settle_hold(fresh, waits=False)
             taskfile.save(fresh)
             log.info("task %s: the digest failed: the held reply goes to the inbox", short(task.id))
-
-
-def digest_project(project: Path, call=call_sonnet) -> tuple[list[str], list[str]]:
-    """Digest every task that needs it (`needs_call`). Returns (changed ids, error messages)."""
-    changed, errors = [], []
-    for task in pending_tasks(project):
-        try:
-            digest_task(task, call)
-            changed.append(task.id)
-        except DigestError as e:
-            errors.append(f"{task.id[:8]}: {e}")
-    return changed, errors

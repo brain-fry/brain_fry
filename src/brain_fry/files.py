@@ -39,14 +39,23 @@ def resolve(project: str | Path, rel: str) -> Path:
     return p
 
 
-def relative_in(project: str | Path, path: str | Path) -> str:
-    """An absolute path (the save panel's choice) as a path relative to the project, which it
-    must be inside of (3a shows files of the project only)."""
+# The file tabs of column 3 name a file of the project by its path relative to the project, and any
+# other file by its absolute path (asked by Renaud on 2026-11-14; DESIGN_DETAILS.md "2a, 3a, 3b",
+# files outside the project). A relative path never starts with "/". The explorer (2a) and its
+# commands stay inside the project: they use `resolve`, the tabs use `locate`.
+
+
+def tab_path(project: str | Path, path: str | Path) -> str:
+    """How a tab names the file at `path` (absolute; the open panel's or the save panel's choice,
+    a link, `bf`): relative to the project when it is inside it, else absolute."""
     root = Path(project).resolve()
     p = Path(path).resolve()
-    if p == root or root not in p.parents:
-        raise PermissionError(f"Not saved: {p} is outside the project {root.name}. 3a saves files of the project only.")
-    return p.relative_to(root).as_posix()
+    return p.relative_to(root).as_posix() if root in p.parents else str(p)
+
+
+def locate(project: str | Path, path: str) -> Path:
+    """The file of a tab: `path` relative to the project (which it must stay inside), or absolute."""
+    return Path(path).resolve() if path.startswith("/") else resolve(project, path)
 
 
 LINE_FRAGMENT = re.compile(r"L(\d+)(?:-L?\d+)?")  # #L2, #L2-5, #L2-L5: line 2
@@ -55,7 +64,7 @@ LINE_FRAGMENT = re.compile(r"L(\d+)(?:-L?\d+)?")  # #L2, #L2-5, #L2-L5: line 2
 def link_target(project: str | Path, cwd: str | None, target: str) -> dict:
     """A file link of a terminal, as Claude Code writes it (OSC 8, from a Markdown link):
     `hello.py#L2`, `docs/a%20b.md`, `/abs/x.py`, `file:///abs/x.py`. A relative target is
-    relative to the session's cwd. Returns {"path": relative to the project, "line": n or None}.
+    relative to the session's cwd. Returns {"path": as a tab names it (tab_path), "line": n or None}.
     See DESIGN_DETAILS.md "Browser (3a)", file links in 4a."""
     s = target.strip()
     if s[:5].lower() == "file:":
@@ -68,14 +77,36 @@ def link_target(project: str | Path, cwd: str | None, target: str) -> dict:
         raise ValueError(f"not a file: {target}")
     base = Path(cwd) if cwd and Path(cwd).is_dir() else Path(project)
     p = (base / path).resolve()  # an absolute path replaces the base
-    root = Path(project).resolve()
-    if p != root and root not in p.parents:
-        raise PermissionError(f"outside the project: {target}")
     if not p.exists():
         raise FileNotFoundError(f"no such file: {target}")
     if p.is_dir():
         raise ValueError(f"a folder, not a file: {target}")
-    return {"path": p.relative_to(root).as_posix(), "line": int(m.group(1)) if m else None}
+    return {"path": tab_path(project, p), "line": int(m.group(1)) if m else None}
+
+
+LINE_SUFFIX = re.compile(r"(.+?):(\d+)(?::\d+)?")  # app.py:42, app.py:42:7 (the column is ignored)
+
+
+def bf_target(project: str | Path, target: str) -> dict:
+    """A file named by `bf <file>` in a terminal tab (shell_init.bash): an absolute path, which
+    may end in `:line` or `:line:col` when no file has that name. Returns {"path": as a tab
+    names it (tab_path), "line": n or None, "new": True when the file does not exist yet but its folder
+    does (it opens empty, and its first save writes it, as VS Code's `code new.txt`)}.
+    See DESIGN_DETAILS.md "2a, 3a, 3b", `bf <file>`."""
+    if not Path(target).is_absolute():
+        raise ValueError(f"not an absolute path: {target}")
+    p, line = Path(target), None
+    if not p.exists():
+        m = LINE_SUFFIX.fullmatch(target)
+        if m and Path(m.group(1)).is_file():
+            p, line = Path(m.group(1)), int(m.group(2))
+    p = p.resolve()
+    shown = tab_path(project, p)
+    if p.is_dir():
+        raise ValueError(f"{p.name} is a folder, not a file.")
+    if not p.exists() and not p.parent.is_dir():
+        raise FileNotFoundError(f"no such folder: {tab_path(project, p.parent)}")
+    return {"path": shown, "line": line, "new": not p.exists()}
 
 
 def version(p: Path) -> str | None:
@@ -132,7 +163,7 @@ def view_kind(rel: str) -> str | None:
 def viewable(project: str | Path, rel: str) -> tuple[Path, str]:
     """The file and its content type, for `/file/...`. Only the files of the viewers: the route
     must not serve a page (HTML, SVG) that would run in the origin of the app."""
-    p = resolve(project, rel)
+    p = locate(project, rel)
     ctype = VIEW_TYPES.get(_ext(rel))
     if not ctype or not p.is_file():
         raise FileNotFoundError(rel)
@@ -144,10 +175,23 @@ def open_external(p: Path) -> None:
     subprocess.run(["open", str(p)], check=True, capture_output=True, timeout=10)
 
 
+def open_with(p: Path, app: str) -> None:
+    """Open With (the right-click menu): `p` in that app, an `.app` bundle (`open -a`)."""
+    a = Path(app)
+    if a.suffix != ".app" or not a.is_dir():
+        raise ValueError(f"not an app: {a.name}")
+    subprocess.run(["open", "-a", str(a), str(p)], check=True, capture_output=True, timeout=10)
+
+
+def reveal_in_finder(p: Path) -> None:
+    """Open in Finder for a file: a Finder window on its folder, the file selected (`open -R`)."""
+    subprocess.run(["open", "-R", str(p)], check=True, capture_output=True, timeout=10)
+
+
 def read_file(project: str | Path, rel: str) -> dict:
     """The text of a file for the editor. For an image or a PDF only its kind and version:
     the viewer loads it from `/file/...`."""
-    p = resolve(project, rel)
+    p = locate(project, rel)
     size = p.stat().st_size
     kind = view_kind(rel)
     if kind:
@@ -167,7 +211,7 @@ def read_file(project: str | Path, rel: str) -> dict:
 def write_file(project: str | Path, rel: str, text: str, base: str | None, force: bool = False) -> dict:
     """Atomic write that keeps the file's mode. Refuses (Conflict) when the file changed on
     disk since version `base`, unless `force`."""
-    p = resolve(project, rel)
+    p = locate(project, rel)
     if not force and version(p) != base:
         raise Conflict(rel)
     mode = p.stat().st_mode if p.exists() else None
@@ -183,7 +227,7 @@ def versions(project: str | Path, rels: list[str]) -> dict[str, str | None]:
     out = {}
     for rel in rels:
         try:
-            out[rel] = version(resolve(project, rel))
+            out[rel] = version(locate(project, rel))
         except PermissionError:
             out[rel] = None
     return out

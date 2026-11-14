@@ -40,6 +40,37 @@ def test_install_is_idempotent_and_keeps_existing_hooks(home):
     assert paths.inbox_prompt_file().exists() and paths.projects_file().exists()
 
 
+def test_stop_failure_is_registered(home):
+    settings, gitignore = setup(home)
+    install.install(settings, gitignore)
+    assert len(ours(json.loads(settings.read_text()), "StopFailure")) == 1
+
+
+def test_an_install_without_a_new_event_is_outdated(home):
+    """An install by an older version lacks StopFailure: the banner asks for `bf install`."""
+    settings, gitignore = setup(home)
+    assert install.hook_state(settings) == (False, False)
+    install.install(settings, gitignore)
+    assert install.hook_state(settings) == (True, False)
+    data = json.loads(settings.read_text())
+    del data["hooks"]["StopFailure"]
+    settings.write_text(json.dumps(data))
+    assert install.missing_events(settings.read_text()) == ["StopFailure"]
+    assert install.hook_state(settings) == (True, True)
+    assert install.install(settings, gitignore)[-1].endswith("for StopFailure")
+    assert install.hook_state(settings) == (True, False)
+
+
+def test_unreadable_settings_are_not_outdated(home):
+    settings, gitignore = setup(home)
+    install.install(settings, gitignore)
+    settings.write_text(settings.read_text()[:-20])  # half written: cannot tell
+    assert install.missing_events(settings.read_text()) == []
+    assert install.hook_state(settings) == (True, False)
+    settings.write_text(json.dumps({"hooks": {"Stop": "junk"}, "x": install.hook_command()}))
+    assert install.hook_state(settings) == (True, True)
+
+
 def test_uninstall_removes_only_ours(home):
     settings, gitignore = setup(home)
     install.install(settings, gitignore)

@@ -16,7 +16,7 @@
 //   empty: the neighbour opens with it, and only that pane splits (to the right of a single
 //   column: two columns; at the bottom of the left one of two columns: the right one keeps its height).
 // - The × at the right end of a pane's tab bar: all its tabs close, after one question.
-// Uses S, $, store, stored, toast (app.js) and work,
+// Uses S, $, send, ownerData, toast (app.js) and work,
 // renderFiles, renderExplorer, focusTab, saveOpenFiles, newUntitled, closeFile, tabName (files.js), openWebTab,
 // saveWebTabs (browser.js), newShell (shells.js), at call time.
 
@@ -176,7 +176,7 @@ function setStretch(el, axis, [start, size]) {
   el.style[AXIS[axis][1]] = size;
 }
 
-// Which panes and splitters show, and where (fractions of column 3, remembered by the window).
+// Which panes and splitters show, and where (fractions of column 3, remembered in window.json).
 function layoutPanes(w) {
   const shown = shownPanes(w);
   const on = (n) => shown.includes(n);
@@ -219,8 +219,10 @@ function fitPaneShell(n) {
 }
 
 // ------------------------------------------------------------------ the grid of a task, remembered
-// By the window (localStorage `grid:<task id>`), as the sizes of the panels: which pane each tab
-// is in, the tab on screen in each pane, the pane that I used last. A tab is named by its path; a
+// In the task file (`grid`, actions.set_grid), and for a project's tabs in its project.json: which
+// pane each tab is in, the order of the tabs, the tab on screen in each pane, the pane that I used
+// last, the shape. The state brings it (ownerData(tid).grid, read at the restore); `grid.set`
+// saves it and pushes no state. A tab is named by its path; a
 // browser tab by its position among the saved ones (`web#0`), a terminal by its position among
 // the task's (`shell#0`), a Finder tab by its position among the task's (`finder#0`): their keys
 // are new at each start. Threads and untitled files are not kept. A project tab's name starts
@@ -240,42 +242,76 @@ function tabId(t) {
 }
 
 function gridRecord(w) {
-  const at = {}, act = {};
+  const at = {}, act = {}, order = [];
   for (const t of w.tabs) {
-    const id = !t.closing && t.pane !== 1 && tabId(t);
-    if (id) at[id] = t.pane;
+    const id = !t.closing && tabId(t);
+    if (!id) continue;
+    order.push(id);
+    if (t.pane !== 1) at[id] = t.pane;
   }
   for (const n of PANES) {
     const t = paneActive(w, n);
     const id = (t && tabId(t)) || w.want[n];
     if (id) act[n] = id;
   }
-  return { pane: w.pane, act, at, cols: Boolean(w.cols) };
+  return { pane: w.pane, act, at, cols: Boolean(w.cols), order };
 }
+
+const sentGrid = new Map(); // tid -> the JSON of the grid last sent: a click that changes nothing sends nothing
 
 function saveGrid(tid) {
   const w = S.work && S.work[tid];
-  if (w && w.restored && !w.restoring) store(`grid:${tid}`, gridRecord(w));
+  if (!w || !w.restored || w.restoring) return;
+  w.orderDone = true; // a change on screen: from now on the order on screen is the record (applyOrder)
+  const g = gridRecord(w);
+  const json = JSON.stringify(g);
+  if (sentGrid.get(tid) === json) return;
+  sentGrid.set(tid, json);
+  send('grid.set', { id: tid, grid: g });
 }
 
 function loadGrid(tid) {
-  const g = stored(`grid:${tid}`, null);
+  const g = (ownerData(tid) || {}).grid;
   if (g && g.act && g.at) return g;
   return { pane: 1, act: {}, at: {} };
 }
 
 // A new task or a fork starts with the grid of the task whose tabs it copied (copyView, files.js).
+// The backend copied the source's grid into the new task file (actions.new_task, fork_task), which
+// loadGrid reads; the grid on screen of a source built since the start is used as it is.
 function copyGrid(from, to) {
   const src = S.work && S.work[from];
-  store(`grid:${to}`, src && src.restored ? gridRecord(src) : loadGrid(from));
+  if (src && src.restored) work(to).grid = gridRecord(src);
 }
 
 // The tab on screen in each pane, as remembered, once that tab exists (a terminal comes later).
+// Also the order of the tabs (applyOrder), of the view's own and of its project's.
 function applyWant(w) {
   for (const n of Object.keys(w.want)) {
     const t = paneTabs(w, Number(n)).find((x) => tabId(x) === w.want[n]);
     if (t) { w.act[n] = t.path; delete w.want[n]; }
   }
+  applyOrder(w);
+  const p = !isProjectWs(w.id) && wsProject(w.id);
+  if (p && S.work[projectWs(p)]) applyOrder(S.work[projectWs(p)]);
+}
+
+// The order of an owner's tabs, as remembered, across kinds: the restore adds them kind by kind
+// (files, pages, Finder tabs), and the terminals come with a state push, before or after. Sorted
+// again each time a remembered tab comes in, until all have come, or until the grid is first saved
+// (a change on screen, saveGrid): then the order on screen is the record.
+function applyOrder(w) {
+  const order = w.restored && !w.restoring && !w.orderDone && w.grid && w.grid.order;
+  if (!order) return;
+  const rank = new Map(order.map((id, i) => [id, i]));
+  const ids = new Map(w.tabs.map((t) => [t, tabId(t)]));
+  const ranked = w.tabs.filter((t) => rank.has(ids.get(t))).length;
+  if (ranked > (w.ranked || 0)) {
+    const at = (t) => (rank.has(ids.get(t)) ? rank.get(ids.get(t)) : order.length); // the others keep their place, at the end
+    w.tabs.sort((a, b) => at(a) - at(b)); // stable
+    w.ranked = ranked;
+  }
+  if (ranked >= rank.size) w.orderDone = true;
 }
 
 // ------------------------------------------------------------------ Cmd+N: create where I say; Cmd+J: jump
@@ -298,6 +334,7 @@ function chordKey(e) {
     else if (k === 'c') jumpToClaude();
     else if (k === 'e') startTreeHints(); // explorer.js
     else if (k === 'i') startInboxHints(); // app.js
+    else if (k === 'f') jumpToTreeSearch(); // the explorer search, also from a file (treesearch.js)
     else endChord(`jump: cancelled by the key ${k}`);
     return true;
   }

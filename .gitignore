@@ -5,3 +5,4 @@ __pycache__/
 dist/
 .brain_fry/
 node_modules/
+src/brain_fry/web/calm/

@@ -3,13 +3,14 @@ load-modify-save under the task-file lock. No processes here: the app starts the
 
 from __future__ import annotations
 
+import copy
 import json
 import logging
 import threading
 import uuid
 from pathlib import Path
 
-from . import paths, projects, taskfile, views
+from . import files, paths, projects, taskfile, views
 from .taskfile import PRIOS, Task
 from .logs import short
 from .util import iso, write_atomic
@@ -22,8 +23,9 @@ class NotFound(KeyError):
 
 
 def locate(task_id: str) -> Path:
+    """The task's file, open or archived (taskfile.path_of)."""
     for project in projects.project_paths():
-        p = paths.task_path(project, task_id)
+        p = taskfile.path_of(project, task_id)
         if p.exists():
             return p
     raise NotFound(task_id)
@@ -34,7 +36,28 @@ def load(task_id: str) -> Task:
 
 
 def all_tasks() -> list[Task]:
+    """The open tasks of every project. Not the archive: the app reads this every few seconds."""
     return [t for p in projects.project_paths() for t in taskfile.all_tasks(p)]
+
+
+def archived_tasks() -> list[Task]:
+    """The archived tasks of every project, on demand (the board with H, or a search)."""
+    return [t for p in projects.project_paths() for t in taskfile.archived_tasks(p)]
+
+
+def migrate_archive() -> int:
+    """At the start of the app: every archived task file of a top folder moves to its archive."""
+    moved = 0
+    for p in projects.project_paths():
+        if n := taskfile.migrate(p):
+            log.info("archive: moved %d archived task file(s) of %s to .brain_fry/archive/", n, p.name)
+            moved += n
+    return moved
+
+
+def archive_times() -> dict[str, tuple]:
+    """Project path --> the last use of its archived tasks (taskfile.archive_last_use), for views.project_order."""
+    return {str(p): last for p in projects.project_paths() if (last := taskfile.archive_last_use(p))}
 
 
 def _update(task_id: str, **values) -> Task:
@@ -83,10 +106,27 @@ def mark_opened(task_id: str) -> Task:
 
 def archive(task_id: str) -> Task:
     """Archive, or bring back an archived task. Does not end the process. Archiving unpins:
-    the task is done, and an unarchived task comes back unpinned."""
+    the task is done, and an unarchived task comes back unpinned. The file moves to the archive
+    folder and back (taskfile.save)."""
     if load(task_id).status == "done":
         return _update(task_id, status="waiting")
     return _update(task_id, status="done", inbox=False, unread=False, pinned=False)
+
+
+def delete(task_id: str) -> Task:
+    """Delete a task (the right-click menu of a card): its file, open or archived, goes to the Trash
+    of macOS, from where Finder's Put Back brings it back. Claude Code's transcript stays. The app
+    ends the task's processes first (Core). A later event of its session creates no task in this
+    run (events.forget): a Stop already on its way would import the task again from its transcript."""
+    from . import events  # noqa: PLC0415 (events imports actions)
+
+    with taskfile.LOCK:  # an event applied meanwhile would write the file again
+        p = locate(task_id)
+        task = taskfile.load(p)
+        events.forget(task.session_ids)
+        files._move_to_trash(p)
+    log.info("task %s %r: deleted, its file is in the Trash", short(task.id), task.display_title[:50])
+    return task
 
 
 def pin(task_id: str) -> Task:
@@ -110,9 +150,10 @@ def set_prio(task_id: str, prio: str) -> Task:
 
 
 def park_others(project: Path | str) -> list[str]:
-    """The button of Organize mode: every task of the working column that is not in `project`
-    (archived ones too) moves to next, and so leaves the inbox. Returns their ids, for Undo.
-    Next, not planning (Renaud, 2026-11-13): they are interrupted work, not plans."""
+    """The button of Organize mode: every open task of the working column that is not in `project`
+    moves to next, and so leaves the inbox. Returns their ids, for Undo. Next, not planning
+    (Renaud, 2026-11-13): they are interrupted work, not plans. Archived tasks stay (since
+    2026-11-14 the archive is out of all_tasks; before, they moved too)."""
     keep = str(Path(project))
     moved = []
     for t in all_tasks():
@@ -150,24 +191,69 @@ def _finder_tabs(tabs: list[dict]) -> list[dict]:
     return clean
 
 
+def _is_pane(v) -> bool:
+    return type(v) is int and 1 <= v <= 4  # a bool is not a pane
+
+
+def _grid(grid: dict) -> dict:
+    """Where the tabs of column 3 sit (gridRecord in grid.js): `pane`, the pane that I used last;
+    `act`, pane --> the id of the tab on screen in it; `at`, tab id --> its pane (pane 1 is not
+    listed); `cols`, the shape; `order`, the tab ids in their order. A tab id is a path, or
+    `web#i`, `shell#i`, `finder#i`, with `p:` before it for a project tab. Anything else is dropped."""
+    if not isinstance(grid, dict):
+        raise ValueError(f"not a grid: {grid!r}")
+    act, at, order = (grid.get(k) for k in ("act", "at", "order"))
+    act = act if isinstance(act, dict) else {}
+    at = at if isinstance(at, dict) else {}
+    order = order if isinstance(order, list) else []
+    return {
+        "pane": grid["pane"] if _is_pane(grid.get("pane")) else 1,
+        "act": {str(k): v for k, v in act.items() if str(k) in ("1", "2", "3", "4") and isinstance(v, str)},
+        "at": {k: v for k, v in at.items() if isinstance(k, str) and _is_pane(v)},
+        "cols": grid.get("cols") is True,
+        "order": [x for x in order if isinstance(x, str)],
+    }
+
+
+def set_grid(task_id: str, grid: dict) -> Task:
+    """The grid of the task's tabs. Written only on a change, and not logged: it changes at each
+    click on a tab (the command is logged at DEBUG)."""
+    clean = _grid(grid)
+    with taskfile.LOCK:
+        task = load(task_id)
+        if task.grid != clean:
+            task.grid = clean
+            taskfile.save(task)
+    return task
+
+
 # ---------------------------------------------------------------- project tabs
 # The tabs that belong to a project rather than to one task (DESIGN_DETAILS.md, "Project tabs"):
 # they show in every task of the project, on the idle screen and in the project view. Kept in
-# <project>/.brain_fry/project.json, with the same lists as a task file.
+# <project>/.brain_fry/project.json, with the same lists as a task file, and their grid.
 
 PROJECT_TAB_LISTS = ("open_files", "terminal_tabs", "browser_tabs", "finder_tabs")
 _PROJECT_LOCK = threading.Lock()
 
 
 def project_tabs(project: str) -> dict:
-    """The project's tabs: each list of PROJECT_TAB_LISTS, empty when the file is missing or broken."""
+    """The project's tabs: each list of PROJECT_TAB_LISTS, empty when the file is missing or
+    broken, and `grid` (as a task's, set_grid), {} when there is none."""
     try:
         data = json.loads(paths.project_tabs_file(project).read_text())
     except (OSError, ValueError):
         data = {}
     if not isinstance(data, dict):
         data = {}
-    return {k: data[k] if isinstance(data.get(k), list) else [] for k in PROJECT_TAB_LISTS}
+    out = {k: data[k] if isinstance(data.get(k), list) else [] for k in PROJECT_TAB_LISTS}
+    out["grid"] = data["grid"] if isinstance(data.get("grid"), dict) else {}
+    return out
+
+
+def _write_project_tabs(project: str, data: dict) -> None:
+    file = paths.project_tabs_file(project)
+    file.parent.mkdir(exist_ok=True)
+    write_atomic(file, json.dumps(data, indent=2) + "\n")
 
 
 def set_project_tabs(project: str, key: str, values: list) -> dict:
@@ -179,12 +265,21 @@ def set_project_tabs(project: str, key: str, values: list) -> dict:
         data = project_tabs(project)
         old, data[key] = data[key], clean
         if old != clean:
-            file = paths.project_tabs_file(project)
-            file.parent.mkdir(exist_ok=True)
-            write_atomic(file, json.dumps(data, indent=2) + "\n")
+            _write_project_tabs(project, data)
     if old != clean:
         text = f"{len(old)} -> {len(clean)}" if key in PRIVATE_LISTS else f"{_brief(old)} -> {_brief(clean)}"
         log.info("project %s: %s %s", Path(project).name, key, text)
+    return data
+
+
+def set_project_grid(project: str, grid: dict) -> dict:
+    """The grid of the project's tabs, as set_grid: written only on a change, not logged."""
+    clean = _grid(grid)
+    with _PROJECT_LOCK:
+        data = project_tabs(project)
+        if data["grid"] != clean:
+            data["grid"] = clean
+            _write_project_tabs(project, data)
     return data
 
 
@@ -256,9 +351,9 @@ def end_block(task_id: str, process_status: str, since: float) -> Task | None:
 
 def new_task(project: Path, like: str | None = None) -> Task:
     """A task started from Brain Fry: born at once, before `claude --session-id` runs.
-    `like`: a task of the same project whose workspace it starts with, its file, browser and
-    terminal tabs (the front end picks it: the previous task, see newTask in app.js). A task
-    of another project, or one that does not exist, is ignored.
+    `like`: a task of the same project whose workspace it starts with, its file, browser,
+    terminal and Finder tabs and their grid (the front end picks it: the previous task, see
+    newTask in app.js). A task of another project, or one that does not exist, is ignored.
     `opened` is set: the backend selects the new task (see mark_opened)."""
     project = Path(project)
     now = iso()
@@ -269,6 +364,7 @@ def new_task(project: Path, like: str | None = None) -> Task:
         task.open_files, task.browser_tabs = list(src.open_files), list(src.browser_tabs)
         task.terminal_tabs = list(src.terminal_tabs)
         task.finder_tabs = [dict(t) for t in src.finder_tabs]
+        task.grid = copy.deepcopy(src.grid)  # each tab in its pane, as the source's (copyGrid in grid.js)
     with taskfile.LOCK:
         taskfile.save(task)
     copied = (f", with the tabs of {short(src.id)}: {len(task.open_files)} files, {len(task.browser_tabs)} browser,"
@@ -316,7 +412,8 @@ def _workspace_source(like: str | None, project: Path) -> Task | None:
 
 def fork_task(parent_id: str) -> Task:
     """The new task for `claude --resume <parent> --fork-session --session-id <new>`. It starts
-    with the parent's tabs (file, browser, terminal), as a new task with the previous one's."""
+    with the parent's tabs (file, browser, terminal, Finder) and their grid, as a new task with
+    the previous one's."""
     parent = load(parent_id)
     now = iso()
     task = Task(
@@ -325,6 +422,7 @@ def fork_task(parent_id: str) -> Task:
         digest=parent.digest, title="", created=now, updated=now, opened=now,  # opened: as new_task
         open_files=list(parent.open_files), browser_tabs=list(parent.browser_tabs),
         terminal_tabs=list(parent.terminal_tabs), finder_tabs=[dict(t) for t in parent.finder_tabs],
+        grid=copy.deepcopy(parent.grid),
     )  # fmt: skip
     with taskfile.LOCK:
         taskfile.save(task)

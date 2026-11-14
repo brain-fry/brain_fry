@@ -16,12 +16,15 @@ import time
 from pathlib import Path
 
 from .. import actions, digest, events, files, finder, firefox, git, install, paths, projects, selection, sessions, views
+from .. import treesearch, window_settings
 from ..logs import short
 from ..util import child_env, claude_bin, write_atomic
-from .ptys import PtySession
+from . import drops
+from .ptys import PREFILL, PtySession
 
 log = logging.getLogger(__name__)
 SAVE_DIALOG = 30  # pywebview's FileDialog.SAVE (webview is imported only in the window)
+OPEN_DIALOG = 10  # pywebview's FileDialog.OPEN
 ui_log = logging.getLogger("brain_fry.ui")
 
 CONSUME_EVERY = 0.5  # s
@@ -30,12 +33,15 @@ DIGEST_RETRY = 120  # s after a failure
 DIGEST_NOW = 0  # the priority of a turn in the digest queue; the shutdown's (-1) goes first
 IDLE_CLOSE = 4 * 3600  # s without events and output, see DESIGN_DETAILS.md "App"
 OUTSIDE_EVERY = 3  # s: which tasks run elsewhere, the end of a block, projects.json
-PROJECT_WS = "project:"  # the id of a project's files with no task selected (fs.* commands, /file/)
+PROJECT_WS = "project:"  # the id of a project's files with no task selected (fs.* and git.* commands, /file/)
 SHELL_INIT = Path(__file__).resolve().parent.parent / "shell_init.bash"  # the bash of terminal tabs runs it
 # commands that the front end sends all the time (polling, file reads): logged at DEBUG only.
 # Browser commands too: placements come at every frame of a drag, and URLs are browsing history.
-QUIET = {"fs.list", "fs.read", "fs.versions", "thread.get", "log", "projects", "selection.set",
+QUIET = {"fs.list", "fs.read", "fs.versions", "fs.search", "thread.get", "log", "projects", "selection.set", "files.dirty",
          "finder.list", "finder.info", "finder.thumb", "finder.tabs.set",
+         "fs.apps", "finder.apps",  # at each Open With submenu
+         "grid.set", "window.set",  # at each click on a tab, each drag of a splitter
+         "drop.take",  # its names are file names; the command logs how many it found
          "browser.place", "browser.open", "browser.go", "browser.nav", "browser.find", "browser.snapshot",
          "browser.tabs.set", "browser.cookies.info",
          "git.state", "git.log", "git.diff", "git.commit_info"}  # fmt: skip
@@ -81,13 +87,21 @@ class Core:
         self.running: dict[str, dict] | None = None  # session id -> its process, from Claude Code
         self._projects_version: int | None = None
         self._distrust_logged = False
+        self._save_failed: set[str] = set()  # tasks that _refresh_outside could not save: logged once
         self.browser = None  # app.browser.BrowserHost: the browser of 3a, in the window only (main.py)
         self.window = None  # pywebview's window (main.py): the save panel of an untitled tab (fs.saveas)
+        self.dirty_files: list[str] = []  # the files with unsaved edits in the front end (files.dirty): the question at quit
+        # The state holds the open tasks, plus the archived tasks that this run touched (named by a
+        # command, changed by an event: the front end may still show them), plus every archived
+        # task while the front end asks for them (archive.show: the board with H, or a search).
+        self.touched: set[str] = set()
+        self.show_archive = False
 
     # ---------------------------------------------------------------- lifecycle
 
     async def start(self) -> None:
         self.loop = asyncio.get_running_loop()
+        await asyncio.to_thread(actions.migrate_archive)  # archived files of the top folders --> archive/
         await asyncio.to_thread(self._reset_leftover_owned)
         selection.clear()  # left over after a crash (the hook also checks that our pid lives)
         threading.Thread(target=self._digest_worker, name="digest", daemon=True).start()
@@ -123,9 +137,11 @@ class Core:
         return n
 
     def shutdown(self) -> None:
-        """Blocking, from the main thread once the window is gone. Ends every live session
-        and shell. Terminal tabs stay in the task files, to be restored at the next start."""
-        self.shutting_down = True  # stops the background loops and the digest worker
+        """Blocking, from the main thread, once (main.py's _Quit): the window may still be there
+        (Cmd+Q, a signal). Ends every live session and shell. Terminal tabs stay in the task
+        files, to be restored at the next start. No state push after this: the asyncio thread may
+        outlive it while Python shuts down, and its executor then refused the snapshot."""
+        self.shutting_down = True  # stops the background loops, the digest worker and the state pushes
         self.digest_q.put((-1, 0, None))
         alive = [s for s in self.ptys.values() if s.alive]
         log.info("shutdown: ending %d process(es): %s", len(alive), ", ".join(s.key for s in alive) or "none")
@@ -145,6 +161,8 @@ class Core:
 
     def snapshot(self) -> dict:
         tasks = actions.all_tasks()
+        projs = views.project_order(projects.load()["projects"], tasks, actions.archive_times())
+        tasks += self._archived_in_state({t.id for t in tasks})
         shells: dict[str, list[dict]] = {}
         for s in list(self.ptys.values()):
             if s.kind == "shell" and s.alive:  # cmd, cwd: from bash (shell_init.bash), for Cmd+N O
@@ -154,7 +172,6 @@ class Core:
         by_id = {t.id: views.task_json(t, gen := self._live_gen(t.id), shells.get(t.id),
                                        running.get(t.id) if gen is None else None) for t in tasks}  # fmt: skip
         inbox = [t.id for t in sorted(filter(views.in_inbox, tasks), key=views.inbox_order)]
-        projs = views.project_order(projects.load()["projects"], tasks)
         for p in projs:  # the tabs that every task of the project shows
             p["tabs"] = views.project_tabs_json(actions.project_tabs(p["path"]), shells.get(PROJECT_WS + p["path"]))
         return {
@@ -170,12 +187,30 @@ class Core:
 
     @staticmethod
     def _hook_state() -> tuple[bool, bool]:
-        """(installed, outdated): ~/.brain_fry/hook.sh differs from this version's hook.sh."""
-        try:
-            installed = paths.hook_file().exists() and install.hook_command() in install.default_settings().read_text()
-            return installed, installed and paths.hook_file().read_text() != install.packaged_hook()
-        except OSError:
-            return False, False
+        """(installed, outdated): outdated when ~/.brain_fry/hook.sh differs from this version's
+        hook.sh, or settings.json lacks one of its events (install.hook_state)."""
+        return install.hook_state()
+
+    def _archived_in_state(self, open_ids: set[str]) -> list:
+        """Blocking. The archived tasks of the state: all of them while the front end asks
+        (archive.show), else the ones that this run touched and the selected one."""
+        if self.show_archive:
+            return [t for t in actions.archived_tasks() if t.id not in open_ids]
+        out = []
+        for tid in list(self.touched) + [self.selected]:
+            if not tid or tid in open_ids:
+                continue
+            open_ids.add(tid)  # once
+            try:
+                out.append(actions.load(tid))
+            except actions.NotFound:  # deleted: forget it
+                self.touched.discard(tid)
+        return out
+
+    def _touch(self, *ids) -> None:
+        """Task ids that a command named or an event changed: the front end may show them after
+        an archive (the tabs of 2a and column 3, Cmd+Up back to it), so the state keeps them."""
+        self.touched.update(i for i in ids if isinstance(i, str) and i and not i.startswith(PROJECT_WS))
 
     def _live_gen(self, tid: str) -> int | None:
         s = self.ptys.get(tid)
@@ -183,7 +218,7 @@ class Core:
 
     def notify(self, msg: dict) -> None:
         """Thread-safe. A message to every front end, outside the state pushes."""
-        if self.loop:
+        if self.loop and not self.shutting_down:
             data = json.dumps(msg)
             self.loop.call_soon_threadsafe(lambda: self.loop.create_task(self._send_all(data)))
 
@@ -196,7 +231,7 @@ class Core:
 
     def request_broadcast(self) -> None:
         """Thread-safe. Coalesces bursts of changes into one push."""
-        if self.loop:
+        if self.loop and not self.shutting_down:
             self.loop.call_soon_threadsafe(self._schedule_broadcast)
 
     def _schedule_broadcast(self) -> None:
@@ -206,7 +241,7 @@ class Core:
 
     async def _broadcast(self) -> None:
         self._broadcast_pending = False
-        if not self.clients:
+        if not self.clients or self.shutting_down:
             return
         msg = json.dumps(await asyncio.to_thread(self.snapshot))
         for ws in list(self.clients):
@@ -221,6 +256,7 @@ class Core:
         while not self.shutting_down:
             try:
                 if changed := await asyncio.to_thread(self._consume_all):
+                    self._touch(*changed)  # a `close` archives its task: the state keeps it
                     self._enqueue_digest(changed)
                     self.request_broadcast()
             except Exception:
@@ -250,20 +286,33 @@ class Core:
         return changed
 
     async def _sweep_loop(self) -> None:
+        first = True
         while not self.shutting_down:
             try:
-                tasks = await asyncio.to_thread(actions.all_tasks)
-                self._enqueue_digest([t.id for t in tasks if any(th.kind == "pending" for th in t.threads)])
-                now = time.time()
-                for t in tasks:
-                    s = self.ptys.get(t.id)
-                    if (s and s.alive and not t.inbox and now - views.epoch(t.updated) > IDLE_CLOSE
-                            and now - s.last_output > IDLE_CLOSE):  # fmt: skip
-                        log.info("closing idle session %s", t.id)
-                        s.hangup()
+                self._enqueue_digest(await asyncio.to_thread(self._sweep, first))
+                first = False
             except Exception:
                 log.exception("sweep")
             await asyncio.sleep(SWEEP_EVERY)
+
+    def _sweep(self, archive: bool = False) -> list[str]:
+        """Blocking. Closes the idle sessions and returns the tasks whose digest to try again. A
+        session of the app may run an archived task (archiving does not end it), so the idle close
+        goes through the live sessions, not through the open tasks. The digests: the pending threads
+        of the open tasks, and the failed ones, which may be archived (the turn of a `close` prompt
+        archives its task before its digest); `archive` (the first sweep of a run): the archive too."""
+        tasks = actions.all_tasks() + (actions.archived_tasks() if archive else [])
+        retry = [t.id for t in tasks if digest.needs_call(t)] + list(self.failed)
+        now = time.time()
+        for s in [s for s in list(self.ptys.values()) if s.kind == "claude" and s.alive]:
+            try:
+                t = actions.load(s.key)
+            except actions.NotFound:
+                continue
+            if not t.inbox and now - views.epoch(t.updated) > IDLE_CLOSE and now - s.last_output > IDLE_CLOSE:
+                log.info("closing idle session %s", t.id)
+                s.hangup()
+        return retry
 
     def _enqueue_digest(self, ids: list[str]) -> None:
         """A task that is already in the queue is not queued again."""
@@ -324,14 +373,25 @@ class Core:
                 continue
             run = running.get(t.id)
             if t.live != bool(run):
-                log.info("task %s %r: %s", short(t.id), t.display_title[:50],
-                         f"runs in {run['where']} (pid {run['pid']})" if run else "no process runs it any more")  # fmt: skip
+                if t.id not in self._save_failed:
+                    log.info("task %s %r: %s", short(t.id), t.display_title[:50],
+                             f"runs in {run['where']} (pid {run['pid']})" if run else "no process runs it any more")  # fmt: skip
                 try:
                     actions.set_live(t.id, bool(run))
                     changed = True
+                    self._save_failed.discard(t.id)
                 except actions.NotFound:
                     pass
+                except Exception:
+                    self._not_saved(t.id)
         return changed
+
+    def _not_saved(self, tid: str) -> None:
+        """A task that cannot be saved must not stop the check of the other tasks (before 2026-11-14,
+        one such task ended every _refresh_outside). Tried again at each check, logged once per run."""
+        if tid not in self._save_failed:
+            self._save_failed.add(tid)
+            log.exception("task %s: not saved; tried again every %d s, logged this once", short(tid), OUTSIDE_EVERY)
 
     def _end_blocks(self, tasks, running: dict[str, dict] | None) -> bool:
         """A blocked task whose dialog closed (Claude Code's process file left `waiting`
@@ -346,7 +406,11 @@ class Core:
                 continue
             try:
                 task = actions.end_block(t.id, run["status"], run["since"])
+                self._save_failed.discard(t.id)
             except actions.NotFound:
+                continue
+            except Exception:
+                self._not_saved(t.id)
                 continue
             if task:
                 log.info("task %s %r: its dialog closed (Claude Code: %s in %s, pid %s): block over", short(t.id),
@@ -373,12 +437,14 @@ class Core:
                     self.failed.pop(tid, None)
                     self.digest_error = None
                     self.request_broadcast()
+                else:  # nothing pending (an event without a reply queued it): no more retries (the sweep retries `failed`)
+                    self.failed.pop(tid, None)
             except digest.DigestError as e:  # logged by digest_task
                 self.failed[tid] = time.time()
                 self.digest_error = f"digest failed for {tid[:8]}: {e}"
                 self.request_broadcast()
             except actions.NotFound:
-                pass
+                self.failed.pop(tid, None)
             except Exception:
                 log.exception("digest %s", tid)
 
@@ -400,6 +466,7 @@ class Core:
         if kind == "shell":  # its last command and its folder, for the list of Cmd+N O
             s.scan = True
             s.on_info = lambda _s: self.request_broadcast()
+            s.on_open = self._shell_open  # `bf <file>`
         s.attach(self.loop)
         self.ptys[key] = s
         if kind == "claude":
@@ -414,6 +481,10 @@ class Core:
                 self.loop.run_in_executor(None, self._save_terminal_tabs, s.task)
             self.request_broadcast()
             return
+        if self._retry_without_prefill(s):
+            return
+        if self.shutting_down:  # shutdown marks it not live and removes owned.json itself
+            return
 
         def mark() -> None:
             try:
@@ -424,6 +495,20 @@ class Core:
             self.request_broadcast()
 
         self.loop.run_in_executor(None, mark)
+
+    def _retry_without_prefill(self, s: PtySession) -> bool:
+        """--prefill is a hidden option of Claude Code: a version that drops it stops at once with
+        "unknown option". Then the session starts again without it (an empty input box), once,
+        rather than a planned card that can never start."""
+        plain = [a for a in s.argv if not a.startswith(PREFILL)]
+        if plain == s.argv or self.shutting_down or self.ptys.get(s.key) is not s:
+            return False
+        if b"unknown option '--prefill" not in bytes(s.replay).lower():
+            return False
+        log.warning("pty %s: claude does not know --prefill, started again without the title and notes", s.key)
+        self._start_pty(s.key, plain, s.cwd, s.rows, s.cols)
+        self.request_broadcast()
+        return True
 
     def _shells_of(self, tid: str) -> list[PtySession]:
         return [s for s in self.ptys.values() if s.kind == "shell" and s.task == tid and s.alive]
@@ -455,12 +540,14 @@ class Core:
     def _python_line(project: str, rel: str) -> str:
         """Blocking: the play button of a Python file. The command line that runs the file `rel`
         from the project's root: with the project's `.venv` when it has one (VS Code picks it
-        too), else with the `python` of the shell's PATH."""
-        p = files.entry(project, rel)
+        too), else with the `python` of the shell's PATH. A file outside the project (an absolute
+        `rel`, files.locate) runs the same way, named by its absolute path."""
+        outside = rel.startswith("/")
+        p = files.locate(project, rel) if outside else files.entry(project, rel)
         if not p.is_file() or p.suffix != ".py":
             raise ValueError(f"Not a Python file: {rel}")
         venv = files.resolve(project, "") / ".venv" / "bin" / "python"
-        return shlex.join([".venv/bin/python" if venv.exists() else "python", rel.strip("/")])
+        return shlex.join([".venv/bin/python" if venv.exists() else "python", rel if outside else rel.strip("/")])
 
     def _type_when_ready(self, s: PtySession, line: str, start: float | None = None) -> None:
         """Types `line` and Enter into a new shell once it waits for a command, so that the line
@@ -548,6 +635,53 @@ class Core:
             return path
         return actions.load(tid).project
 
+    def _shell_open(self, s: PtySession, target: str) -> None:
+        """`bf <file>` in a terminal tab (shell_init.bash): the front end opens the file in the view
+        that shows this terminal (`onShellOpen`, files.js), or toasts why not. On the loop; the
+        checks of the disk run in a thread. The path is not logged: it is part of a command."""
+
+        def check() -> dict:
+            try:
+                return files.bf_target(self._project_of(s.task), target)
+            except (OSError, ValueError, actions.NotFound) as e:  # outside, a folder, no such folder
+                return {"error": str(e)}
+
+        prev = s.opening
+
+        async def go() -> None:
+            r = await asyncio.to_thread(check)
+            if prev:  # `bf a b`: the messages go out in that order
+                await asyncio.wait([prev])
+            log.info("bf <file> in terminal %s: %s", s.key, "refused" if "error" in r else "new file" if r["new"] else "opened")
+            self.notify({"type": "open", "tid": s.task, **r})
+
+        if self.loop and not self.shutting_down:
+            s.opening = self.loop.create_task(go())
+
+    def _open_panel(self, folder: str) -> list[str]:
+        """Blocking: macOS's open panel, modal, starting in `folder`, several files allowed.
+        The chosen paths; [] if cancelled."""
+        r = self.window.create_file_dialog(OPEN_DIALOG, directory=folder, allow_multiple=True)
+        return [str(x) for x in r] if r else []
+
+    def _app_panel(self) -> str | None:
+        """Blocking: macOS's open panel in /Applications, apps only (an app is a file there). The app, or None."""
+        r = self.window.create_file_dialog(OPEN_DIALOG, directory="/Applications", file_types=("Applications (*.app)",))
+        return str(r[0]) if r else None
+
+    @staticmethod
+    def _open_how(p: Path, msg: dict) -> str:
+        """fs.open and finder.open: with the default app; with `app` (Open With, an .app bundle);
+        `reveal` (Open in Finder for a file: its folder, the file selected). What was done, for the log."""
+        if msg.get("app"):
+            files.open_with(p, str(msg["app"]))
+            return f"opened with {Path(str(msg['app'])).stem}"
+        if msg.get("reveal"):
+            files.reveal_in_finder(p)
+            return "revealed in Finder"
+        files.open_external(p)
+        return "opened with the default app"
+
     def _save_panel(self, folder: str, name: str) -> str | None:
         """Blocking: macOS's save panel, modal, starting in `folder`. It asks itself before it
         replaces a file. The chosen path, or None."""
@@ -561,12 +695,25 @@ class Core:
         return files.viewable(self._project_of(tid), rel)
 
     @staticmethod
+    def _prefill(task) -> str:
+        """A planned card (DESIGN_DETAILS.md "Modes"): what its session puts in Claude Code's input
+        box, not sent. My title, a blank line, my notes, for a task that has no thread and no parent
+        (a fork starts from its parent's conversation). A task of Dev mode has neither title nor notes
+        before its first turn, so it gets nothing (unless I renamed it: then it is my title too)."""
+        if task.threads or task.parent:
+            return ""
+        return "\n\n".join(p for p in (task.title.strip(), task.notes.strip()) if p).replace("\x00", "")
+
+    @staticmethod
     def _resume_argv(task) -> list[str]:
         if task.threads:
             return [claude_bin(), "--resume", task.id]
         if task.parent:  # forked, never prompted: nothing to resume yet, fork again
             return [claude_bin(), "--resume", task.parent, "--fork-session", "--session-id", task.id]
-        return [claude_bin(), "--session-id", task.id]  # started here, never prompted
+        # started here, never prompted. --prefill: a hidden option of Claude Code (2.1.325), the
+        # `=` form so that a text that starts with "-" stays its value
+        text = Core._prefill(task)
+        return [claude_bin(), "--session-id", task.id] + ([PREFILL + text] if text else [])
 
     # ---------------------------------------------------------------- commands
 
@@ -576,13 +723,20 @@ class Core:
         rows, cols = int(msg.get("rows") or 40), int(msg.get("cols") or 120)
         run = asyncio.to_thread
         (log.debug if cmd in QUIET else log.info)("command %s", _describe(msg))
+        self._touch(tid, msg.get("from"))  # an archived task that a command names stays in the state
 
         if cmd == "log":  # from the front end: its errors
             level = logging.ERROR if msg.get("level") == "error" else logging.INFO
             ui_log.log(level, "%s", str(msg.get("msg"))[:4000])
             return None
         if cmd == "projects":  # the picker asks each time it opens: projects.json may have changed
-            return views.project_order((await run(projects.load))["projects"], await run(actions.all_tasks))
+            return views.project_order((await run(projects.load))["projects"], await run(actions.all_tasks),
+                                       await run(actions.archive_times))  # fmt: skip
+        if cmd == "archive.show":  # the board can show archived cards (H, or a search): all of them in the state, or not
+            self.show_archive = bool(msg.get("on"))
+            self._touch(*(msg.get("ids") or []))  # the ones that the front end holds (selected, idle, ...)
+            self.request_broadcast()
+            return None
         if cmd == "project.init":  # File > Add New Project... (main.py's folder dialog): bf init
             path = Path(str(msg.get("path"))).expanduser().resolve()
             if not path.is_dir():
@@ -591,6 +745,11 @@ class Core:
             log.info("init %s: %s", path, "registered" if new else "already registered")
             self.request_broadcast()
             return {"path": str(path), "name": path.name, "new": new}
+        if cmd == "drop.take":  # files and folders dropped from Finder: their paths, by the names that the page got (drops.py)
+            names = [str(n) for n in msg.get("names") or []]
+            found = await run(drops.take, names)
+            log.info("drop: %d dropped, %d with a path (%d folders)", len(names), len(found), sum(f["dir"] for f in found))
+            return found
         if cmd == "project.deactivate":  # the x of a row of Cmd+P; bf init in the folder undoes it
             await run(projects.deactivate, str(msg.get("path")))
             self.request_broadcast()
@@ -611,11 +770,26 @@ class Core:
             except files.Conflict:
                 log.info("save of %s refused: it changed on disk since it was opened", msg["path"])
                 return {"conflict": True}
-        if cmd == "fs.open":  # with the default app of macOS: a file that 3a does not show
-            p = await run(files.resolve, await run(self._project_of, tid), msg["path"])
-            await run(files.open_external, p)
-            log.info("opened %s with the default app", msg["path"])
+        if cmd == "fs.open":  # with the default app of macOS: a file that 3a does not show; `app`, `reveal`: _open_how
+            p = await run(files.locate, await run(self._project_of, tid), msg["path"])  # path "": the project folder
+            log.info("%s %s", await run(self._open_how, p, msg), msg["path"] or "the project folder")
             return None
+        if cmd == "fs.apps":  # Open With: the apps that macOS offers (finder.apps_for)
+            return await run(finder.apps_for, await run(files.locate, await run(self._project_of, tid), msg["path"]))
+        if cmd == "apps.pick":  # Open With > Other...: macOS's open panel in /Applications; None if cancelled
+            if self.window is None:
+                raise ValueError("Other... works only in the Brain Fry window, not with --browser.")
+            return await run(self._app_panel)
+        if cmd == "fs.openpanel":  # File > Open...: macOS's open panel; None if cancelled
+            if self.window is None:
+                raise ValueError("File > Open works only in the Brain Fry window, not with --browser.")
+            project = await run(self._project_of, tid)
+            chosen = await run(self._open_panel, project)
+            if not chosen:
+                return None
+            paths = [await run(files.tab_path, project, c) for c in chosen]  # outside the project: absolute
+            log.info("File > Open: %d file(s), %d outside %s", len(paths), sum(x.startswith("/") for x in paths), Path(project).name)
+            return {"paths": paths}
         if cmd == "fs.saveas":  # an untitled tab (Cmd+N F): the save panel of macOS; None if cancelled
             if self.window is None:
                 raise ValueError("Saving a new file works only in the Brain Fry window, not with --browser.")
@@ -623,11 +797,13 @@ class Core:
             chosen = await run(self._save_panel, project, str(msg.get("name") or "Untitled"))
             if not chosen:
                 return None
-            rel = await run(files.relative_in, project, chosen)
+            rel = await run(files.tab_path, project, chosen)  # outside the project: absolute
             log.info("new file %s in %s", rel, Path(project).name)
             return {"path": rel}
         if cmd == "fs.versions":
             return await run(files.versions, await run(self._project_of, tid), list(msg.get("paths") or []))
+        if cmd == "fs.search":  # the explorer's search (treesearch.py): the query is `text`, never logged
+            return await run(treesearch.command, self._project_of, tid, msg)
         if cmd == "fs.link":  # Cmd+click on a file link in a terminal: the target as it was written
             task = await run(self._owner, tid)  # a project's tabs: its folder is the cwd
             return await run(files.link_target, task.project, task.cwd, str(msg.get("target") or ""))
@@ -666,11 +842,12 @@ class Core:
             return await run(finder.info, str(msg.get("path") or ""))
         if cmd == "finder.thumb":
             return await run(finder.thumbnail, str(msg.get("path") or ""))
-        if cmd == "finder.open":  # with the default app of macOS (a folder: in Finder)
+        if cmd == "finder.open":  # with the default app of macOS (a folder: in Finder); `app`, `reveal`: as fs.open
             p = await run(finder.absolute, str(msg.get("path") or ""))
-            await run(files.open_external, p)
-            log.info("opened %s with the default app (Finder tab)", p.name)
+            log.info("%s %s (Finder tab)", await run(self._open_how, p, msg), p.name)
             return None
+        if cmd == "finder.apps":
+            return await run(finder.apps_for, await run(finder.absolute, str(msg.get("path") or "")))
         if cmd == "finder.rename":
             new = await run(finder.rename, str(msg.get("path") or ""), str(msg.get("name") or ""))
             log.info("renamed %s to %s (Finder tab)", msg.get("path"), Path(new).name)
@@ -705,6 +882,20 @@ class Core:
         if cmd == "files.set":  # the open file tabs of a task, restored when it is selected
             await run(self._set_tabs, tid, "open_files", list(msg.get("paths") or []))
             return None
+        if cmd == "files.dirty":  # the files with unsaved edits in every task, each time the list changes: the question at quit (main.py)
+            self.dirty_files = [str(f) for f in msg.get("files") or []]
+            return None
+        if cmd == "grid.set":  # where each tab of a task (or of a project's tabs) sits in column 3 (grid.js)
+            if tid.startswith(PROJECT_WS):
+                await run(actions.set_project_grid, await run(self._project_of, tid), msg.get("grid"))
+            else:
+                await run(actions.set_grid, tid, msg.get("grid"))
+            return None  # no state push: the front end has it, and reads it only at a restore
+        if cmd == "window.set":  # the window's settings (store in app.js): one key, None removes it
+            if not isinstance(msg.get("key"), str) or not msg["key"]:
+                raise ValueError(f"window.set: no key in {_describe(msg)}")
+            await run(window_settings.update, {msg["key"]: msg.get("value")})
+            return None
         if cmd == "selection.set":  # the selection in 3a, for the hook: no id or no path clears it
             if tid and msg.get("path"):
                 task = await run(actions.load, tid)
@@ -728,14 +919,19 @@ class Core:
                 return None  # placements, navigation: nobody waits, errors go to the log
             return await asyncio.wrap_future(fut)
 
-        # ---- Review mode (git.py): the repository of the task's folder; replies only
+        # ---- Review mode (git.py): the repository of the task's folder, or with no task selected
+        # of the project in the dropdown (`project:<path>`); replies only
         if cmd.startswith("git."):
-            task = await run(actions.load, tid)
+            if tid.startswith(PROJECT_WS):
+                project = cwd = await run(self._project_of, tid)
+            else:
+                task = await run(actions.load, tid)
+                project, cwd = task.project, task.cwd or task.project
             tasks = None
             if cmd == "git.state":  # the tasks of panel 1, under the worktree that holds their folder
                 tasks = [{"id": t.id, "cwd": t.cwd, "status": t.status, "title": t.display_title}
-                         for t in await run(actions.all_tasks) if t.project == task.project and t.status != "done"]  # fmt: skip
-            return await run(git.command, cmd, task.cwd or task.project, task.project, msg, tasks)
+                         for t in await run(actions.all_tasks) if t.project == project and t.status != "done"]  # fmt: skip
+            return await run(git.command, cmd, cwd, project, msg, tasks)
 
         if cmd == "select":
             self.selected = tid
@@ -814,6 +1010,14 @@ class Core:
             self.selected = task.id
         elif cmd == "archive":
             await run(actions.archive, tid)
+        elif cmd == "delete":  # the right-click menu of a card: its processes end, its file goes to the Trash
+            for s in [self.ptys.get(tid), *self._shells_of(tid)]:
+                if s and s.alive:
+                    s.hangup()  # the exit finds no task to mark: actions.NotFound is ignored there
+            await run(actions.delete, tid)
+            self.touched.discard(tid)
+            if self.selected == tid:
+                self.selected = None
         elif cmd == "pin":  # or unpin a pinned task
             await run(actions.pin, tid)
         elif cmd == "rename":
@@ -840,6 +1044,8 @@ def _describe(msg: dict) -> str:
             out.append(f"{k}=<{len(str(v))} chars>")
         elif k in ("id", "from") and isinstance(v, str):
             out.append(f"{k}={short(v)}")
+        elif k == "names" and isinstance(v, list):  # of dropped files (drop.take): pasted into Claude Code, they are a part of a prompt
+            out.append(f"{k}=<{len(v)}>")
         else:
             out.append(f"{k}={str(v)[:120]}")
     return f"{msg.get('cmd')} {' '.join(out)}".strip()

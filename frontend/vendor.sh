@@ -1,6 +1,6 @@
 #!/bin/bash
 # Builds src/brain_fry/web/vendor/ (xterm.js, a CodeMirror bundle and PDF.js). Run it after a change
-# to package.json or codemirror.js, and commit the result. Brain Fry needs no Node at runtime.
+# to package.json, codemirror.js or markdown_html.js, and commit the result. Brain Fry needs no Node at runtime.
 #
 # node_modules lives in ~/.cache, outside SWITCHdrive: thousands of files that npm can
 # download again, with no need for a sync or a backup.
@@ -11,7 +11,7 @@ out="$here/../src/brain_fry/web/vendor"
 build="${XDG_CACHE_HOME:-$HOME/.cache}/brain_fry/vendor-build"
 
 mkdir -p "$build" "$out/xterm"
-cp "$here/package.json" "$here/codemirror.js" "$build/"
+cp "$here/package.json" "$here/codemirror.js" "$here/markdown_html.js" "$build/"
 if [ -f "$here/package-lock.json" ]; then
   cp "$here/package-lock.json" "$build/"
   (cd "$build" && npm ci --no-audit --no-fund)

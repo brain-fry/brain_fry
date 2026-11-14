@@ -228,3 +228,94 @@ def test_run_python_file_in_bash(backend, project, home):
     before = ptys.INFO.sub(b"", out.split(done, 1)[0])  # what the terminal shows
     assert before.count(b".venv/bin/python sub/a.py") == 1  # typed after the prompt, not echoed before it
     assert before.index(b"PROMPT> ") < before.index(b".venv/bin/python sub/a.py")
+
+
+# ---- `bf <file>`: the bash of a terminal tab sends the path (OSC 7771 `open`), the app opens it
+
+def test_scan_finds_a_file_to_open():
+    assert ptys.scan_info(seq("open", "/p/a b.py:3"))[0] == [("open", "/p/a b.py:3")]
+
+
+def test_a_session_passes_a_file_to_open_on():
+    s = ptys.PtySession.__new__(ptys.PtySession)
+    s.scan, s.command, s.folder, s._tail, s.prompts = True, "", "/start", b"", 0
+    s.on_info, opened = None, []
+    s.on_open = lambda x, path: opened.append(path)
+    s._read_info(seq("open", "/p/a.py") + seq("open", "/p/b.py"))
+    assert opened == ["/p/a.py", "/p/b.py"]
+    assert s.prompts == 0 and s.folder == "/start"
+
+
+@pytest.mark.skipif(not Path("/bin/bash").exists(), reason="needs bash")
+def test_bash_bf_sends_absolute_paths_and_leaves_bfs_commands_alone(tmp_path):
+    (tmp_path / ".bash_profile").write_text("PS1='PROMPT> '\n")
+    (tmp_path / "sub").mkdir()
+    lines = ["cd sub", "bf notes.txt /abs/x.py ../up.md:4", "bf r.txt > /dev/null", "bf ./init",
+             "bf", "bf init", "bf --debug", "type -t bf"]  # fmt: skip
+    out = run_bash(tmp_path, lines, b"DONE")
+    found, _ = ptys.scan_info(out)
+    sub = tmp_path / "sub"
+    assert [v for k, v in found if k == "open"] == [f"{sub}/notes.txt", "/abs/x.py", f"{sub}/../up.md:4", f"{sub}/r.txt",
+                                                     f"{sub}/./init"]  # fmt: skip
+    assert out.count(b"bf: command not found") == 3  # `bf`, `bf init`, `bf --debug`: the real bf (not on this PATH)
+    assert b"function\r\n" in out
+
+
+def test_bf_commands_are_the_same_in_the_cli_and_in_bash():
+    import re
+
+    from brain_fry import cli
+
+    src = Path(cli.__file__).read_text()
+    assert set(re.findall(r'add_parser\("([a-z]+)"', src)) == set(cli.COMMANDS)
+    case = re.search(r"''\|-\*\|([a-z|]+)\)", SHELL_INIT.read_text()).group(1)
+    assert set(case.split("|")) == set(cli.COMMANDS)
+
+
+def test_bf_file_outside_brain_fry_says_where_it_works(capsys):
+    from brain_fry import cli
+
+    assert cli.main(["notes.txt"]) == 2
+    assert "terminal tabs of Brain Fry" in capsys.readouterr().err
+
+
+@pytest.mark.skipif(not Path("/bin/bash").exists(), reason="needs bash")
+def test_bf_in_a_terminal_tab_tells_the_front_end(backend, project, home, tmp_path):
+    import json
+
+    from websockets.sync.client import connect
+
+    from brain_fry import actions
+
+    core, port = backend
+    (home / ".bash_profile").write_text("PS1='PROMPT> '\n")
+    (project / "sub").mkdir()
+    (project / "sub" / "a.py").write_text("x = 1\n")
+    t = actions.new_task(project)
+
+    def opened(ctl):
+        end = time.time() + 10
+        while time.time() < end:
+            m = json.loads(ctl.recv(timeout=end - time.time()))
+            if m["type"] == "open":
+                return m
+        raise AssertionError("no open message")
+
+    with connect(f"ws://127.0.0.1:{port}/ctl") as ctl:
+        ctl.recv(timeout=5)
+        key = _request(ctl, 1, cmd="shell.new", id=t.id, rows=10, cols=80)["data"]["key"]
+        with connect(f"ws://127.0.0.1:{port}/pty/{key}") as pty:
+            _read(pty, b"PROMPT>")
+            pty.send(json.dumps({"t": "in", "d": "cd sub && bf a.py:1\r"}))
+            assert opened(ctl) == {"type": "open", "tid": t.id, "path": "sub/a.py", "line": 1, "new": False}
+            pty.send(json.dumps({"t": "in", "d": "bf new.md\r"}))
+            assert opened(ctl) == {"type": "open", "tid": t.id, "path": "sub/new.md", "line": None, "new": True}
+            far = (tmp_path / "far.txt").resolve()  # outside the project: its absolute path
+            far.write_text("far\n")
+            pty.send(json.dumps({"t": "in", "d": f"bf {far}\r"}))
+            assert opened(ctl) == {"type": "open", "tid": t.id, "path": str(far), "line": None, "new": False}
+            # several files: the messages keep their order, whatever each check takes
+            pty.send(json.dumps({"t": "in", "d": f"bf {far} a.py .. gone/x.md new.md\r"}))
+            got = [opened(ctl) for _ in range(5)]
+            assert [got[0].get("path"), got[1].get("path"), got[2].get("error"), got[3].get("error"), got[4].get("path")] == [
+                str(far), "sub/a.py", "proj is a folder, not a file.", "no such folder: sub/gone", "sub/new.md"]  # fmt: skip

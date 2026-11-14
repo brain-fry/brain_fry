@@ -26,8 +26,9 @@ from collections.abc import Callable
 REPLAY_BYTES = 4 * 1024 * 1024
 
 # What the bash of a terminal tab says about itself (shell_init.bash): `cmd` (the command line that
-# starts) or `cwd` (the folder, at each prompt), as OSC 7771, which the terminal ignores.
-INFO = re.compile(rb"\x1b\]7771;(cmd|cwd);([^\x07\x1b]{0,4096})(?:\x07|\x1b\\)")
+# starts) or `cwd` (the folder, at each prompt), as OSC 7771, which the terminal ignores; and
+# `open` (`bf <file>`: a file to open in the editor).
+INFO = re.compile(rb"\x1b\]7771;(cmd|cwd|open);([^\x07\x1b]{0,4096})(?:\x07|\x1b\\)")
 INFO_START = b"\x1b]7771;"
 INFO_MAX = 1000  # characters kept of a command line
 
@@ -46,6 +47,12 @@ def scan_info(data: bytes) -> tuple[list[tuple[str, str]], bytes]:
             return found, data[-k:]
     return found, b""
 WRAPPER = "import fcntl,os,sys,termios\nfcntl.ioctl(0, termios.TIOCSCTTY, 0)\nos.execvp(sys.argv[1], sys.argv[1:])\n"
+PREFILL = "--prefill="  # Claude Code's input box starts with the text (a planned card: core.Core._prefill)
+
+
+def loggable(argv: list[str]) -> str:
+    """The command line for the log: the text of --prefill (my title and notes) as its length only."""
+    return shlex.join(f"{PREFILL}<{len(a) - len(PREFILL)} chars>" if a.startswith(PREFILL) else a for a in argv)
 
 
 def set_size(fd: int, rows: int, cols: int) -> None:
@@ -83,9 +90,10 @@ class PtySession:
         self.key, self.gen = key, gen
         self.kind, self.task, self.title = "claude", key, ""  # set by the caller for shells
         self.proc, self.fd = spawn(argv, cwd, env, rows, cols)
+        self.argv, self.cwd, self.rows, self.cols = argv, cwd, rows, cols  # to start it again (core._retry_without_prefill)
         self.started = time.time()
         self.bytes_out = 0
-        log.info("pty %s: pid %d started, %s (cwd %s, %dx%d)", key, self.proc.pid, shlex.join(argv), cwd, cols, rows)
+        log.info("pty %s: pid %d started, %s (cwd %s, %dx%d)", key, self.proc.pid, loggable(argv), cwd, cols, rows)
         self.on_exit = on_exit
         self.replay = bytearray()
         self.queues: set[asyncio.Queue] = set()
@@ -97,6 +105,8 @@ class PtySession:
         self.tells = False  # set by the caller: its bash runs shell_init.bash, so `prompts` counts
         self.prompts = 0  # the prompts shown so far (a `cwd` comes before each one)
         self.on_info: Callable[[PtySession], None] | None = None
+        self.on_open: Callable[[PtySession, str], None] | None = None  # `bf <file>`: the absolute path
+        self.opening: asyncio.Task | None = None  # the last `bf <file>` (Core._shell_open), to keep the order
         self._tail = b""
 
     def attach(self, loop: asyncio.AbstractEventLoop) -> None:
@@ -127,6 +137,8 @@ class PtySession:
                 self.command, changed = value.strip(), True
             elif kind == "cwd" and value and value != self.folder:
                 self.folder, changed = value, True
+            elif kind == "open" and value and self.on_open:
+                self.on_open(self, value)
         if changed and self.on_info:
             self.on_info(self)
 
@@ -182,6 +194,7 @@ class PtySession:
         if self.alive:
             try:
                 set_size(self.fd, rows, cols)
+                self.rows, self.cols = rows, cols
             except OSError:
                 pass
 

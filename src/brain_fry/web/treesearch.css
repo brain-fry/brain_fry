@@ -1,0 +1,33 @@
+/* The search of the explorer (2a, treesearch.js). The look that Renaud approved on 2026-11-14
+   (mockup 2: results "A", files with a count; button look 1, three dots). */
+
+/* the tree and its "Collapse folders" button, under the search area */
+#tree-wrap { flex: 1; min-height: 0; display: flex; position: relative; }
+#tree-wrap #tree { min-width: 0; }
+
+/* the search area */
+#tree-search { flex: none; padding: 6px 6px 5px; border-bottom: 1px solid var(--line); display: flex; flex-direction: column; gap: 4px; }
+#tree-search .tree-search-row { display: flex; gap: 4px; align-items: center; }
+#tree-search input { flex: 1; min-width: 0; font: 12.5px -apple-system, BlinkMacSystemFont, sans-serif; color: var(--text); background: var(--bg);
+  border: 1px solid var(--line); border-radius: 3px; padding: 2px 6px; outline: none; }
+#tree-search input:focus { border-color: var(--accent); }
+#tree-search input::placeholder { color: #5f616b; opacity: 1; }
+#tree-search-more { flex: none; width: 22px; height: 22px; padding: 0; line-height: 0; color: var(--dim); background: none; border: 1px solid transparent;
+  border-radius: 3px; cursor: pointer; display: flex; align-items: center; justify-content: center; }
+#tree-search-more:hover { color: var(--text); background: var(--panel-2); border-color: var(--line); }
+#tree-search-more.on { color: var(--text); background: #3a3d44; border-color: #4a4d55; }
+#tree-search-more.set { color: var(--accent); }
+#tree-search-ext { display: flex; flex-direction: column; gap: 4px; }
+#tree-search-ext .tree-search-tog { display: flex; gap: 3px; }
+#tree-search-ext .tree-search-tog button { font: 11.5px -apple-system, BlinkMacSystemFont, sans-serif; padding: 1px 5px; color: var(--dim); background: none;
+  border: 1px solid var(--line); border-radius: 3px; cursor: pointer; }
+#tree-search-ext .tree-search-tog button.mono { font-family: Menlo, monospace; font-size: 11px; }
+#tree-search-ext .tree-search-tog button.on { color: #fff; background: #3a3d44; border-color: #4a4d55; }
+#tree-search-ext .tree-search-tog .gap { flex: 1; }
+
+/* the rows of a search: the file rows only (the folder rows look as in the tree) */
+#tree .node.file.tree-search-res { display: flex; align-items: baseline; }
+#tree .node.file.tree-search-res .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+#tree .node.file.tree-search-res .caret { flex: none; }
+#tree .tree-search-count { flex: none; margin-left: 8px; color: var(--dim); font-size: 11px; }
+#tree mark.tree-search-hit { background: rgba(255, 255, 255, .10); color: #fff; border-radius: 3px; }

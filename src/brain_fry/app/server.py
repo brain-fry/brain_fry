@@ -16,7 +16,7 @@ from websockets.asyncio.server import serve
 from websockets.datastructures import Headers
 from websockets.http11 import Response
 
-from .. import actions, files, finder, selection
+from .. import actions, files, finder, selection, window_settings
 from .core import PROJECT_WS, Core
 
 log = logging.getLogger(__name__)
@@ -29,6 +29,8 @@ TYPES = {
     "css": "text/css; charset=utf-8",
     "png": "image/png",
     "jpg": "image/jpeg",  # the photos of the empty 4a (web/calm/)
+    "jpeg": "image/jpeg",
+    "webp": "image/webp",
     "gif": "image/gif",
     "svg": "image/svg+xml",
     "wasm": "application/wasm",
@@ -40,10 +42,10 @@ TYPES = {
 LOCAL_HOSTS = ("127.0.0.1", "localhost")
 TASK_ID = re.compile(r"[0-9A-Za-z-]{1,64}")
 ICON_KEY = re.compile(r"[0-9a-z_+-]{1,40}")
-# Slow commands (Quick Look, Spotlight, a big folder): they run beside the others, which would
+# Slow commands (Quick Look, Spotlight, a big folder, the explorer's search): they run beside the others, which would
 # wait for them otherwise (a connection's commands run one after the other). Their order does
 # not matter: each reply carries its request number.
-CONCURRENT = {"finder.list", "finder.info", "finder.thumb"}
+CONCURRENT = {"finder.list", "finder.info", "finder.thumb", "fs.search"}
 
 
 def _refused(headers: Headers, port: int) -> str | None:
@@ -114,6 +116,21 @@ def _icon(path: str) -> Response:
     return Response(200, "OK", headers, body)
 
 
+CALM_PHOTO = re.compile(r"[0-9A-Za-z_-]+\.(jpg|jpeg|png|webp)")
+
+
+def _calm() -> Response:
+    """GET /calm.json: the photos of the empty 4a, whatever web/calm/ holds. The folder is not in
+    git (Renaud's own photos and photos of unknown license), so it may be missing: then []. A name
+    with other characters (a space) is skipped, since _static does not decode the URL."""
+    d = WEB / "calm"
+    names = sorted(f.name for f in d.iterdir() if f.is_file()) if d.is_dir() else []
+    skipped = [n for n in names if not CALM_PHOTO.fullmatch(n) and n != "CREDITS.md"]
+    if skipped:
+        log.info("calm: skipped %s (rename to letters, digits, - and _)", skipped)
+    return _response(200, json.dumps([n for n in names if CALM_PHOTO.fullmatch(n)]).encode(), "application/json")
+
+
 def _static(path: str) -> Response | None:
     """Any file under web/ with a known extension. No '..', no hidden files."""
     path = path.split("?")[0]
@@ -145,6 +162,10 @@ def make_handlers(core: Core):
             return await asyncio.to_thread(_file, core, request.path)
         if request.path.startswith("/icon/"):
             return await asyncio.to_thread(_icon, request.path)
+        if request.path.split("?")[0] == "/calm.json":
+            return _calm()
+        if request.path.split("?")[0] == "/window.js":  # the window's settings, before app.js (index.html)
+            return _response(200, (await asyncio.to_thread(window_settings.script)).encode(), TYPES["js"])
         return _static(request.path) or connection.respond(404, "not found\n")
 
     async def ctl(ws) -> None:

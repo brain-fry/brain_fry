@@ -213,14 +213,22 @@ def test_file_commands(backend, project):
         assert (project / "notes.md").read_text() == "bye\n"
         assert request(ctl, 4, cmd="fs.write", id=t.id, path="notes.md", text="x", base=r["version"])["data"] == {"conflict": True}
         assert request(ctl, 5, cmd="fs.versions", id=t.id, paths=["notes.md"])["data"] == {"notes.md": w["version"]}
-        bad = request(ctl, 6, cmd="fs.read", id=t.id, path="../../etc/passwd")
+        bad = request(ctl, 6, cmd="fs.read", id=t.id, path="../../etc/passwd")  # relative: inside the project only
         assert not bad["ok"] and "PermissionError" in bad["error"]
         link = request(ctl, 8, cmd="fs.link", id=t.id, target="notes.md#L1")["data"]
         assert link == {"path": "notes.md", "line": 1}
-        bad = request(ctl, 9, cmd="fs.link", id=t.id, target="../../etc/passwd")
-        assert not bad["ok"] and "PermissionError" in bad["error"]
-        request(ctl, 7, cmd="files.set", id=t.id, paths=["notes.md"])
-        assert actions.load(t.id).open_files == ["notes.md"]
+        # a file outside the project: named by its absolute path, read, written and watched as any other
+        far = (project.parent / "far.txt").resolve()
+        far.write_text("far\n")
+        link = request(ctl, 9, cmd="fs.link", id=t.id, target=str(far))["data"]
+        assert link == {"path": str(far), "line": None}
+        r = request(ctl, 10, cmd="fs.read", id=t.id, path=str(far))["data"]
+        assert r["text"] == "far\n" and r["path"] == str(far)
+        w = request(ctl, 11, cmd="fs.write", id=t.id, path=str(far), text="near\n", base=r["version"])["data"]
+        assert far.read_text() == "near\n"
+        assert request(ctl, 12, cmd="fs.versions", id=t.id, paths=[str(far)])["data"] == {str(far): w["version"]}
+        request(ctl, 7, cmd="files.set", id=t.id, paths=["notes.md", str(far)])
+        assert actions.load(t.id).open_files == ["notes.md", str(far)]
 
 
 def test_file_commands_for_a_project_without_a_task(backend, project, tmp_path):
@@ -297,9 +305,36 @@ def test_save_as_asks_the_save_panel_for_a_path_in_the_project(backend, project)
         assert asked == [(30, str(project), "Untitled-1")]
         Window.answer = None  # cancelled
         assert request(ctl, 3, cmd="fs.saveas", id=t.id, name="Untitled-1")["data"] is None
-        Window.answer = "/tmp/outside.md"
-        bad = request(ctl, 4, cmd="fs.saveas", id=t.id, name="Untitled-1")
-        assert not bad["ok"] and "outside the project" in bad["error"]
+        Window.answer = str(project.parent / "outside.md")  # outside the project: its absolute path
+        assert request(ctl, 4, cmd="fs.saveas", id=t.id, name="Untitled-1")["data"] == {"path": str((project.parent / "outside.md").resolve())}
+
+
+def test_open_panel_returns_the_chosen_files_of_the_project(backend, project, tmp_path):
+    """File > Open...: fs.openpanel shows macOS's open panel in the project, several files allowed;
+    the front end opens what it returns in the pane that I use."""
+    core, port = backend
+    t = actions.new_task(project)
+    (project / "docs").mkdir()
+    (project / "docs" / "a.md").write_text("a\n")
+    (project / "b.py").write_text("b\n")
+    asked = []
+
+    class Window:
+        answer = (str(project / "docs" / "a.md"), str(project / "b.py"), str(tmp_path / "far.txt"))
+
+        def create_file_dialog(self, kind, directory, allow_multiple):
+            asked.append((kind, directory, allow_multiple))
+            return self.answer
+
+    with connect(f"ws://127.0.0.1:{port}/ctl") as ctl:
+        ctl.recv(timeout=5)
+        assert not request(ctl, 1, cmd="fs.openpanel", id=t.id)["ok"]  # no window: --browser
+        core.window = Window()
+        r = request(ctl, 2, cmd="fs.openpanel", id=t.id)["data"]
+        assert r == {"paths": ["docs/a.md", "b.py", str((tmp_path / "far.txt").resolve())]}  # outside: absolute
+        assert asked == [(10, str(project), True)]
+        Window.answer = None  # cancelled
+        assert request(ctl, 3, cmd="fs.openpanel", id=t.id)["data"] is None
 
 
 def test_commands_of_the_explorer_menu(backend, project, monkeypatch):
@@ -335,6 +370,33 @@ def test_commands_of_the_explorer_menu(backend, project, monkeypatch):
         assert not taken["ok"] and taken["error"].startswith("FileExistsError")
     assert trashed == [(project / "docs").resolve() / "todo.md"]
     assert clip == ["docs", str(project / "docs")]
+
+
+def test_delete_ends_the_session_and_the_terminal_tabs(backend, project, tmp_path, monkeypatch):
+    core, port = backend
+    fake_shell = tmp_path / "fake_shell"
+    fake_shell.write_text("#!/bin/bash\nsleep 30\n")
+    fake_shell.chmod(0o755)
+    monkeypatch.setenv("SHELL", str(fake_shell))
+    trashed = []
+    monkeypatch.setattr("brain_fry.files._move_to_trash", lambda p: (trashed.append(p.name), p.unlink()))
+    with connect(f"ws://127.0.0.1:{port}/ctl") as ctl:
+        ctl.recv(timeout=5)
+        ctl.send(json.dumps({"cmd": "new", "project": str(project)}))
+        st = states(ctl, lambda m: m["selected"] and m["tasks"].get(m["selected"], {}).get("pty"))
+        tid = st["selected"]
+        request(ctl, 1, cmd="shell.new", id=tid, rows=10, cols=80)
+        states(ctl, lambda m: m["tasks"][tid]["shells"])
+        claude, shell = core.ptys[tid], core._shells_of(tid)[0]
+        assert request(ctl, 2, cmd="delete", id=tid)["ok"]
+        st = states(ctl, lambda m: tid not in m["tasks"])
+        assert st["selected"] is None and tid not in core.touched
+        end = time.time() + 5
+        while (claude.alive or shell.alive) and time.time() < end:
+            time.sleep(0.05)
+        assert not claude.alive and not shell.alive
+        assert not request(ctl, 3, cmd="delete", id=tid)["ok"]  # gone
+    assert trashed == [f"{tid}.md"]
 
 
 def test_thread_get(backend, project):
@@ -392,6 +454,20 @@ def test_terminal_here(backend, project, tmp_path, monkeypatch):
         assert len(actions.load(t.id).terminal_tabs) == 3
 
 
+def test_run_python_line_of_a_file_outside_the_project(project, tmp_path):
+    """The play button of a tab of a file outside the project (an absolute path): from the
+    project's root, with its .venv when it has one, the file named by its absolute path."""
+    far = (tmp_path / "far tool.py").resolve()
+    far.write_text("print(1)\n")
+    assert Core._python_line(str(project), str(far)) == f"python '{far}'"
+    (project / ".venv" / "bin").mkdir(parents=True)
+    (project / ".venv" / "bin" / "python").write_text("")
+    assert Core._python_line(str(project), str(far)) == f".venv/bin/python '{far}'"
+    (tmp_path / "notes.txt").write_text("x\n")
+    with pytest.raises(ValueError, match="Not a Python file"):
+        Core._python_line(str(project), str(tmp_path / "notes.txt"))
+
+
 def test_run_python_file(backend, project, tmp_path, monkeypatch):
     """The play button of a Python file: a new shell at the project's root, which gets
     `python <file>` typed once its output is quiet (a shell that does not tell its prompts);
@@ -443,17 +519,31 @@ def test_static_files_are_served(backend):
     html = urllib.request.urlopen(f"http://127.0.0.1:{port}/").read().decode()
     assert "<title>Brain Fry</title>" in html
     assert urllib.request.urlopen(f"http://127.0.0.1:{port}/app.js").status == 200
-    # the photos of the empty 4a, one for each name in app.js
-    import re
+    # the photos of the empty 4a: the files of web/calm/ (not in git, so maybe none), each served
     from pathlib import Path
 
-    js = urllib.request.urlopen(f"http://127.0.0.1:{port}/app.js").read().decode()
-    names = re.findall(r"'([a-z-]+)'", js.split("const CALM_PHOTOS = [", 1)[1].split("];", 1)[0])
+    names = json.loads(urllib.request.urlopen(f"http://127.0.0.1:{port}/calm.json").read())
     calm = Path(actions.__file__).parent / "web" / "calm"
-    assert sorted(names) == sorted(f.stem for f in calm.glob("*.jpg"))  # every photo listed, none missing
+    from brain_fry.app.server import CALM_PHOTO
+
+    photos = sorted(f.name for f in calm.glob("*") if CALM_PHOTO.fullmatch(f.name))
+    assert names == photos
     for name in names:
-        r = urllib.request.urlopen(f"http://127.0.0.1:{port}/calm/{name}.jpg")
-        assert r.headers["Content-Type"] == "image/jpeg" and r.read(3) == b"\xff\xd8\xff"
+        r = urllib.request.urlopen(f"http://127.0.0.1:{port}/calm/{name}")
+        assert r.headers["Content-Type"].startswith("image/")
+
+
+def test_calm_lists_only_photos_with_plain_names(tmp_path, monkeypatch):
+    from brain_fry.app import server
+
+    monkeypatch.setattr(server, "WEB", tmp_path)
+    assert json.loads(server._calm().body) == []  # no folder (a fresh clone)
+    (tmp_path / "calm").mkdir()
+    for n in ("b.jpg", "a-1.webp", "CREDITS.md", "with space.jpg", "notes.txt", "c.png"):
+        (tmp_path / "calm" / n).write_bytes(b"x")
+    (tmp_path / "calm" / "archive").mkdir()  # the photos that Renaud removed: a subfolder is not listed
+    (tmp_path / "calm" / "archive" / "old.jpg").write_bytes(b"x")
+    assert json.loads(server._calm().body) == ["a-1.webp", "b.jpg", "c.png"]
 
 
 def test_images_and_pdfs_are_served_for_the_viewers(backend, project, monkeypatch):
@@ -474,13 +564,26 @@ def test_images_and_pdfs_are_served_for_the_viewers(backend, project, monkeypatc
         with pytest.raises(urllib.error.HTTPError) as e:
             urllib.request.urlopen(url)
         assert e.value.code == status, url
-    opened = []
+    opened, revealed = [], []
     monkeypatch.setattr("brain_fry.files.open_external", opened.append)
+    monkeypatch.setattr("brain_fry.files.reveal_in_finder", revealed.append)
     with connect(f"ws://127.0.0.1:{port}/ctl") as ctl:
         ctl.recv(timeout=5)
         assert request(ctl, 1, cmd="fs.read", id=t.id, path="figs/my plot.png")["data"]["kind"] == "image"
         assert request(ctl, 2, cmd="fs.open", id=t.id, path="notes.md")["ok"]
-    assert opened == [(project / "notes.md").resolve()]
+        # Open in Finder: a file shows selected in its folder; the empty space of 2a opens the project folder
+        assert request(ctl, 3, cmd="fs.open", id=t.id, path="notes.md", reveal=True)["ok"]
+        assert request(ctl, 4, cmd="fs.open", id=t.id, path="")["ok"]
+        assert not request(ctl, 5, cmd="fs.open", id=t.id, path="../elsewhere", reveal=True)["ok"]
+        # Open With: the apps of macOS for a file of the project, then the file opened with one
+        monkeypatch.setattr("brain_fry.finder.apps_for", lambda p: [{"path": "/Applications/X.app", "name": "X", "default": True, "of": str(p)}])
+        with_app = []
+        monkeypatch.setattr("brain_fry.files.open_with", lambda p, app: with_app.append((p, app)))
+        assert request(ctl, 6, cmd="fs.apps", id=t.id, path="notes.md")["data"][0]["of"] == str((project / "notes.md").resolve())
+        assert request(ctl, 7, cmd="fs.open", id=t.id, path="notes.md", app="/Applications/X.app")["ok"]
+        assert with_app == [((project / "notes.md").resolve(), "/Applications/X.app")]
+    assert opened == [(project / "notes.md").resolve(), project.resolve()]
+    assert revealed == [(project / "notes.md").resolve()]
 
 
 def test_web_pages_of_other_sites_are_refused(backend):
@@ -688,6 +791,9 @@ def test_selection_path_is_relative_to_the_sessions_cwd(project, home):
     assert len(sel["text"]) == selection.MAX_CHARS and sel["cut"] and sel["dirty"]
     task.cwd = str(project)
     assert selection.write(task, "sub/../top.py", 1, 1, "x", 1, False)["path"] == "top.py"
+    far = (project.parent / "far.py").resolve()  # a tab of a file outside the project: its absolute path
+    far.write_text("y\n")
+    assert selection.write(task, str(far), 1, 1, "y", 1, False)["path"] == str(far)
 
 
 def test_selection_is_cleared_when_the_front_end_leaves(backend, project, home):
@@ -763,6 +869,13 @@ def test_commands_of_review_mode(backend, project, monkeypatch):
         assert [r["s"] for r in rows] == ["Uncommitted changes", "first"]
         bad = request(ctl, 7, cmd="git.diff", id=t.id, side="unstaged", path="../x")
         assert not bad["ok"] and "ValueError" in bad["error"]
+        # no task selected: the project of the dropdown, `project:<path>` (a registered project only)
+        (project / "a.txt").write_text("two\n")
+        st = request(ctl, 8, cmd="git.state", id=f"project:{project}")["data"]
+        assert st["repo"] and [f["path"] for f in st["unstaged"]] == ["a.txt"]
+        assert [x["id"] for x in st["trees"][0]["tasks"]] == [t.id]
+        assert request(ctl, 9, cmd="git.log", id=f"project:{project}")["data"]["rows"][1]["s"] == "first"
+        assert not request(ctl, 10, cmd="git.state", id=f"project:{project.parent}")["ok"]
 
 
 # ---------------------------------------------------------------- project tabs (DESIGN_DETAILS.md, "Project tabs")
@@ -867,3 +980,30 @@ def test_select_and_idle_start_the_terminals_of_the_project_tabs(backend, projec
         ctl.send(json.dumps({"cmd": "select", "id": t.id, "rows": 24, "cols": 80}))
         st = states(ctl, lambda m: m["tasks"][t.id]["pty"])
         assert len(proj_shells(st)) == 2 and len(st["tasks"][t.id]["shells"]) == 1
+
+
+def test_a_task_that_cannot_be_saved_does_not_stop_the_check_of_the_others(backend, project, home, monkeypatch):
+    import os
+
+    from brain_fry import taskfile
+
+    core, port = backend
+    bad, good = actions.new_task(project), actions.new_task(project)  # live, and no process runs them
+    d = home / ".claude" / "sessions"
+    d.mkdir(parents=True)
+    (d / "1.json").write_text(json.dumps({"pid": os.getpid(), "sessionId": "another", "entrypoint": "cli"}))
+    real = taskfile.save
+
+    def save(t):
+        if t.id == bad.id:
+            raise OSError("its folder is gone")
+        return real(t)
+
+    monkeypatch.setattr(taskfile, "save", save)
+    core._refresh_outside()
+    core._refresh_outside()
+    assert actions.load(good.id).live is False and actions.load(bad.id).live is True
+    assert core._save_failed == {bad.id}
+    monkeypatch.setattr(taskfile, "save", real)
+    core._refresh_outside()  # tried again at each check
+    assert actions.load(bad.id).live is False and core._save_failed == set()

@@ -199,11 +199,16 @@ def test_link_target_resolves_a_terminal_link_against_the_cwd(repo):
     assert files.link_target(repo, str(repo / "gone"), "README.md")["path"] == "README.md"
 
 
+def test_link_target_names_a_file_outside_the_project_by_its_absolute_path(repo):
+    (repo.parent / "outside.txt").write_text("x\n")
+    out = str((repo.parent / "outside.txt").resolve())
+    assert files.link_target(repo, str(repo), "../outside.txt#L1") == {"path": out, "line": 1}
+    assert files.link_target(repo, str(repo), f"file://{out}")["path"] == out
+
+
 def test_link_target_refuses_what_3a_cannot_open(repo):
-    with pytest.raises(PermissionError):
-        files.link_target(repo, str(repo), "../outside.txt")
-    with pytest.raises(PermissionError):
-        files.link_target(repo, str(repo), "/etc/hosts")
+    with pytest.raises(FileNotFoundError):
+        files.link_target(repo, str(repo), "../missing.txt")
     with pytest.raises(FileNotFoundError):
         files.link_target(repo, str(repo), "missing.py#L3")
     with pytest.raises(ValueError):
@@ -212,8 +217,56 @@ def test_link_target_refuses_what_3a_cannot_open(repo):
         files.link_target(repo, str(repo), "#L3")
 
 
-def test_relative_in_takes_the_save_panels_choice_inside_the_project_only(repo):
-    assert files.relative_in(repo, repo / "src" / "new.md") == "src/new.md"  # need not exist yet
-    for outside in (repo.parent / "elsewhere.md", repo):
-        with pytest.raises(PermissionError):
-            files.relative_in(repo, outside)
+def test_bf_target_names_a_file_of_the_project(repo):
+    """`bf <file>` in a terminal tab: the shell sends an absolute path, maybe with :line."""
+    (repo / "src" / "odd:7").write_text("a file whose name ends in :7\n")
+    assert files.bf_target(repo, f"{repo}/src/a.py") == {"path": "src/a.py", "line": None, "new": False}
+    assert files.bf_target(repo, f"{repo}/src/../README.md")["path"] == "README.md"
+    assert files.bf_target(repo, f"{repo}/src/a.py:12") == {"path": "src/a.py", "line": 12, "new": False}
+    assert files.bf_target(repo, f"{repo}/src/a.py:12:5")["line"] == 12
+    assert files.bf_target(repo, f"{repo}/src/odd:7") == {"path": "src/odd:7", "line": None, "new": False}
+    # not on disk yet, in a folder that is: it opens empty (new)
+    assert files.bf_target(repo, f"{repo}/src/new.md") == {"path": "src/new.md", "line": None, "new": True}
+    assert files.bf_target(repo, f"{repo}/new.py:3") == {"path": "new.py:3", "line": None, "new": True}
+
+
+def test_bf_target_names_a_file_outside_the_project_by_its_absolute_path(repo, tmp_path):
+    (tmp_path / "outside.txt").write_text("x\nz\n")
+    out = str((tmp_path / "outside.txt").resolve())
+    assert files.bf_target(repo, str(tmp_path / "outside.txt")) == {"path": out, "line": None, "new": False}
+    assert files.bf_target(repo, f"{tmp_path}/outside.txt:2") == {"path": out, "line": 2, "new": False}
+    assert files.bf_target(repo, f"{tmp_path}/new.txt")["new"] is True
+    os.symlink(tmp_path / "outside.txt", repo / "link.txt")  # a link out of the project: where it leads
+    assert files.bf_target(repo, f"{repo}/link.txt")["path"] == out
+
+
+def test_bf_target_refuses_what_3a_cannot_open(repo, tmp_path):
+    with pytest.raises(ValueError, match="a folder"):
+        files.bf_target(repo, f"{repo}/src")
+    with pytest.raises(FileNotFoundError, match="no such folder"):
+        files.bf_target(repo, f"{repo}/gone/new.md")
+    with pytest.raises(ValueError, match="absolute"):
+        files.bf_target(repo, "src/a.py")
+
+
+def test_tab_path_is_relative_inside_the_project_and_absolute_outside(repo, tmp_path):
+    assert files.tab_path(repo, repo / "src" / "new.md") == "src/new.md"  # need not exist yet
+    assert files.tab_path(repo, repo / "src" / ".." / "README.md") == "README.md"
+    assert files.tab_path(repo, tmp_path / "elsewhere.md") == str((tmp_path / "elsewhere.md").resolve())
+    os.symlink(tmp_path / "elsewhere.md", repo / "link.md")  # a link out of the project: where it leads
+    assert files.tab_path(repo, repo / "link.md") == str((tmp_path / "elsewhere.md").resolve())
+
+
+def test_tabs_read_and_write_files_outside_the_project_by_absolute_path(repo, tmp_path):
+    far = (tmp_path / "far.txt").resolve()
+    far.write_text("far\n")
+    r = files.read_file(repo, str(far))
+    assert r["text"] == "far\n" and r["path"] == str(far)
+    files.write_file(repo, str(far), "near\n", r["version"])
+    assert far.read_text() == "near\n"
+    assert files.versions(repo, [str(far), str(tmp_path / "gone.txt")]) == {str(far): files.version(far), str(tmp_path / "gone.txt"): None}
+    # a relative path still stays inside the project, and the explorer's commands too
+    with pytest.raises(PermissionError):
+        files.read_file(repo, "../far.txt")
+    with pytest.raises(PermissionError):
+        files.list_dir(repo, str(tmp_path))

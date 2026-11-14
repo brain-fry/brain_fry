@@ -136,6 +136,20 @@ def test_backend_commands_and_icon_route(backend, project, tmp_path, monkeypatch
         assert request(ctl, 2, cmd="finder.rename", path=str(out / "n.py"), name="m.py")["data"] == str(out / "m.py")
         assert not request(ctl, 3, cmd="finder.list", path="relative")["ok"]
         assert request(ctl, 7, cmd="finder.new", dir=str(out / "deep"), folder=True)["data"] == str(out / "deep" / "untitled folder")
+        opened, revealed = [], []  # Open in default app, Open in Finder (a file: selected in its folder)
+        monkeypatch.setattr("brain_fry.files.open_external", opened.append)
+        monkeypatch.setattr("brain_fry.files.reveal_in_finder", revealed.append)
+        assert request(ctl, 8, cmd="finder.open", path=str(out / "m.py"))["ok"]
+        assert request(ctl, 9, cmd="finder.open", path=str(out / "m.py"), reveal=True)["ok"]
+        assert (opened, revealed) == ([out / "m.py"], [out / "m.py"])
+        # Open With: the list (finder.apps_for, tested on its own below), then the app picked
+        monkeypatch.setattr("brain_fry.finder.apps_for", lambda p: [{"path": "/Applications/X.app", "name": "X", "default": True, "of": str(p)}])
+        with_app = []
+        monkeypatch.setattr("brain_fry.files.open_with", lambda p, app: with_app.append((p, app)))
+        assert request(ctl, 10, cmd="finder.apps", path=str(out / "m.py"))["data"][0]["of"] == str(out / "m.py")
+        assert request(ctl, 11, cmd="finder.open", path=str(out / "m.py"), app="/Applications/X.app")["ok"]
+        assert with_app == [(out / "m.py", "/Applications/X.app")] and len(opened) == 1
+        assert not request(ctl, 12, cmd="apps.pick")["ok"]  # Other...: no window here (as --browser)
         tabs = [{"root": str(out), "path": str(out / "m.py")}]
         assert request(ctl, 4, cmd="finder.tabs.set", id=t.id, tabs=tabs)["ok"]
         assert actions.load(t.id).finder_tabs == tabs
@@ -164,3 +178,36 @@ def test_a_slow_thumbnail_does_not_hold_the_other_commands(backend, project, mon
             if m["type"] == "reply":
                 order.append(m["req"])
         assert order[-1] == 1
+
+
+def test_open_with_lists_the_apps_of_macos_default_first(tmp_path):
+    """Open With: the real list of macOS for a text file (TextEdit is on every Mac): one row per
+    app, the default app first and only it marked, the others in Finder's order of names."""
+    f = tmp_path / "notes.txt"
+    f.write_text("x\n")
+    apps = finder.apps_for(f)
+    names = [a["name"] for a in apps]
+    assert "TextEdit" in names and not any(n.endswith(".app") for n in names)
+    assert all(a["path"].endswith(".app") for a in apps)
+    assert len({a["path"] for a in apps}) == len(apps)
+    assert [a["default"] for a in apps].count(True) <= 1 and (apps[0]["default"] or not any(a["default"] for a in apps))
+    rest = [a["name"] for a in apps if not a["default"]]
+    assert rest == finder._sorted_names(rest)
+    assert finder.apps_for(tmp_path)  # a folder: Finder at least
+    with pytest.raises(FileNotFoundError):
+        finder.apps_for(tmp_path / "gone.txt")
+
+
+def test_open_with_takes_only_an_app_bundle(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr("brain_fry.files.subprocess.run", lambda args, **kw: calls.append(args))
+    f = tmp_path / "a.txt"
+    f.write_text("x\n")
+    app = tmp_path / "Some App.app"
+    app.mkdir()
+    files.open_with(f, str(app))
+    assert calls == [["open", "-a", str(app), str(f)]]
+    for bad in ("/bin/ls", str(tmp_path / "Missing.app"), str(f)):
+        with pytest.raises(ValueError):
+            files.open_with(f, bad)
+    assert len(calls) == 1

@@ -6,6 +6,7 @@ import fcntl
 import json
 import logging
 import platform
+import signal
 import subprocess
 import sys
 import threading
@@ -18,6 +19,8 @@ from .core import Core
 from .server import start_backend
 
 log = logging.getLogger(__name__)
+QUIT_NAMES = 5  # the files named in the question at quit, then "and N more"
+_probes: list[subprocess.Popen] = []  # `claude --version` (_log_start): ended at quit, else it outlives the app
 
 
 def _mac_identity() -> None:
@@ -58,6 +61,15 @@ def _file_menu(get_window) -> list:
         except Exception:
             log.warning("menu action failed", exc_info=True)
 
+    def open_file():
+        """The page asks the backend for macOS's open panel in the project on screen
+        (`openFromPanel` in files.js, `fs.openpanel`), and opens the files in the pane that I use."""
+        log.info("menu: File > Open...")
+        try:
+            get_window().evaluate_js("menuAction('open')")
+        except Exception:
+            log.warning("menu action failed", exc_info=True)
+
     def refresh_explorer():
         log.info("menu: File > Refresh Explorer")
         try:
@@ -65,7 +77,8 @@ def _file_menu(get_window) -> list:
         except Exception:
             log.warning("menu action failed", exc_info=True)
 
-    return [Menu("File", [MenuAction("Add New Project...", add_project), MenuAction("Refresh Explorer", refresh_explorer)])]
+    return [Menu("File", [MenuAction("Open...", open_file), MenuAction("Add New Project...", add_project),
+                          MenuAction("Refresh Explorer", refresh_explorer)])]  # fmt: skip
 
 
 def _file_menu_first() -> None:
@@ -133,7 +146,7 @@ def _fill_screen(window) -> None:
 
 
 def _menu_titles() -> str:
-    """The menu bar, for the selftest: 'Brain Fry, File (Add New Project..., Refresh Explorer), Edit (...), ...'."""
+    """The menu bar, for the selftest: 'Brain Fry, File (Open..., Add New Project..., Refresh Explorer), Edit (...), ...'."""
     try:
         from AppKit import NSApp  # noqa: PLC0415
         from PyObjCTools import AppHelper  # noqa: PLC0415
@@ -274,12 +287,100 @@ def _selftest(window, seconds: float, shots: str | None, js: str | None) -> None
     window.destroy()
 
 
+# ---------------------------------------------------------------- quitting (DESIGN_DETAILS.md, "App")
+
+
+def quit_question(working: int, unsaved: list[str]) -> str:
+    """The text of the one question at quit: the working tasks and the files with unsaved edits
+    (`files.dirty` from the front end). "" when quitting loses nothing: no question."""
+    parts = []
+    if working:
+        parts.append(f"{working} task{' is' if working == 1 else 's are'} working. Quitting ends "
+                     f"{'its' if working == 1 else 'their'} turn; --resume brings the conversation back.")  # fmt: skip
+    if unsaved:
+        names = ", ".join(unsaved[:QUIT_NAMES]) + (f" and {len(unsaved) - QUIT_NAMES} more" if len(unsaved) > QUIT_NAMES else "")
+        parts.append(f"{len(unsaved)} file{' has' if len(unsaved) == 1 else 's have'} unsaved edits, which quitting loses: {names}.")
+    return "\n\n".join(parts)
+
+
+def _confirm_quit(text: str) -> bool:
+    """The question at quit, a native alert run here, on the main thread, where `closing` fires.
+    pywebview's create_confirmation_dialog queues the alert to the main thread and waits for it:
+    called from the main thread, it waited forever and the app hung (seen 2026-11-14)."""
+    from AppKit import NSAlert, NSAlertFirstButtonReturn, NSApp  # noqa: PLC0415
+
+    NSApp().activateIgnoringOtherApps_(True)
+    alert = NSAlert.alloc().init()
+    alert.setMessageText_("Quit Brain Fry?")
+    alert.setInformativeText_(text)
+    alert.addButtonWithTitle_("Quit")
+    alert.addButtonWithTitle_("Cancel")  # also Escape
+    return alert.runModal() == NSAlertFirstButtonReturn
+
+
+class _Quit:
+    """The shutdown, exactly once, whatever ends the app: saves the browser's session cookies,
+    ends every session and shell (core.shutdown), ends the `claude --version` probe. Each caller
+    runs on the main thread: the `finally` of run(), Cocoa's will-terminate notification, the
+    handler of SIGTERM and SIGHUP."""
+
+    def __init__(self, core: Core) -> None:
+        self.core = core
+        self._once = threading.Lock()
+
+    @property
+    def started(self) -> bool:
+        return self._once.locked()
+
+    def __call__(self, why: str) -> None:
+        if not self._once.acquire(blocking=False):
+            return
+        log.info("quitting: %s", why)
+        try:
+            if self.core.browser is not None:
+                self.core.browser.shutdown()  # main thread: saves the session cookies
+        except Exception:
+            log.exception("browser shutdown failed")
+        try:
+            self.core.shutdown()
+        except Exception:
+            log.exception("shutdown failed")
+        for p in _probes:
+            if p.poll() is None:
+                p.kill()
+        log.info("quit")
+
+
+def _on_terminate(handler):
+    """Cmd+Q, Quit in the app menu or the Dock, a logout and Ctrl-C (pywebview's handler) call
+    NSApp.terminate_. Once pywebview's delegate has said yes (`closing`), Cocoa posts this
+    notification, then calls exit() inside webview.start(), which never returns: the `finally`
+    of run() does not run. The observer token must stay alive."""
+    from AppKit import NSApplicationWillTerminateNotification  # noqa: PLC0415
+    from Foundation import NSNotificationCenter  # noqa: PLC0415
+
+    return NSNotificationCenter.defaultCenter().addObserverForName_object_queue_usingBlock_(
+        NSApplicationWillTerminateNotification, None, None, lambda _note: handler())
+
+
+def _on_signals(handler) -> None:
+    """SIGTERM (`kill`) and SIGHUP (the terminal of `bf` closed) killed the app at once. Python
+    runs its signal handlers only between bytecodes of the main thread, which sits in Cocoa's run
+    loop: PyObjC's MachSignals delivers them through that run loop, as pywebview does for Ctrl-C.
+    So they arrive only while the run loop runs (not during a modal alert, not after the window)."""
+    from PyObjCTools import MachSignals  # noqa: PLC0415
+
+    for sig in (signal.SIGTERM, signal.SIGHUP):
+        MachSignals.signal(sig, handler)
+
+
 def run(debug: bool = False, browser: bool = False, selftest: float | None = None,
         selftest_shots: str | None = None, selftest_js: str | None = None) -> int:  # fmt: skip
     logfile = logs.setup("app", debug)
     lock = _single_instance()  # noqa: F841
     _log_start(logfile)
     core = Core()
+    quit_app = _Quit(core)
     url = f"http://127.0.0.1:{start_backend(core)}/"
     log.info("backend on %s", url)
     try:
@@ -287,6 +388,7 @@ def run(debug: bool = False, browser: bool = False, selftest: float | None = Non
             print(f"open {url}   (Ctrl-C to quit)")
             threading.Event().wait()
         import webview  # noqa: PLC0415 (Cocoa only after the backend thread started)
+        from AppKit import NSApp  # noqa: PLC0415
 
         _mac_identity()
         _file_menu_first()
@@ -297,22 +399,36 @@ def run(debug: bool = False, browser: bool = False, selftest: float | None = Non
         )  # fmt: skip
 
         def on_closing():
-            n = core.working_count()
-            if n and selftest is None:
-                ok = window.create_confirmation_dialog(
-                    "Quit Brain Fry?", f"{n} task(s) are working. Quitting ends their turn; --resume brings the conversation back."
-                )
-                return bool(ok)
-            return True
+            """The window's close button and every terminate_ (main thread). False: stay."""
+            if quit_app.started:  # SIGTERM, SIGHUP: nobody to ask
+                return True
+            text = quit_question(core.working_count(), core.dirty_files)
+            if not text:
+                return True
+            log.info("quit: asking: %s", text.replace("\n\n", " "))
+            ok = True if selftest is not None else _confirm_quit(text)  # a selftest has nobody to answer
+            log.info("quit: %s", "confirmed" if ok else "cancelled")
+            return ok
+
+        def on_signal(signum: int) -> None:
+            name = signal.Signals(signum).name
+            log.info("%s received", name)
+            quit_app(name)
+            NSApp().terminate_(None)  # on_closing says yes: the quit has started
 
         window.events.closing += on_closing
         window.events.before_show += lambda: _dark_titlebar(window)
         if selftest is None:  # a selftest stays 1600x1000: it would cover Renaud's screen
             window.events.before_show += lambda: _fill_screen(window)
+        from . import drops  # noqa: PLC0415
         from .browser import BrowserHost  # noqa: PLC0415 (WebKit: only in the window)
+
+        drops.enable()  # the paths of what is dropped from Finder (web/drop.js asks for them)
 
         core.browser = BrowserHost(core, window)  # the browser of 3a; sets itself up at its first command
         core.window = window  # the save panel of an untitled tab
+        terminating = _on_terminate(lambda: quit_app("Cocoa quits the app (Cmd+Q, a Quit menu, Ctrl-C)"))  # noqa: F841
+        _on_signals(on_signal)
         if selftest is not None:
             webview.start(_selftest, (window, selftest, selftest_shots, selftest_js), debug=debug)
         else:
@@ -323,11 +439,7 @@ def run(debug: bool = False, browser: bool = False, selftest: float | None = Non
         log.exception("the window failed")
         raise
     finally:
-        log.info("window closed: quitting")
-        if core.browser is not None:
-            core.browser.shutdown()  # main thread: saves the session cookies
-        core.shutdown()
-        log.info("quit")
+        quit_app("window closed")
     return 0
 
 
@@ -347,8 +459,18 @@ def _log_start(logfile) -> None:
 
     def claude_version() -> None:  # in a thread: `claude --version` takes a moment
         try:
-            r = subprocess.run([claude_bin(), "--version"], capture_output=True, text=True, timeout=20, env=child_env())
-            log.info("claude: %s (%s)", (r.stdout or r.stderr).strip()[:100], claude_bin())
+            p = subprocess.Popen([claude_bin(), "--version"], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                 text=True, env=child_env())  # fmt: skip
+            _probes.append(p)  # a quit before its end kills it (_Quit)
+            try:
+                out, err = p.communicate(timeout=20)
+            except subprocess.TimeoutExpired:
+                p.kill()
+                p.communicate()
+                raise
+            if p.returncode < 0:  # killed by the quit
+                return
+            log.info("claude: %s (%s)", (out or err).strip()[:100], claude_bin())
         except Exception as e:
             log.warning("claude --version failed: %s", e)
 

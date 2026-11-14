@@ -1,6 +1,6 @@
 'use strict';
 // Review mode (DESIGN_DETAILS.md, "Review mode"): a git client in the style of SourceTree, for
-// the repository of the selected task's folder. 1: worktrees and branches (read-only); 2a: the
+// the repository of the selected task's folder (no task: the dropdown's project). 1: worktrees and branches (read-only); 2a: the
 // log and its graph, "Uncommitted changes" first; 2b: the staged and unstaged files, or the files
 // of a commit; 3b: the diff, read-only, with buttons on each hunk, and single lines that can be
 // selected. Commit opens a dialog. 4a comes in and out with Cmd+4. The backend is git.py.
@@ -383,15 +383,18 @@ function setHtml(id, html) { // only when it changed: the panels redraw at every
   return true;
 }
 
+// the repository of the selected task's folder; with no task selected, of the project in the
+// dropdown (the idle screen's, or one picked with no open task): `project:<path>`, its folder
 function renderReview(st) {
   const task = st.tasks[S.selected];
-  const key = task ? task.id : null;
+  const proj = task ? task.projectPath : currentProject();
+  const key = task ? task.id : proj ? projectWs(proj) : null;
   if (key !== R.key) {
     resetReview(key);
     if (key) refreshReview();
   }
-  if (task) { // a hook event of a task of this project: the agent may have changed files
-    const sig = Object.values(st.tasks).filter((t) => t.projectPath === task.projectPath).map((t) => t.id + t.updated).join();
+  if (proj) { // a hook event of a task of this project: the agent may have changed files
+    const sig = Object.values(st.tasks).filter((t) => t.projectPath === proj).map((t) => t.id + t.updated).join();
     if (sig !== R.sigs) { const first = !R.sigs; R.sigs = sig; if (!first) refreshReview(); }
   }
   drawReview();
@@ -401,10 +404,11 @@ function drawReview() {
   if (S.mode !== 'review') return;
   const st = R.st;
   if (!R.key || !st || !st.repo || R.error) {
+    const name = isProjectWs(R.key) ? wsProject(R.key).split('/').pop() : (S.state.tasks[R.key] || {}).project;
     const msg = !R.key ? ''
       : R.error ? `Git: ${esc(R.error)}`
       : !st ? ''
-      : `${esc((S.state.tasks[R.key] || {}).project || 'This project')} is not in a git repository.`;
+      : `${esc(name || 'This project')} is not in a git repository.`;
     setHtml('rv-side', '');
     setHtml('rv-loghead', '');
     setHtml('rv-rows', msg ? `<div class="rv-note">${msg}</div>` : '');
@@ -811,10 +815,9 @@ $('#rv-rows').addEventListener('scroll', () => {
 
 // the path of a file of 2b relative to the task's project, or null when the file is outside it
 function relPath(f) {
-  if (!R.st) return null;
-  const task = S.state.tasks[R.key];
+  if (!R.st || !R.key) return null;
   const abs = `${R.st.tree}/${f.path}`.replace(/\/$/, '');
-  const proj = task ? task.projectPath : '';
+  const proj = wsProject(R.key) || '';
   return proj && abs.startsWith(`${proj}/`) ? abs.slice(proj.length + 1) : null;
 }
 
@@ -823,10 +826,13 @@ function openable(f) {
   return Boolean(relPath(f)) && f.st !== 'D' && f.side !== 'commit' && !f.path.endsWith('/');
 }
 
+// with no task selected, the file opens in the view of Dev mode (the idle screen's task or the
+// project), as a project tab (ownerFor); taken before setMode, which may select an inbox item
 function openReviewFile(f) {
   const rel = relPath(f);
+  const ws = isProjectWs(R.key) ? wsId() : R.key;
   setMode('dev');
-  openFile(R.key, rel);
+  openFile(ws, rel);
 }
 
 // the right-click menu of a file of 2b (openCtx: explorer.js)

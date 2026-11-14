@@ -47,7 +47,7 @@ function ctTabsOf(t) {
   const w = S.work && S.work[t.id];
   const shellOf = (key) => (t.shells || []).find((s) => s.key === key) || {};
   if (w && w.restored) {
-    return w.tabs.filter((x) => !x.closing && !x.thread && !x.untitled && !x.finder).map((x) => { // Finder tabs: not copied; project tabs are not the task's
+    return w.tabs.filter((x) => !x.closing && !x.thread && !x.untitled && !x.finder && !x.preview).map((x) => { // previews: not copied // Finder tabs: not copied; project tabs are not the task's
       if (x.web) return x.url && x.url !== 'about:blank' ? { kind: 'web', name: webTabName(x), right: x.url, url: x.url, live: x } : null;
       if (x.shell) {
         const s = shellOf(x.key);
@@ -56,7 +56,7 @@ function ctTabsOf(t) {
       return { kind: x.kind === 'image' || x.kind === 'pdf' ? x.kind : 'text', name: x.path.split('/').pop(), right: x.path, path: x.path, live: x };
     }).filter(Boolean);
   }
-  const out = (t.openFiles || []).map((p) => ({ kind: ctKind(p), name: p.split('/').pop(), right: p, path: p }));
+  const out = (t.openFiles || []).filter((p) => !p.startsWith(MD_PREFIX)).map((p) => ({ kind: ctKind(p), name: p.split('/').pop(), right: p, path: p }));
   for (const u of t.browserTabs || []) out.push({ kind: 'web', name: ctHost(u), right: u, url: u });
   if ((t.shells || []).length) {
     for (const s of t.shells) out.push({ kind: 'term', name: s.cmd || '', right: ctFolder(t.projectPath, s.cwd), key: s.key });

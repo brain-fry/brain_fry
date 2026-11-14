@@ -2,12 +2,12 @@
 // Dev mode columns: 1 (side) | 2a (explorer) | the grid of column 3 (middle, grid.js) | 4a (agent).
 // Review mode (review.js): 1 (rvSide) | 2a (the log, rvLog high) over 2b (rvFiles) and 3b; Cmd+1 hides 1.
 // Drag the splitters to resize. Cmd+Option+1 to 4 show or hide column 1, 2a, column 3 and 4a
-// in Dev mode (Renaud, 2026-11-12); each column takes its splitter with it.
+// in Dev mode (Renaud, 2026-11-12), Cmd+Option+5 columns 1 and 4a together; each column takes its splitter with it.
 // The panes of the grid share column 3 by fractions (layoutPanes, grid.js). Rows first:
 // gridRows (the top row's share of the height), gridTop and gridBottom (the left pane's share of
 // its row). Columns first: gridCols (the left column's share of the width), gridLeft and
-// gridRight (the top pane's share of its column). Sizes and the shown columns are remembered by
-// the window (localStorage), but at start 4a takes a third of the window (startWidths).
+// gridRight (the top pane's share of its column). Sizes and the shown columns are remembered in
+// ~/.brain_fry/window.json (store, app.js), but at start 4a takes a third of the window (startWidths).
 
 const LAYOUT_DEFAULT = { side: 270, explorer: 200, middle: 480, gridRows: 0.5, gridTop: 0.5, gridBottom: 0.5,
   gridCols: 0.5, gridLeft: 0.5, gridRight: 0.5, rvSide: 230, rvLog: 300, rvFiles: 360, rvSide_on: true,
@@ -30,24 +30,27 @@ function applyLayout() {
   for (const c of Object.values(COLUMNS)) $('#dev').classList.toggle(`no-${c}`, !L[`${c}_on`]); // app.css
 }
 
-// Cmd+Option+1 to 4: the digit of the column, else 0. By e.code, since Option changes e.key
-// ('¡'); a key forwarded by a browser page (forwardKey in browser.js) has no code, only its digit.
+// Cmd+Option+1 to 5: the digit, else 0 (1-4 a column, 5 columns 1 and 4a). By e.code, since Option
+// changes e.key ('¡'); a key forwarded by a browser page (forwardKey in browser.js) has no code, only its digit.
 function columnKey(e) {
   if (!e.metaKey || !e.altKey || e.ctrlKey || e.shiftKey) return 0;
-  const m = /^Digit([1-4])$/.exec(e.code || '') || /^([1-4])$/.exec(e.key || '');
+  const m = /^Digit([1-5])$/.exec(e.code || '') || /^([1-5])$/.exec(e.key || '');
   return m ? Number(m[1]) : 0;
 }
 
-// Dev mode. A column that comes back takes the keyboard when it has a place for it (2a: the
-// tree, column 3: the tab on screen in the pane that I use, 4a: Claude Code; not column 1).
+// Dev mode. Cmd+Option+1 to 4: one column. Cmd+Option+5: columns 1 and 4a, the agent columns
+// (Renaud, 2026-11-14): one of them shown hides both, both hidden shows both.
+// A column that comes back takes the keyboard when it has a place for it (2a: the tree, column 3:
+// the tab on screen in the pane that I use, 4a: Claude Code; not column 1).
 // Hiding the column that has the keyboard gives it to 4a, or to column 3 when 4a is hidden.
 function toggleColumn(n) {
-  const c = COLUMNS[n];
-  const had = $(`#${c}`).contains(document.activeElement);
-  S.layout[`${c}_on`] = !S.layout[`${c}_on`];
+  const cs = n === 5 ? ['side', 'agent'] : [COLUMNS[n]];
+  const had = cs.some((c) => $(`#${c}`).contains(document.activeElement));
+  const on = !cs.some((c) => S.layout[`${c}_on`]);
+  for (const c of cs) S.layout[`${c}_on`] = on;
   store('layout', S.layout);
   applyLayout();
-  if (S.layout[`${c}_on`]) focusColumn(c);
+  if (on) cs.forEach(focusColumn);
   else if (had) { // WebKit keeps the focus in a hidden element: a hidden terminal would still get the keys
     document.activeElement.blur();
     focusColumn(S.layout.agent_on ? 'agent' : 'middle');

@@ -10,6 +10,8 @@
 <link rel="stylesheet" href="/review.css">
 <link rel="stylesheet" href="/finder.css">
 <link rel="stylesheet" href="/copytab.css">
+<link rel="stylesheet" href="/treesearch.css">
+<link rel="stylesheet" href="/mdpreview.css">
 <script>
   window.__errors = [];
   window.onerror = (msg, src, line) => {
@@ -52,9 +54,29 @@
   </aside>
   <div class="split v" data-split="side"></div>
   <section id="explorer">
-    <div id="tree" tabindex="0"></div>
-    <button id="tree-collapse" title="Collapse folders"><svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor"
-      stroke-width="1.2"><path d="M4.5 2.5h9v9"/><rect x="2.5" y="4.5" width="9" height="9" rx="1"/><path d="M5 9h4"/></svg></button>
+    <!-- the explorer search (treesearch.js): hidden until Cmd+F or Cmd+J F -->
+    <div id="tree-search" hidden>
+      <div class="tree-search-row"><input id="tree-search-q" spellcheck="false" autocomplete="off" autocorrect="off" autocapitalize="off"><button
+        id="tree-search-more" title="Search options"><svg viewBox="0 0 16 16" width="14" height="14" fill="currentColor" aria-hidden="true"><circle
+        cx="3.5" cy="8" r="1.2"/><circle cx="8" cy="8" r="1.2"/><circle cx="12.5" cy="8" r="1.2"/></svg></button></div>
+      <div id="tree-search-ext" hidden>
+        <div class="tree-search-tog">
+          <button class="mono" data-tree-search-opt="case" title="Match case">Aa</button>
+          <button class="mono" data-tree-search-opt="word" title="Whole word">ab</button>
+          <button class="mono" data-tree-search-opt="re" title="Regular expression">.*</button>
+          <span class="gap"></span>
+          <button data-tree-search-opt="names" title="Search the names of the files">names</button>
+          <button data-tree-search-opt="text" title="Search the text of the files">text</button>
+        </div>
+        <input id="tree-search-inc" placeholder="include" title="Only these files, comma-separated: *.py, tests/, src/brain_fry, **" spellcheck="false" autocomplete="off" autocorrect="off" autocapitalize="off">
+        <input id="tree-search-exc" placeholder="exclude" title="Not these files, comma-separated: vendor/, *.min.js" spellcheck="false" autocomplete="off" autocorrect="off" autocapitalize="off">
+      </div>
+    </div>
+    <div id="tree-wrap">
+      <div id="tree" tabindex="0"></div>
+      <button id="tree-collapse" title="Collapse folders"><svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor"
+        stroke-width="1.2"><path d="M4.5 2.5h9v9"/><rect x="2.5" y="4.5" width="9" height="9" rx="1"/><path d="M5 9h4"/></svg></button>
+    </div>
   </section>
   <div class="split v" data-split="explorer"></div>
   <!-- column 3: the grid of up to four panes, built by grid.js -->
@@ -85,6 +107,7 @@
 </main>
 <main id="board" tabindex="-1" hidden>
   <div class="board-bar">
+    <input id="board-search" type="text" placeholder="Search all tasks (/)" spellcheck="false" autocomplete="off">
     <label><input type="checkbox" id="show-hidden"> Show later, more later, never and archived (H)</label>
     <button id="park-btn">Move other projects to Next</button>
   </div>
@@ -115,14 +138,17 @@
       <div><kbd>Cmd+J, C</kbd><span>Keyboard to Claude Code (4a)</span></div>
       <div><kbd>Cmd+J, E, 1-9 / a-z</kbd><span>Keyboard to the explorer, on that row</span></div>
       <div><kbd>Cmd+J, I, 1-9 / a-z</kbd><span>Select that inbox item, keyboard to Claude Code (4a)</span></div>
+      <div><kbd>Cmd+F</kbd><span>Search the files of the project, in the explorer (in a file, a PDF or a page: find in it)</span></div>
+      <div><kbd>Cmd+J, F</kbd><span>Search the files of the project, also from a file</span></div>
       <div><kbd>Cmd+Option+1-4</kbd><span>Show / hide column 1 (inbox), 2a (explorer), 3 (panes), 4a (Claude Code)</span></div>
+      <div><kbd>Cmd+Option+5</kbd><span>Show / hide column 1 and 4a together (the agent columns)</span></div>
       <div><kbd>Shift+Enter</kbd><span>New line in Claude Code (4a)</span></div>
       <div><kbd>Cmd+click</kbd><span>Open a link of a terminal in a tab</span></div>
       <div><kbd>Cmd+K</kbd><span>Clear the terminal tab, scrollback too</span></div>
       <div><kbd>Double-click a tab</kbd><span>Project tab (★, in every task of the project), or back to the task</span></div>
     </section>
     <section><h4>Files and PDFs</h4>
-      <div><kbd>Cmd+F</kbd><span>Find</span></div>
+      <div><kbd>Cmd+F</kbd><span>Find (keyboard in the file or the PDF)</span></div>
       <div><kbd>Cmd+G</kbd><span>Select all occurrences</span></div>
       <div><kbd>Cmd+S</kbd><span>Save</span></div>
       <div><kbd>Cmd+scroll, pinch</kbd><span>Zoom a PDF</span></div>
@@ -149,6 +175,10 @@
       <div><kbd>Enter, F2</kbd><span>Rename</span></div>
       <div><kbd>Cmd+Backspace</kbd><span>Move to the Trash</span></div>
       <div><kbd>Ctrl+C</kbd><span>Copy the relative path</span></div>
+      <div><kbd>Enter (search field)</kbd><span>Search the names and the text of the files</span></div>
+      <div><kbd>Down / Up</kbd><span>From the search field into the results, over the files</span></div>
+      <div><kbd>Enter (results)</kbd><span>Open the file at its first match (F2 renames)</span></div>
+      <div><kbd>Esc</kbd><span>Close the search: the tree as it was</span></div>
     </section>
     <section><h4>Organize mode</h4>
       <div><kbd>Arrows</kbd><span>Move the cursor</span></div>
@@ -159,6 +189,7 @@
       <div><kbd>F</kbd><span>Fork</span></div>
       <div><kbd>N</kbd><span>New card</span></div>
       <div><kbd>H</kbd><span>Show / hide later, more later, never, archived</span></div>
+      <div><kbd>/</kbd><span>Search all tasks, archived too (Enter: to the first card; Esc: clear)</span></div>
       <div><kbd>Esc</kbd><span>Back to Dev mode</span></div>
     </section>
     <section><h4>Review mode</h4>
@@ -193,17 +224,21 @@
 <script src="/vendor/xterm/addon-webgl.js"></script>
 <script src="/vendor/xterm/addon-unicode11.js"></script>
 <script src="/vendor/codemirror.js"></script>
+<script src="/window.js"></script><!-- the window's settings (server.py), read by stored() in app.js -->
 <script src="/app.js"></script>
 <script src="/grid.js"></script>
 <script src="/files.js"></script>
+<script src="/mdpreview.js"></script>
 <script src="/veil.js"></script>
 <script src="/explorer.js"></script>
+<script src="/treesearch.js"></script>
 <script src="/finder.js"></script>
 <script src="/browser.js"></script>
 <script src="/review.js"></script>
 <script src="/menu.js"></script>
 <script src="/shells.js"></script>
 <script src="/copytab.js"></script>
+<script src="/drop.js"></script><!-- files and folders dragged from Finder -->
 <script src="/layout.js"></script>
 </body>
 </html>

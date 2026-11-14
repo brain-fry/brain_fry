@@ -86,6 +86,9 @@ body.resizing-v, body.resizing-v * { cursor: row-resize !important; user-select:
 .ctx-menu button kbd { margin-left: auto; padding-left: 24px; font: inherit; color: var(--dim); }
 .ctx-menu button:hover:not(:disabled) kbd { color: rgba(255, 255, 255, .85); }
 .ctx-menu hr { border: none; border-top: 1px solid var(--line); margin: 4px 6px; }
+.ctx-menu button b { margin-left: auto; padding-left: 24px; font-weight: normal; } /* the arrow of a submenu */
+.ctx-menu button.open { background: var(--accent); color: #fff; } /* its submenu is open */
+.ctx-sub { min-width: 200px; max-height: calc(100vh - 8px); overflow-y: auto; white-space: nowrap; }
 
 /* the middle column gives way first when the window is narrow, down to nothing (Renaud, 2026-11-12); 4a keeps at least 360 px */
 #middle { flex: 0 1 var(--w-middle, 480px); position: relative; min-height: 0; min-width: 0; overflow: hidden; }
@@ -251,6 +254,11 @@ body.tab-dragging, body.tab-dragging * { cursor: grabbing !important; user-selec
 #board { flex: 1; display: flex; flex-direction: column; min-height: 0; outline: none; }
 .board-bar { display: flex; align-items: center; gap: 18px; padding: 8px 14px; border-bottom: 1px solid var(--line); color: var(--dim); }
 .board-bar label { display: flex; align-items: center; gap: 6px; color: var(--text); cursor: pointer; }
+/* the search of the board (`/`): the look of the plan dialog's title field, as tall as the buttons */
+#board-search { width: 260px; padding: 3px 8px; font: inherit; color: var(--text); background: var(--bg);
+  border: 1px solid var(--line); border-radius: 4px; outline: none; }
+#board-search:focus { border-color: var(--dim); }
+#board-search::placeholder { color: var(--dim); }
 #park-btn { margin-left: auto; }
 #columns { flex: 1; display: flex; gap: 12px; padding: 12px 14px; overflow-x: auto; min-height: 0; }
 .column { flex: 1 1 0; min-width: 230px; max-width: 420px; display: flex; flex-direction: column; background: var(--panel);

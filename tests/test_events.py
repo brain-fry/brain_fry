@@ -20,7 +20,7 @@ def put(project, name, sid="s1", **fields):
 
 
 def task(project, sid="s1"):
-    return taskfile.load(paths.task_path(project, sid))
+    return taskfile.load(taskfile.path_of(project, sid))  # open or archived
 
 
 def test_full_turn(project):
@@ -118,7 +118,8 @@ def test_broken_event_file_is_set_aside(project):
 
 
 def test_one_reader_at_a_time(project):
-    """`bf list` while the app's reader runs: the second reader waits, no event is applied twice."""
+    """A second app (another BRAIN_FRY_HOME, same project) while the reader runs: the second reader
+    waits, no event is applied twice."""
     import fcntl
     import threading
 
@@ -428,6 +429,173 @@ def test_session_end_after_the_app_marked_it_ended(project):
     assert (t.status, t.live, t.inbox, t.unread, t.threads[0].kind) == ("waiting", False, True, False, "interrupted")
 
 
+def test_session_end_then_a_late_stop_fills_the_cut_thread(project):
+    """The app quit (set_live) marked the turn cut, but its Stop was still in the spool: the
+    turn had ended after all. The reply goes into its thread, not into a thread without a prompt."""
+    put(project, "UserPromptSubmit", prompt="a")
+    events.consume(project)
+    actions.set_live(task(project).id, False)
+    put(project, "Stop", last_assistant_message="done a")
+    put(project, "SessionEnd", reason="other")
+    events.consume(project)
+    t = task(project)
+    assert [(th.prompt, th.reply, th.kind) for th in t.threads] == [("a", "done a", "pending")]
+    assert (t.status, t.live, t.inbox) == ("waiting", False, True)
+
+
+# ---- StopFailure: a turn that ends on an API error (2026-11-14)
+
+
+def test_stop_failure_goes_to_the_inbox_with_the_error(project):
+    from brain_fry import digest
+
+    put(project, "UserPromptSubmit", prompt="fix the bug")
+    put(project, "StopFailure", error="rate_limit", error_details="429 Too Many Requests",
+        last_assistant_message="API Error: Rate limit reached")  # fmt: skip
+    events.consume(project)
+    t = task(project)
+    assert (t.status, t.live, t.inbox, t.unread) == ("waiting", True, True, True)
+    assert [(th.prompt, th.reply, th.kind) for th in t.threads] == [("fix the bug", "API Error: Rate limit reached", "interrupted")]
+    assert views.inbox_line(t) == "API Error: Rate limit reached"
+    assert not digest.needs_call(t)  # no digest of an error message
+
+
+def test_stop_failure_without_a_text_shows_the_error_kind(project):
+    put(project, "UserPromptSubmit", prompt="a")
+    put(project, "Notification", notification_type="permission_prompt", message="needs Bash")
+    put(project, "StopFailure", error="overloaded", error_details="529 Overloaded")
+    events.consume(project)
+    t = task(project)
+    assert (t.status, t.notification) == ("waiting", None)
+    assert views.inbox_line(t) == "API error: overloaded (529 Overloaded)"
+
+
+def test_stop_failure_alone_creates_no_task(project):
+    put(project, "StopFailure", sid="ghost", error="unknown")
+    assert events.consume(project) == []
+    assert not paths.task_path(project, "ghost").exists()
+
+
+def test_stop_failure_then_a_new_prompt(project):
+    put(project, "UserPromptSubmit", prompt="a")
+    put(project, "StopFailure", error="server_error", last_assistant_message="API Error: 500")
+    put(project, "UserPromptSubmit", prompt="try again")
+    put(project, "Stop", last_assistant_message="done")
+    events.consume(project)
+    assert [(th.prompt, th.reply, th.kind) for th in task(project).threads] == [
+        ("a", "API Error: 500", "interrupted"), ("try again", "done", "pending")]
+
+
+# ---- idle_prompt: a turn that ended without a Stop (Esc, an error) (2026-11-14)
+
+
+def test_idle_prompt_ends_a_turn_without_a_stop(project):
+    put(project, "UserPromptSubmit", prompt="fix the bug")
+    put(project, "Notification", notification_type="idle_prompt", message="Claude is waiting for your input")
+    events.consume(project)
+    t = task(project)
+    assert (t.status, t.live, t.inbox, t.unread) == ("waiting", True, True, True)  # the session stays live
+    assert t.threads[0].kind == "interrupted"
+    assert views.inbox_line(t) == "interrupted: fix the bug"
+
+    put(project, "UserPromptSubmit", prompt="continue")
+    events.consume(project)
+    assert [th.kind for th in task(project).threads] == ["interrupted", "working"]
+
+
+def test_idle_prompt_leaves_a_task_that_waits_for_its_agents(project):
+    put(project, "UserPromptSubmit", prompt="find photos")
+    put(project, "Stop", last_assistant_message="I'll wait for the photos.", background_tasks=[_bg()])
+    put(project, "Notification", notification_type="idle_prompt", message="waiting")
+    events.consume(project)
+    t = task(project)
+    assert (t.status, t.inbox, t.unread, t.threads[0].kind) == ("working", False, False, "pending")
+
+
+def test_idle_prompt_leaves_a_held_task(project):
+    put(project, "UserPromptSubmit", prompt="wait")
+    put(project, "Stop", last_assistant_message="I'll wait.", background_tasks=[_bg("shell")])
+    put(project, "Notification", notification_type="idle_prompt", message="waiting")
+    events.consume(project)
+    t = task(project)
+    assert (t.status, t.inbox, t.held, t.threads[0].kind) == ("working", False, True, "pending")
+
+
+def test_idle_prompt_leaves_a_blocked_task(project):
+    """Blocked is in the inbox already; the dialog's end or the Stop clears it."""
+    put(project, "UserPromptSubmit", prompt="a")
+    put(project, "Notification", notification_type="permission_prompt", message="needs Bash")
+    put(project, "Notification", notification_type="idle_prompt", message="waiting")
+    events.consume(project)
+    t = task(project)
+    assert (t.status, t.notification, t.threads[0].kind) == ("blocked", "needs Bash", "working")
+
+
+def test_a_stop_after_the_idle_prompt_fills_the_thread(project):
+    """The turn was not over after all: the reply goes into its thread."""
+    put(project, "UserPromptSubmit", prompt="a")
+    put(project, "Notification", notification_type="idle_prompt", message="waiting")
+    put(project, "Stop", last_assistant_message="done a")
+    events.consume(project)
+    t = task(project)
+    assert [(th.prompt, th.reply, th.kind) for th in t.threads] == [("a", "done a", "pending")]
+    assert (t.status, t.inbox) == ("waiting", True)
+
+
+def test_a_background_result_after_the_idle_prompt_has_its_own_thread(project):
+    put(project, "UserPromptSubmit", prompt="a")
+    put(project, "Notification", notification_type="idle_prompt", message="waiting")
+    put(project, "UserPromptSubmit", prompt="<task-notification>\n...")
+    put(project, "Stop", last_assistant_message="the shell ended")
+    events.consume(project)
+    assert [(th.prompt[:7], th.reply, th.kind) for th in task(project).threads] == [
+        ("a", "", "interrupted"), ("<task-n", "the shell ended", "pending")]
+
+
+# ---- a background result delivered during a turn joins the open thread (2026-11-14)
+
+
+def test_a_background_result_during_the_turn_joins_the_open_thread(project):
+    put(project, "UserPromptSubmit", prompt="review it, with 2 agents")
+    put(project, "UserPromptSubmit", prompt='<agent-message from="a1">\n...')
+    put(project, "UserPromptSubmit", prompt="<task-notification>\n...")
+    events.consume(project)
+    t = task(project)
+    assert [(th.prompt, th.kind) for th in t.threads] == [("review it, with 2 agents", "working")]
+    assert (t.status, t.inbox) == ("working", False)
+    put(project, "Stop", last_assistant_message="Both agents agree.")
+    events.consume(project)
+    t = task(project)
+    assert [(th.prompt, th.reply, th.kind) for th in t.threads] == [("review it, with 2 agents", "Both agents agree.", "pending")]
+    assert (t.status, t.inbox) == ("waiting", True)
+
+
+def test_a_background_result_while_blocked_joins_the_open_thread(project):
+    put(project, "UserPromptSubmit", prompt="a")
+    put(project, "Notification", notification_type="permission_prompt", message="needs Bash")
+    put(project, "UserPromptSubmit", prompt='<agent-message from="a1">\n...')
+    events.consume(project)
+    t = task(project)
+    assert ([th.kind for th in t.threads], t.status, t.inbox) == (["working"], "working", False)
+
+
+def test_a_background_result_after_a_refusal_has_its_own_thread(project):
+    """The refusal ended the turn (actions.end_block: waiting), so the result starts a new one."""
+    put(project, "UserPromptSubmit", prompt="a")
+    put(project, "Notification", notification_type="permission_prompt", message="needs Bash")
+    events.consume(project)
+    actions.end_block(task(project).id, "idle", 9e9)
+    put(project, "UserPromptSubmit", prompt='<agent-message from="a1">\n...')
+    events.consume(project)
+    assert [th.kind for th in task(project).threads] == ["interrupted", "working"]
+
+
+def test_a_background_result_as_the_first_event(project):
+    put(project, "UserPromptSubmit", prompt='<agent-message from="a1">\n...')
+    events.consume(project)
+    assert [th.kind for th in task(project).threads] == ["working"]
+
+
 def test_session_end_when_idle_stays_out_of_the_inbox(project):
     put(project, "UserPromptSubmit", prompt="a")
     put(project, "Stop", last_assistant_message="done")
@@ -437,3 +605,43 @@ def test_session_end_when_idle_stays_out_of_the_inbox(project):
     events.consume(project)
     t = task(project)
     assert (t.status, t.live, t.inbox, t.unread) == ("waiting", False, False, False)
+
+
+def test_an_event_that_cannot_be_applied_is_set_aside(project, monkeypatch):
+    real = taskfile.save
+
+    def save(t):
+        if t.id == "bad":
+            raise OSError("its folder is gone")
+        return real(t)
+
+    monkeypatch.setattr(taskfile, "save", save)
+    put(project, "UserPromptSubmit", "bad", prompt="x")
+    put(project, "UserPromptSubmit", "good", prompt="y")
+    assert events.consume(project) == ["good"]  # the event behind it is applied
+    failed = list(paths.failed_dir(project).glob("*.json"))
+    assert len(failed) == 1 and events.pending(project) == []
+    assert events.consume(project) == []  # not tried again
+    monkeypatch.setattr(taskfile, "save", real)
+    failed[0].rename(paths.spool_dir(project) / failed[0].name)  # moved back by hand: applied
+    assert events.consume(project) == ["bad"]
+
+
+def test_a_deleted_task_comes_back_only_from_the_trash(project, tmp_path, monkeypatch):
+    """A Stop already on its way when I delete the task would import it again from its transcript."""
+    put(project, "UserPromptSubmit", prompt="go")
+    events.consume(project)
+    trash = tmp_path / "Trash"
+    trash.mkdir()
+    monkeypatch.setattr("brain_fry.files._move_to_trash", lambda p: p.rename(trash / p.name))
+    actions.delete("s1")
+    put(project, "Stop", last_assistant_message="Done.")
+    put(project, "Notification", notification_type="permission_prompt", message="needs Bash")
+    assert events.consume(project) == []
+    assert not taskfile.path_of(project, "s1").exists()
+    assert list(paths.spool_dir(project).glob("*.json")) == []  # applied (as ignored), not set aside
+
+    (trash / "s1.md").rename(taskfile.path_of(project, "s1"))  # Finder's Put Back
+    put(project, "Stop", last_assistant_message="Done.")
+    assert events.consume(project) == ["s1"]
+    assert task(project).threads[0].reply == "Done."

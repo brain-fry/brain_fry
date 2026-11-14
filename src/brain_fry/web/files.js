@@ -6,7 +6,8 @@
 // task or to its project (project tabs, `project:<path>`, app.js): every view of the project shows
 // the project's tabs too (viewTabs), and a tab opened with no task selected is one of them.
 // A tab's `kind`: text, image, pdf, thread (1b),
-// web (browser.js), shell (shells.js) or finder (finder.js); an untitled text tab has `untitled` (Cmd+N F).
+// web (browser.js), shell (shells.js), finder (finder.js) or preview (a markdown preview, mdpreview.js);
+// an untitled text tab has `untitled` (Cmd+N F).
 // Uses S, $, esc, request, send, toast, store, stored from app.js, which loads first, and the
 // panes of grid.js (PANES, paneTabs, paneActive, addTab, showTab, dropTab, openPane...).
 
@@ -27,7 +28,9 @@ function work(tid) {
 }
 
 // a tab that shows a file of the project (the poll, the explorer, files.set)
-const isFileTab = (t) => !t.thread && !t.web && !t.shell && !t.untitled && !t.finder;
+const isFileTab = (t) => !t.thread && !t.web && !t.shell && !t.untitled && !t.finder && !t.preview;
+// kept in the task's open files: a file tab, or a markdown preview (`preview:<path>`, mdpreview.js)
+const keptAsFile = (t) => isFileTab(t) || Boolean(t.preview);
 
 // ------------------------------------------------------------------ project tabs
 // The tabs that a view shows: its own and, for a task, its project's, which come first in each
@@ -65,7 +68,7 @@ function dropDuplicates(tab) {
   const project = wsProject(tab.tid);
   for (const w of Object.values(S.work || {})) {
     if (isProjectWs(w.id) || wsProject(w.id) !== project) continue;
-    const dup = w.tabs.find((t) => t !== tab && isFileTab(t) && t.path === tab.path);
+    const dup = w.tabs.find((t) => t !== tab && keptAsFile(t) && t.path === tab.path);
     if (!dup) continue;
     destroyTab(w, dup);
     saveOpenFiles(w.id);
@@ -87,9 +90,9 @@ function toggleProjectTab(tab) {
   uiLog(`tab: ${isProjectWs(to) ? 'becomes a project tab' : 'back to the task'} (${tab.kind})`);
   if (tab.shell) { send('shell.move', { key: tab.key, to }); return; }
   reown(tab, to);
-  if (isFileTab(tab) && isProjectWs(to)) dropDuplicates(tab);
+  if (keptAsFile(tab) && isProjectWs(to)) dropDuplicates(tab);
   for (const tid of [from, to]) {
-    if (isFileTab(tab)) saveOpenFiles(tid);
+    if (keptAsFile(tab)) saveOpenFiles(tid);
     else if (tab.web) saveWebTabs(tid);
     else if (tab.finder) saveFinderTabs(tid);
     saveGrid(tid);
@@ -110,15 +113,56 @@ let syncing = false; // the other tabs of a file are taking a change: it is not 
 function shareFile(tab, file) {
   tab.file = file;
   for (const k of FILE_STATE) {
-    Object.defineProperty(tab, k, { get() { return this.file[k]; }, set(v) { this.file[k] = v; }, enumerable: true });
+    Object.defineProperty(tab, k, { get() { return this.file[k]; },
+      set(v) { const was = this.file[k]; this.file[k] = v; if (k === 'dirty' && was !== v) dirtyLater(); }, enumerable: true });
   }
 }
 
-// a text tab of `path` in another task (or the same) of the project of `tid`
-function peerTab(tid, path, except = null) {
-  const project = wsProject(tid);
+// ------------------------------------------------------------------ unsaved edits at quit
+// The backend keeps the list of the files with unsaved edits, in every task, for the one question
+// at quit (main.py): the window's close button and Cmd+Q are handled in Python, on the main thread,
+// where asking the page would block. Sent each time the list changes: a `dirty` that changes, a tab
+// that closes, and the 2 s poll for the other ways a tab goes.
+
+let dirtySent; // undefined: the first sync always sends (a reloaded page has no unsaved edits)
+let dirtyTimer = null;
+
+// one name per text (the tabs that share it count once): the path, or Untitled-n
+function dirtyFiles() {
+  const seen = new Set();
+  const out = [];
   for (const w of Object.values(S.work || {})) {
-    for (const t of w.tabs) if (t !== except && t.file && !t.untitled && t.path === path && wsProject(t.tid) === project) return t;
+    for (const t of w.tabs) {
+      if (!t.dirty || seen.has(t.file || t)) continue;
+      seen.add(t.file || t);
+      out.push(t.untitled ? t.name : t.path);
+    }
+  }
+  return out;
+}
+
+function syncDirty() {
+  const files = dirtyFiles();
+  const key = JSON.stringify(files);
+  if (key === dirtySent) return;
+  dirtySent = key;
+  request('files.dirty', { files }).catch(() => { if (dirtySent === key) dirtySent = undefined; }); // not connected: the poll sends it again
+}
+
+function dirtyLater() {
+  if (!dirtyTimer) dirtyTimer = setTimeout(() => { dirtyTimer = null; syncDirty(); }, 0);
+}
+
+// A tab's file as an absolute path. A tab names a file of its project by a relative path, and any
+// other file by its absolute path (files.tab_path), so one file outside a project can be open in
+// the tasks of two projects.
+const fullPathOf = (tid, path) => (path.startsWith('/') ? path : `${wsProject(tid)}/${path}`);
+
+// a text tab of the same file in another task (or the same), of any project
+function peerTab(tid, path, except = null) {
+  const want = fullPathOf(tid, path);
+  for (const w of Object.values(S.work || {})) {
+    for (const t of w.tabs) if (t !== except && t.file && !t.untitled && fullPathOf(t.tid, t.path) === want) return t;
   }
   return null;
 }
@@ -173,6 +217,7 @@ function tabName(t) {
   if (t.thread) return `Thread ${t.thread.n}`;
   if (t.web) return webTabName(t);
   if (t.finder) return finderName(t);
+  if (t.preview) return `Preview ${t.src.split('/').pop()}`; // as VS Code
   if (t.shell || t.untitled) return t.name;
   return t.path.split('/').pop();
 }
@@ -208,6 +253,7 @@ async function loadDir(tid, path, quiet = false) {
 function refreshTree(tid) {
   const w = work(tid);
   for (const path of ['', ...w.open]) if (w.kids.has(path)) loadDir(tid, path, true);
+  treeSearchRefresh(tid); // the results of the explorer search, if they show, run again quietly (treesearch.js)
 }
 
 function renderExplorer() {
@@ -218,7 +264,7 @@ function renderExplorer() {
   const el = $('#tree');
   const landed = S.mode === 'dev' && tid !== S.treeWs; // another layout on screen (S.idle keeps the one that I left)
   if (S.mode === 'dev') S.treeWs = tid;
-  if (!project) { el.innerHTML = ''; return; }
+  if (!project) { el.innerHTML = ''; treeSearchSync(tid); return; }
   const w = work(tid);
   if (landed && w.kids.has('')) refreshTree(tid); // its tree is as it was when last on screen: files changed since
   if (task && task.updated !== w.lastUpdated) { // an event arrived: the agent may have added files
@@ -226,6 +272,7 @@ function renderExplorer() {
     w.lastUpdated = task.updated;
     if (!first) refreshTree(tid);
   }
+  if (treeSearchDraw(tid, w, el)) return; // the results of the explorer search, in place of the tree (treesearch.js)
   if (!w.kids.has('')) { loadDir(tid, ''); el.innerHTML = ''; return; }
   const rows = [];
   const shown = fileOnScreen(w);
@@ -250,6 +297,7 @@ function renderExplorer() {
 
 // A click on a row of 2a, or its key after Cmd+J E (explorer.js). double: the second click.
 function clickTreeNode(path, dir, double) {
+  if (treeSearchClick(path, dir, double)) return; // a row of the explorer search's results (treesearch.js)
   const w = work(wsId());
   w.treeSel = path;
   if (dir) {
@@ -296,6 +344,7 @@ function makeTab(tid, path, r, peer = null) {
         tab.crlf ? CM.EditorState.lineSeparator.of('\r\n') : [], // save CRLF files as CRLF
         CM.EditorView.updateListener.of((u) => {
           if (u.docChanged && !syncing) docChanged(tab, u.changes);
+          if (u.docChanged) previewSoon(tab); // its markdown preview follows, unsaved edits too (mdpreview.js)
           if (u.selectionSet || u.docChanged) syncSelection();
         }),
         CM.EditorView.theme({
@@ -556,6 +605,7 @@ function focusTab(tab) {
 // project tab (ownerFor); a restore adds it to `tid` itself. A file that is a project tab already
 // shows that tab.
 async function openFile(tid, path, focus = true, pane = null, show = true, external = false) {
+  if (path.startsWith(MD_PREFIX)) { await openPreview(tid, path.slice(MD_PREFIX.length), focus, pane, show); return; } // a restore (mdpreview.js)
   const w = work(tid);
   const find = () => viewTabs(w).find((t) => t.path === path && !t.thread);
   let tab = find();
@@ -599,6 +649,53 @@ async function openLink(tid, target) {
   if (r.line) goToLine(viewTabs(work(tid)).find((t) => t.path === r.path), r.line);
 }
 
+// `bf <file>` in a terminal tab (shell_init.bash --> ptys.py --> Core._shell_open, a `type: open`
+// message): the file opens as a Cmd+click on a file link opens it (openPane: not over the
+// terminal), at its line if it has one. A file that does not exist yet opens empty, and its first
+// save writes it (VS Code's `code new.txt`). `bf a b`: in that order, the last one on screen.
+let shellOpens = Promise.resolve();
+function onShellOpen(m) {
+  shellOpens = shellOpens.then(async () => {
+    if (m.error) { toast(`bf: ${m.error}`); return; }
+    if (!inView(m.tid)) { toast(`bf: ${m.path} not opened: its terminal is no longer on screen.`); return; }
+    const tid = wsId();
+    if (m.new) openNewPath(tid, m.path);
+    else await openFile(tid, m.path);
+    if (m.line) goToLine(viewTabs(work(tid)).find((t) => t.path === m.path), m.line);
+  }).catch((e) => toast(`bf: ${e.message}`));
+}
+
+// A file that is not on disk yet: version null, which the poll leaves alone (null on disk too),
+// and which saveTab writes only while no file has appeared there. Not kept in the task file
+// until its first save (saveOpenFiles).
+function openNewPath(tid, path) {
+  const w = work(tid);
+  let tab = viewTabs(w).find((t) => t.path === path && !t.thread);
+  if (!tab) {
+    const owner = ownerFor(tid);
+    tab = makeTab(owner, path, { text: '', version: null, head: null }, peerTab(owner, path));
+    addTab(work(owner), tab, openPane(w));
+  }
+  showTab(tab, true);
+}
+
+// File > Open... (main.py --> menuAction): macOS's open panel in the project on screen
+// (fs.openpanel); the files open in the pane that I use (w.pane), not where a click in 2a opens
+// them. A file that is open already shows where it is. From Organize or Review mode: Dev mode.
+// A file outside the project comes back as an absolute path.
+async function openFromPanel() {
+  const tid = wsId();
+  if (!tid) { toast('Pick a project first.'); return; }
+  let r;
+  try { r = await request('fs.openpanel', { id: tid }); } catch (e) { toast(e.message); return; }
+  if (!r || !r.paths.length) return; // cancelled
+  const now = wsId(); // a task may have come into the inbox while the panel was open
+  if (!now || wsProject(now) !== wsProject(tid)) { toast('Not opened: another project came on screen.'); return; }
+  if (S.mode !== 'dev') setMode('dev');
+  const w = work(now);
+  for (const path of r.paths) await openFile(now, path, true, w.pane || 1);
+}
+
 function goToLine(tab, n) {
   if (!tab || !tab.view || tab.kind === 'thread') return; // an image or a PDF has no lines
   const doc = tab.view.state.doc;
@@ -607,7 +704,8 @@ function goToLine(tab, n) {
 }
 
 function saveOpenFiles(tid) { // thread tabs are not kept: they are one click away in 1b. Browser tabs: browser.js
-  send('files.set', { id: tid, paths: work(tid).tabs.filter(isFileTab).map((t) => t.path) }); // a project's: project.json
+  const kept = work(tid).tabs.filter((t) => keptAsFile(t) && t.version !== null); // null: not on disk yet (openNewPath)
+  send('files.set', { id: tid, paths: kept.map((t) => t.path) }); // a project's: project.json
 }
 
 // ------------------------------------------------------------------ thread tabs (1b --> 3a)
@@ -717,7 +815,7 @@ function closeFile(tid, path, ask = true) {
   } else {
     destroyTab(work(tab.tid), tab);
   }
-  if (isFileTab(tab)) saveOpenFiles(tab.tid);
+  if (keptAsFile(tab)) saveOpenFiles(tab.tid);
   if (tab.finder) saveFinderTabs(tab.tid);
   saveGrid(tid);
   if (tab.tid !== tid) saveGrid(tab.tid);
@@ -730,6 +828,8 @@ function destroyTab(w, tab) { // any tab but a terminal; w: its owner
   if (tab.task) tab.task.destroy().catch(() => {});
   if (tab.close) tab.close(); // a browser tab: its native page (browser.js)
   dropTab(w, tab);
+  if (tab.dirty) dirtyLater();
+  if (tab.file) previewEditorGone(tab); // its markdown preview goes back to the disk's text (mdpreview.js)
 }
 
 // An untitled tab: the save panel of macOS, in the project folder. A file outside the project
@@ -765,6 +865,7 @@ async function saveAs(tab) {
 async function saveTab(tab, force = false) {
   if (tab.untitled) return saveAs(tab);
   const text = tab.view.state.sliceDoc(); // joined with the file's own line separator
+  const created = tab.version === null; // `bf new.txt` (openNewPath): this save writes the file
   let r;
   try { r = await request('fs.write', { id: tab.tid, path: tab.path, text, base: tab.version, force }); } catch (e) { toast(e.message); return; }
   if (r.conflict) {
@@ -775,6 +876,7 @@ async function saveTab(tab, force = false) {
     tab.dirty = false;
     tab.diskChanged = false;
     tab.gone = false;
+    if (created) { saveOpenFiles(tab.tid); refreshTree(tab.tid); }
   }
   renderFiles();
 }
@@ -800,14 +902,14 @@ function setDiff(tab, on) {
 }
 
 // Wrap belongs to the file, as VS Code's Option+Z: every tab of the file follows, in every task of
-// the project (they share its files), and it is remembered by the window (localStorage).
+// the project (they share its files), and it is remembered in window.json (store, app.js).
 function wrapKey(tid, path) {
   return `wrap:${wsProject(tid) || ''}:${path}`;
 }
 
 function setWrap(tab, on) {
   const key = wrapKey(tab.tid, tab.path);
-  if (on) store(key, true); else try { localStorage.removeItem(key); } catch { /* not remembered */ }
+  store(key, on ? true : null); // null: forgotten
   for (const ws of Object.values(S.work || {})) {
     for (const t of ws.tabs) {
       if (t.kind !== 'text' || !t.wrapC || wrapKey(t.tid, t.path) !== key) continue;
@@ -832,7 +934,8 @@ function renderFileTabs() {
     G.els[n].tabs.innerHTML = tabs.map((t) => {
       // a terminal: the folder where its shell is now (bash tells it, shell_init.bash), else where it started
       const shell = t.shell && shellsOf(t.tid).find((s) => s.key === t.key);
-      const title = t.web ? t.url : t.shell ? `Terminal in ${shell && shell.cwd ? shell.cwd : 'the task folder'}` : t.untitled ? 'Not saved yet' : t.finder ? finderTitle(t) : t.path;
+      const title = t.web ? t.url : t.shell ? `Terminal in ${shell && shell.cwd ? shell.cwd : 'the task folder'}` : t.untitled ? 'Not saved yet'
+        : t.finder ? finderTitle(t) : t.preview ? `Preview of ${t.src}` : t.path;
       const proj = isProjectWs(t.tid); // a project tab: a small grey star (Renaud picked it from a mockup, 2026-11-11)
       return `<div class="tab ${t.path === w.act[n] ? 'on' : ''} ${t.gone ? 'gone' : ''} ${t.dirty ? 'dirty' : ''}" data-file="${esc(t.path)}" title="${esc(title)}${proj ? ' (project tab: in every task of the project)' : ''}">`
         + `${proj ? '<span class="star">★</span>' : ''}${t.finder ? `<img class="tab-icon" src="${fdIcon('folder')}" alt="" draggable="false">` : ''}${esc(tabName(t))}<span class="x" data-close-file="${esc(t.path)}">×</span></div>`;
@@ -891,6 +994,7 @@ function renderBar(n, tab) {
   const notes = [];
   if (tab.gone) notes.push('<span class="note">Deleted on disk.</span>');
   if (tab.error) notes.push(`<span class="note">${esc(tab.error)}</span>`);
+  if (tab.preview) return setBarN(`<span class="path">${esc(tab.src)}</span>${notes.join('')}`); // mdpreview.js
   const external = '<button data-file-act="external" title="Open the file with its default app of macOS">Open in default app</button>';
   if (tab.kind === 'image') {
     const meta = [tab.dims, fmtBytes(tab.size)].filter(Boolean).join(' · ');
@@ -917,6 +1021,7 @@ function renderBar(n, tab) {
 const PLAY_SVG = '<svg viewBox="0 0 16 16" width="11" height="11" aria-hidden="true"><path d="M4.5 2.5v11l9-5.5z" fill="currentColor"/></svg>';
 
 setInterval(async () => {
+  syncDirty(); // also the first sync after a (re)load
   const tid = wsId();
   const w = tid && S.mode === 'dev' && S.work && S.work[tid];
   const fileTabs = w ? viewTabs(w).filter(isFileTab) : [];
@@ -1040,23 +1145,30 @@ document.addEventListener('click', (e) => {
   }
 }, true);
 
-// Cmd+F: the find of the tab on screen in the pane that I used last, wherever the keyboard is
-// (the explorer, a tab bar, nothing focused): a PDF's find field, CodeMirror's find panel in a
-// text or thread tab (asked by Renaud on 2026-11-11). Not from a text field nor a terminal
-// (xterm.js's textarea): they keep their keys. A CodeMirror editor that has the keyboard opens
-// its own panel. Browser pages: browser.js.
+// Cmd+F (asked by Renaud on 2026-11-14: "I want Command-F to open from anywhere"): the explorer
+// search (treesearch.js), wherever the keyboard is in Dev mode (4a, a terminal tab, the explorer,
+// the inbox, nothing), except in a tab that has a find of its own: a CodeMirror editor (text and
+// thread tabs: its own key opens its find panel), a PDF tab (its find field), a browser page
+// (browser.js: the find of its bar, also for the key that the native page forwards). A text field
+// keeps the key (a rename), except the search's own fields. xterm.js's textarea does not keep it.
+// Until 2026-11-14, Cmd+F from the explorer, a tab bar or nothing opened the find of the tab on
+// screen in the pane that I used last (2026-11-11). Cmd+J F opens the search from a file too (grid.js).
 document.addEventListener('keydown', (e) => {
   if (!e.metaKey || e.key.toLowerCase() !== 'f' || S.mode !== 'dev' || S.picker) return;
-  const tab = activeTab();
-  if (!tab || !(tab.kind === 'pdf' || tab.view)) return;
   const a = document.activeElement;
   if (a && a.closest && a.closest('.cm-editor')) return;
-  const pdfField = tab.kind === 'pdf' && tab.tools.contains(a);
-  if (!pdfField && a && a.matches && a.matches('input, select, textarea, [contenteditable]')) return;
+  const tab = activeTab();
+  if (tab && tab.web && !e.isTrusted && e.target === document.body) return; // forwarded by the page (forwardKey): browser.js
+  const n = paneOf(a); // grid.js: the pane that has the keyboard, or 0
+  const here = n && wsId() ? paneActive(work(wsId()), n) : null;
+  if (here && here.web) return; // its address or find field: browser.js
+  const pdf = here && here.kind === 'pdf' ? here : null;
+  const field = a && a.matches && a.matches('input, select, textarea, [contenteditable]') && !a.classList.contains('xterm-helper-textarea');
+  if (field && !pdf && !$('#tree-search').contains(a)) return;
   e.preventDefault();
-  e.stopPropagation();
-  if (tab.view) { CM.openSearchPanel(tab.view); return; }
-  const f = tab.tools.querySelector('.pdf-find');
+  e.stopImmediatePropagation(); // not browser.js's find too, when a page shows in the pane that I use
+  if (!pdf) { openTreeSearch(); return; }
+  const f = pdf.tools.querySelector('.pdf-find');
   f.focus();
   f.select();
 }, true);

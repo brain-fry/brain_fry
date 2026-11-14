@@ -24,9 +24,10 @@ def selection_file() -> Path:
 
 
 def write(task, rel: str, first: int, last: int, text: str, total: int, dirty: bool) -> dict:
-    """`rel` is relative to the task's project (as in 3a). The hook shows the path relative
-    to the session's cwd (where Claude runs), or absolute when the file is outside it."""
-    p = files.resolve(task.project, rel)
+    """`rel` is relative to the task's project, or absolute for a file outside it (as in 3a,
+    files.locate). The hook shows the path relative to the session's cwd (where Claude runs),
+    or absolute when the file is outside it."""
+    p = files.locate(task.project, rel)
     cwd = Path(task.cwd or task.project).resolve()
     shown = str(p.relative_to(cwd)) if cwd in p.parents else str(p)
     data = {"session_id": task.id, "pid": os.getpid(), "path": shown, "from": first, "to": last,

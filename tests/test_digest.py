@@ -91,12 +91,13 @@ def test_held_reply_that_does_not_wait_goes_to_the_inbox(project, kind):
 
 
 def test_held_reply_goes_to_the_inbox_when_the_digest_fails(project):
-    _held(project)
+    t = _held(project)
 
     def call(prompt):
         raise digest.DigestError("boom")
 
-    digest.digest_project(project, call)
+    with pytest.raises(digest.DigestError):
+        digest.digest_task(t, call)
     got = taskfile.load(paths.task_path(project, "s1"))
     assert (got.held, got.status, got.inbox, got.threads[0].kind) == (False, "waiting", True, "pending")
 
@@ -106,8 +107,9 @@ def test_held_reply_archived_meanwhile_stays_archived(project):
     t.status = "done"
     taskfile.save(t)
     digest.digest_task(t, _one("review"))
-    got = taskfile.load(paths.task_path(project, "s1"))
+    got = taskfile.load(paths.archive_path(project, "s1"))  # still in the archive folder
     assert (got.held, got.status, got.inbox) == (False, "done", False)
+    assert not paths.task_path(project, "s1").exists()
 
 
 def test_wait_without_a_hold_changes_nothing(project):
@@ -126,13 +128,13 @@ def test_wait_is_described_in_the_schema_and_the_prompt():
 
 
 def test_failure_leaves_the_thread_pending(project):
-    make(project, [Thread(n=1, ts="x", kind="pending", reply="a")])
+    t = make(project, [Thread(n=1, ts="x", kind="pending", reply="a")])
 
     def call(prompt):
         raise digest.DigestError("boom")
 
-    changed, errors = digest.digest_project(project, call)
-    assert changed == [] and errors == ["s1: boom"]
+    with pytest.raises(digest.DigestError, match="boom"):
+        digest.digest_task(t, call)
     assert taskfile.load(paths.task_path(project, "s1")).threads[0].kind == "pending"
 
 

@@ -1,6 +1,7 @@
 #!/bin/bash
 # Brain Fry hook. Installed by `bf install` as ~/.brain_fry/hook.sh and registered in
-# ~/.claude/settings.json for UserPromptSubmit, Stop, Notification and SessionEnd.
+# ~/.claude/settings.json for UserPromptSubmit, Stop, StopFailure, Notification and SessionEnd.
+# It passes any event through: the reader (events.py) decides what each one means.
 # See DESIGN.md, "Hooks", and DESIGN_DETAILS.md, "Hooks".
 #
 # Writes the payload, plus bf_ts (epoch seconds), as one file in

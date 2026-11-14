@@ -55,7 +55,7 @@ async function runPython(tab) {
 }
 
 // The terminal tabs of every task and project follow the state. A new shell goes to the pane that
-// I asked for (newShell), or to the one that the window remembers for its position (grid.js), or to 1.
+// I asked for (newShell), or to the one that the grid remembers for its position (grid.js), or to 1.
 function renderShells() {
   const st = S.state;
   let changed = false;

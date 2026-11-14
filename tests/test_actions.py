@@ -37,6 +37,22 @@ def test_archive_and_back(project):
     assert actions.archive(t.id).status == "waiting"
 
 
+def test_delete_moves_the_task_file_to_the_trash(project, tmp_path, monkeypatch):
+    trash = tmp_path / "Trash"
+    trash.mkdir()
+    monkeypatch.setattr("brain_fry.files._move_to_trash", lambda p: p.rename(trash / p.name))  # a real call fills my Trash
+    t, a = actions.new_task(project), actions.new_task(project)
+    actions.archive(a.id)  # its file is in archive/
+    for x in (t, a):
+        assert actions.delete(x.id).id == x.id
+        with pytest.raises(actions.NotFound):
+            actions.load(x.id)
+    assert sorted(f.name for f in trash.iterdir()) == sorted([f"{t.id}.md", f"{a.id}.md"])
+    assert events.FORGOTTEN == {t.id, a.id}  # their sessions create no task again in this run
+    with pytest.raises(actions.NotFound):
+        actions.delete("no-such-task")
+
+
 def test_mark_opened_reads_and_keeps_board_order(project):
     t = actions.new_task(project)
     actions._update(t.id, inbox=True, unread=True, updated="2026-11-01T10:00:00+01:00")
@@ -183,8 +199,8 @@ def test_park_others_moves_the_working_tasks_of_the_other_projects(project, home
     theirs = actions._update(actions.new_task(other).id, inbox=True)
     archived = actions._update(actions.new_task(other).id, status="done")
     later = actions.set_prio(actions.new_task(other).id, "later")
-    assert sorted(actions.park_others(project)) == sorted([theirs.id, archived.id])
+    assert actions.park_others(project) == [theirs.id]  # open tasks only: the archive is out of all_tasks (2026-11-14)
     prios = {t.id: actions.load(t.id).prio for t in (mine, theirs, archived, later)}
-    assert prios == {mine.id: "working", theirs.id: "next", archived.id: "next", later.id: "later"}
+    assert prios == {mine.id: "working", theirs.id: "next", archived.id: "working", later.id: "later"}
     assert actions.load(theirs.id).inbox and not views.in_inbox(actions.load(theirs.id))
     assert actions.park_others(project) == []

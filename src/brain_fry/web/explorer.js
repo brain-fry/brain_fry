@@ -46,10 +46,17 @@ function ctxItems(tid, path, dir) {
     { label: 'New Folder...', run: () => startCreate(tid, into, true) },
     '-',
   ];
-  if (path === null) return [...create, paste, '-', refresh];
+  // Open in Finder (asked by Renaud on 2026-11-14): a folder opens in Finder, a file shows selected
+  // in a Finder window on its folder (VS Code's Reveal in Finder), the empty space opens the project folder
+  if (path === null) return [...create, { label: 'Open in Finder', run: () => send('fs.open', { id: tid, path: '' }) }, '-', paste, '-', refresh];
+  // a markdown file: as VS Code's Open Preview (asked by Renaud on 2026-11-14, mdpreview.js)
+  const preview = !dir && mdPreviewable(path) ? [{ label: 'Open Preview', run: () => openPreview(tid, path) }] : [];
   return [
     ...create,
-    { label: dir ? 'Open in Finder' : 'Open in default app', run: () => send('fs.open', { id: tid, path }) },
+    ...preview,
+    ...(dir ? [] : [{ label: 'Open in default app', run: () => send('fs.open', { id: tid, path }) }]),
+    { label: 'Open With', sub: () => openWithItems('fs.apps', { id: tid, path }, (app) => send('fs.open', { id: tid, path, app })) },
+    { label: 'Open in Finder', run: () => send('fs.open', { id: tid, path, reveal: !dir }) },
     { label: 'Open a terminal here', run: () => terminalHere(tid, path) },
     '-',
     { label: 'Cut', run: () => setClip(tid, path, true) },
@@ -66,22 +73,110 @@ function ctxItems(tid, path, dir) {
   ];
 }
 
+function ctxHtml(items, attr) {
+  return items.map((it, i) => (it === '-' ? '<hr>'
+    : `<button data-${attr}="${i}" ${it.disabled ? 'disabled' : ''}>${esc(it.label)}${it.key ? `<kbd>${esc(it.key)}</kbd>` : ''}${it.sub ? '<b>›</b>' : ''}</button>`)).join('');
+}
+
 function openCtx(x, y, items) {
   const m = $('#ctx');
+  ctxReset();
   ctxNow = items;
-  m.innerHTML = items.map((it, i) => (it === '-' ? '<hr>'
-    : `<button data-ctx="${i}" ${it.disabled ? 'disabled' : ''}>${esc(it.label)}${it.key ? `<kbd>${it.key}</kbd>` : ''}</button>`)).join('');
+  m.innerHTML = ctxHtml(items, 'ctx');
   m.hidden = false; // covers the browser view: browser.js shows its snapshot meanwhile
   const r = m.getBoundingClientRect();
   m.style.left = `${Math.max(4, Math.min(x, innerWidth - r.width - 4))}px`;
   m.style.top = `${Math.max(4, Math.min(y, innerHeight - r.height - 4))}px`;
 }
 
-function closeCtx() { $('#ctx').hidden = true; }
+function closeCtx() { closeSub(); ctxReset(); $('#ctx').hidden = true; }
+
+// A submenu (Open With): an item whose `sub` gives a Promise of its items. It opens as in Finder,
+// on hover after SUB_OPEN_MS, or at once on a click, beside its item (on the left when the right
+// has no room), moved up to fit the window. The mouse may cross the other items on its way to it:
+// it closes only if the mouse stays SUB_GRACE_MS on another item. It sits inside #ctx, so a click
+// outside, Esc and the browser's cover (browser.js) treat both menus as one.
+const SUB_OPEN_MS = 150;
+const SUB_GRACE_MS = 300;
+let ctxSub = { i: -1, items: [], openTimer: 0, closeTimer: 0, seq: 0 };
+
+function ctxReset() {
+  clearTimeout(ctxSub.openTimer);
+  clearTimeout(ctxSub.closeTimer);
+  ctxSub = { i: -1, items: [], openTimer: 0, closeTimer: 0, seq: ctxSub.seq + 1 };
+}
+
+function closeSub() {
+  clearTimeout(ctxSub.closeTimer);
+  $('#ctx .ctx-sub')?.remove();
+  $('#ctx').querySelector('button.open')?.classList.remove('open');
+  ctxSub.i = -1;
+  ctxSub.items = [];
+}
+
+async function openSub(i) {
+  clearTimeout(ctxSub.openTimer);
+  clearTimeout(ctxSub.closeTimer);
+  if (ctxSub.i === i) return;
+  closeSub();
+  const it = ctxNow[i];
+  const seq = ++ctxSub.seq;
+  let items;
+  try { items = await (it.subItems ??= it.sub()); } catch (e) { it.subItems = null; toast(errText(e)); return; }
+  if (seq !== ctxSub.seq || $('#ctx').hidden) return; // the menu closed, or another submenu opened, meanwhile
+  const btn = $('#ctx').querySelector(`button[data-ctx="${i}"]`);
+  if (!btn) return;
+  const el = document.createElement('div');
+  el.className = 'ctx-menu ctx-sub';
+  el.innerHTML = ctxHtml(items, 'sub');
+  $('#ctx').append(el);
+  ctxSub.i = i;
+  ctxSub.items = items;
+  btn.classList.add('open');
+  const m = $('#ctx').getBoundingClientRect();
+  const b = btn.getBoundingClientRect();
+  const r = el.getBoundingClientRect();
+  const left = m.right + r.width + 4 <= innerWidth ? m.right - 1 : Math.max(4, m.left - r.width + 1);
+  el.style.left = `${left}px`;
+  el.style.top = `${Math.max(4, Math.min(b.top - 5, innerHeight - r.height - 4))}px`; // its first item level with `btn`
+}
+
+$('#ctx').addEventListener('mouseover', (e) => {
+  if (e.target.closest('.ctx-sub')) { clearTimeout(ctxSub.closeTimer); return; }
+  const b = e.target.closest('button[data-ctx]');
+  if (!b) return;
+  const i = Number(b.dataset.ctx);
+  clearTimeout(ctxSub.openTimer);
+  if (ctxNow[i]?.sub && !b.disabled) {
+    clearTimeout(ctxSub.closeTimer);
+    if (ctxSub.i !== i) ctxSub.openTimer = setTimeout(() => openSub(i), SUB_OPEN_MS);
+  } else if (ctxSub.i >= 0) {
+    clearTimeout(ctxSub.closeTimer);
+    ctxSub.closeTimer = setTimeout(closeSub, SUB_GRACE_MS);
+  }
+});
+
+// Open With (asked by Renaud on 2026-11-14, look 2 of the mockup): the apps that macOS offers
+// (finder.apps_for), the default app first with "default" in gray on the right, the others in
+// Finder's order, then Other... (an app picked in macOS's open panel, not remembered).
+// `open(app)` opens the entry with the app at that path.
+async function openWithItems(cmd, args, open) {
+  const apps = await request(cmd, args);
+  const row = (a) => ({ label: a.name, key: a.default ? 'default' : '', run: () => open(a.path) });
+  const first = apps.filter((a) => a.default).map(row);
+  const rest = apps.filter((a) => !a.default).map(row);
+  const other = { label: 'Other...', run: async () => {
+    let app = null;
+    try { app = await request('apps.pick'); } catch (e) { toast(errText(e)); return; }
+    if (app) open(app);
+  } };
+  return [...first, ...(first.length && rest.length ? ['-'] : []), ...rest, ...(apps.length ? ['-'] : []), other];
+}
 
 function menuAction(name, arg) { // the File menu of the menu bar (main.py)
   if (name === 'refresh' && wsId()) refreshTree(wsId());
   if (name === 'project') addProject(arg); // app.js
+  if (name === 'open') openFromPanel(); // files.js
 }
 
 // ------------------------------------------------------------------ actions
@@ -252,15 +347,26 @@ function movedPaths(project, pairs) {
   sameProject(project, (id, w) => {
     let moved = false;
     for (const n of PANES) { // the tab on screen in each pane (grid.js), also a project tab that this view shows
-      const to = w.act[n] && !/^(shell|web|finder|thread|untitled):/.test(w.act[n]) ? map(w.act[n]) : null;
+      const a = w.act[n];
+      if (a && a.startsWith(MD_PREFIX)) { // a markdown preview (mdpreview.js)
+        const to = map(a.slice(MD_PREFIX.length));
+        if (to !== null) w.act[n] = MD_PREFIX + to;
+        continue;
+      }
+      const to = a && !/^(shell|web|finder|thread|untitled):/.test(a) ? map(a) : null;
       if (to !== null) w.act[n] = to;
     }
     for (const tab of w.tabs) {
+      if (tab.preview) {
+        const to = map(tab.src);
+        if (to !== null) { tab.src = to; tab.path = MD_PREFIX + to; moved = true; }
+        continue;
+      }
       const to = isFileTab(tab) ? map(tab.path) : null;
       if (to === null) continue;
       if (tab.langC) tab.view.dispatch({ effects: tab.langC.reconfigure(CM.languageFor(to)) });
       if (tab.wrap) { // remembered under the new path (files.js, setWrap)
-        try { localStorage.removeItem(wrapKey(id, tab.path)); } catch { /* not remembered */ }
+        store(wrapKey(id, tab.path), null); // null: forgotten
         store(wrapKey(id, to), true);
       }
       tab.path = to;
@@ -279,6 +385,7 @@ function gonePaths(project, paths) {
   const under = (p) => paths.some((a) => p === a || p.startsWith(`${a}/`));
   sameProject(project, (id, w) => {
     for (const tab of [...w.tabs]) {
+      if (tab.preview && under(tab.src)) { closeFile(id, tab.path); continue; } // its markdown preview (mdpreview.js)
       if (!isFileTab(tab) || !under(tab.path)) continue;
       if (tab.dirty) tab.gone = true;
       else closeFile(id, tab.path);
@@ -303,14 +410,24 @@ $('#tree').addEventListener('contextmenu', (e) => {
   const node = e.target.closest('.node[data-node]');
   if (node) { work(tid).treeSel = node.dataset.node; renderExplorer(); }
   $('#tree').focus();
-  openCtx(e.clientX, e.clientY, ctxItems(tid, node ? node.dataset.node : null, Boolean(node) && node.dataset.dir === '1'));
+  // in the results of the explorer search, without the items that make an entry (treesearch.js)
+  openCtx(e.clientX, e.clientY, treeSearchMenu(ctxItems(tid, node ? node.dataset.node : null, Boolean(node) && node.dataset.dir === '1')));
 });
 
 $('#ctx').addEventListener('mousedown', (e) => e.preventDefault()); // the tree keeps the keyboard
 $('#ctx').addEventListener('click', (e) => {
+  const s = e.target.closest('button[data-sub]');
+  if (s) {
+    if (s.disabled) return;
+    const it = ctxSub.items[Number(s.dataset.sub)];
+    closeCtx();
+    it.run();
+    return;
+  }
   const b = e.target.closest('button[data-ctx]');
   if (!b || b.disabled) return;
   const it = ctxNow[Number(b.dataset.ctx)];
+  if (it.sub) { openSub(Number(b.dataset.ctx)); return; } // a click opens its submenu at once
   closeCtx();
   it.run();
 });
