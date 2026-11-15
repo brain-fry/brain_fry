@@ -5,7 +5,8 @@ import { basicSetup } from 'codemirror';
 import { EditorView, keymap, ViewPlugin, Decoration } from '@codemirror/view';
 import { EditorState, EditorSelection, Compartment, Prec } from '@codemirror/state';
 import { indentWithTab } from '@codemirror/commands';
-import { StreamLanguage, syntaxTree } from '@codemirror/language';
+import { StreamLanguage, syntaxTree, HighlightStyle, syntaxHighlighting } from '@codemirror/language';
+import { tags } from '@lezer/highlight';
 import { openSearchPanel, searchPanelOpen, selectMatches, SearchQuery } from '@codemirror/search';
 import { unifiedMergeView } from '@codemirror/merge';
 import { oneDark, oneDarkHighlightStyle } from '@codemirror/theme-one-dark';
@@ -28,30 +29,59 @@ import { toml } from '@codemirror/legacy-modes/mode/toml';
 // backticks (`cm-inline-code-mark`); app.css draws them. A decoration, not a highlight style:
 // the grammar gives the same tag (monospace) to the text of a fenced block without a language,
 // and a tag's style would not cover the backticks, which are child nodes.
+// Bold (asked by Renaud on 2026-11-15, option 1B of a mockup): `cm-bold` on the text between
+// the `**` (or `__`) of each bold, marks excluded; app.css gives it a faint yellow background.
+// A bold inside a bold is not marked again (the yellow would double).
 const inlineCodeMark = Decoration.mark({ class: 'cm-inline-code' });
 const backtickMark = Decoration.mark({ class: 'cm-inline-code-mark' });
-function inlineCodeMarks(view) {
+const boldMark = Decoration.mark({ class: 'cm-bold' });
+function inlineMarks(view) {
   const marks = [];
   const tree = syntaxTree(view.state);
+  let inBold = 0;
   for (const { from, to } of view.visibleRanges) {
     tree.iterate({ from, to, enter(node) {
+      if (node.name === 'StrongEmphasis') {
+        if (!inBold++) {
+          const first = node.node.firstChild, last = node.node.lastChild;
+          const a = first && first.name === 'EmphasisMark' ? first.to : node.from;
+          const b = last && last !== first && last.name === 'EmphasisMark' ? last.from : node.to;
+          if (b > a) marks.push(boldMark.range(a, b));
+        }
+        return;
+      }
       if (node.name !== 'InlineCode') return;
       marks.push(inlineCodeMark.range(node.from, node.to));
       for (let c = node.node.firstChild; c; c = c.nextSibling) {
         if (c.name === 'CodeMark') marks.push(backtickMark.range(c.from, c.to));
       }
       return false;
+    }, leave(node) {
+      if (node.name === 'StrongEmphasis') inBold--;
     } });
   }
   return Decoration.set(marks, true);
 }
 const inlineCode = ViewPlugin.fromClass(class {
-  constructor(view) { this.decorations = inlineCodeMarks(view); }
+  constructor(view) { this.decorations = inlineMarks(view); }
   update(u) {
-    if (u.docChanged || u.viewportChanged || syntaxTree(u.startState) !== syntaxTree(u.state)) this.decorations = inlineCodeMarks(u.view);
+    if (u.docChanged || u.viewportChanged || syntaxTree(u.startState) !== syntaxTree(u.state)) this.decorations = inlineMarks(u.view);
   }
 }, { decorations: (v) => v.decorations });
-const md = () => [markdown(), inlineCode];
+// Colors of markdown on top of One Dark (asked by Renaud on 2026-11-15). Prec.high mounts this
+// CSS after One Dark's, so its colors win where both style a token.
+// Headings: One Dark's blue (One Dark draws them coral, the `#` green), on the whole heading
+// line, `#` included, as VS Code. heading1-6 only, not `heading`: the header row of a GFM table
+// also has `heading`.
+// HTML in markdown (option 1 of a mockup): the brackets `<` `>` `</` `/>` in One Dark's yellow,
+// the tag names, attributes, `=` and values in its gray (One Dark: tag names yellow, brackets
+// plain, attributes coral, values green, `=` cyan). The text between the tags is unchanged.
+const mdStyle = Prec.high(syntaxHighlighting(HighlightStyle.define([
+  { tag: [tags.heading1, tags.heading2, tags.heading3, tags.heading4, tags.heading5, tags.heading6], color: '#61afef' },
+  { tag: tags.angleBracket, color: '#e5c07b' },
+  { tag: [tags.tagName, tags.attributeName, tags.attributeValue, tags.definitionOperator], color: '#7d8799' },
+])));
+const md = () => [markdown(), inlineCode, mdStyle];
 
 const sh = () => StreamLanguage.define(shell);
 const BY_EXT = {
