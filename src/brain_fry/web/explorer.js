@@ -2,7 +2,8 @@
 // The right-click menu of the explorer (2a) and its keys, as in VS Code on macOS: Enter (or F2)
 // renames the selected entry, Cmd+Backspace moves it to the Trash, Ctrl+C copies its relative path. Cut / Copy / Paste move or copy
 // files and folders, also between projects. New File... / New Folder... into the folder that was
-// right-clicked, the file's folder, or the project folder (the empty space).
+// right-clicked, the file's folder, or the project folder (the empty space). A row dragged onto a
+// folder moves there.
 // See DESIGN_DETAILS.md "2a, 3a, 3b: files and terminals".
 // Uses S, $, esc, request, send, toast, store, uiLog (app.js), work, loadDir, refreshTree, renderExplorer,
 // renderFiles, saveOpenFiles, closeFile, openFile (files.js) and newShell (shells.js).
@@ -23,6 +24,12 @@ function isCut(project, path) { // renderExplorer dims it
 
 function treeRow(path) {
   return [...document.querySelectorAll('#tree .node[data-node]')].find((n) => n.dataset.node === path) || null;
+}
+
+// The folder that a drop on the row `node` goes into (a drag in the tree, or from Finder, drop.js):
+// a folder's row, that folder; a file's row, its folder; no row (the empty space), the project folder ('').
+function treeInto(node) {
+  return !node ? '' : node.dataset.dir === '1' ? node.dataset.node : parentOf(node.dataset.node);
 }
 
 function sameProject(project, fn) { // fn(id, its work) for each task of the project that has a work state, and its own (wsId)
@@ -400,6 +407,149 @@ function treesChanged(project) { // the selected task's tree reloads now, the ot
   sameProject(project, (id, w) => { if (id === wsId()) refreshTree(id); else w.kids.clear(); });
   renderExplorer();
 }
+
+// ------------------------------------------------------------------ drag a row into a folder
+// As in VS Code (asked by Renaud on 2026-11-14): a file or folder dragged onto a folder moves
+// there. The folder is the one of a drop from Finder (treeInto), with the same mark and a label
+// next to the mouse. Mouse events, as a tab's drag (grid.js): the drag starts 6 px from the press.
+// The move is Cut and Paste's (files.paste with `cut`): nothing is replaced, a folder cannot go
+// into itself. Its own folder, itself or a folder inside it: no mark, and a drop there does
+// nothing; so does a drop outside the tree, or Esc. A closed folder under the mouse opens after
+// TD_OPEN_MS, and near the top or bottom edge the tree scrolls.
+
+const TD = { press: null, drag: null, justDragged: false };
+const TD_OPEN_MS = 500;
+const TD_EDGE = 24; // px from the tree's top or bottom edge
+const TD_STEP = 8; // px scrolled every TD_TICK_MS
+const TD_TICK_MS = 40;
+
+function treeDragStart(p) {
+  const ghost = document.createElement('div');
+  ghost.className = 'tab-ghost';
+  const mark = document.createElement('div');
+  mark.className = 'drop-mark'; // the mark of a dragged tab (grid.js) and of a drop from Finder (drop.js)
+  mark.hidden = true;
+  document.body.append(ghost, mark);
+  document.body.classList.add('tab-dragging');
+  getSelection().removeAllRanges(); // text that the press began to select
+  // the tick: the tree scrolls near its edges, and the mark follows a tree that was redrawn under a still mouse
+  TD.drag = { ...p, ghost, mark, into: null, hover: null, hoverTimer: 0, tick: setInterval(treeDragTick, TD_TICK_MS) };
+}
+
+function treeDragEnd(into) { // into: the folder to move to, or null (cancelled)
+  const d = TD.drag;
+  clearTimeout(d.hoverTimer);
+  clearInterval(d.tick);
+  d.ghost.remove();
+  d.mark.remove();
+  TD.drag = null;
+  document.body.classList.remove('tab-dragging');
+  TD.justDragged = true; // the click that follows the mouseup is not a click on a row
+  setTimeout(() => { TD.justDragged = false; }, 0);
+  if (into !== null && d.tid === wsId()) moveEntry(d.tid, d.path, into);
+}
+
+// The target under the mouse: the mark, the label, and the timer that opens a closed folder.
+function treeDragShow() {
+  const d = TD.drag;
+  const el = document.elementFromPoint(d.x, d.y);
+  const node = el && el.closest('#tree .node[data-node]');
+  const into = el && el.closest('#tree-wrap') && d.tid === wsId() && !S.treeRename ? treeInto(node) : null;
+  const ok = into !== null && into !== parentOf(d.path) && into !== d.path && !into.startsWith(`${d.path}/`);
+  d.into = ok ? into : null;
+  d.mark.hidden = !ok;
+  if (ok) {
+    const r = ((into && treeRow(into)) || $('#tree-wrap')).getBoundingClientRect(); // a row off screen: the whole tree, as drop.js
+    Object.assign(d.mark.style, { left: `${r.left}px`, top: `${r.top}px`, width: `${r.width}px`, height: `${r.height}px` });
+  }
+  d.ghost.textContent = ok ? `Move ${nameOf(d.path)} into ${nameOf(into || wsProject(d.tid))}/` : nameOf(d.path);
+  const left = Math.max(4, Math.min(d.x + 12, innerWidth - d.ghost.offsetWidth - 4));
+  d.ghost.style.transform = `translate(${left}px, ${d.y + 8}px)`;
+  // the results of the explorer search open their folders themselves (treesearch.js)
+  const closed = ok && node && node.dataset.dir === '1' && !node.classList.contains('tree-search-res')
+    && !work(d.tid).open.has(into) ? into : null;
+  if (closed === d.hover) return;
+  clearTimeout(d.hoverTimer);
+  d.hover = closed;
+  if (closed !== null) {
+    d.hoverTimer = setTimeout(() => {
+      if (TD.drag !== d || d.hover !== closed || d.tid !== wsId()) return;
+      work(d.tid).open.add(closed);
+      renderExplorer(); // it loads the folder's entries; the next tick marks the new rows
+    }, TD_OPEN_MS);
+  }
+}
+
+function treeDragTick() {
+  const d = TD.drag;
+  const tree = $('#tree');
+  const r = tree.getBoundingClientRect();
+  if (d.x >= r.left && d.x <= r.right) {
+    if (d.y >= r.top - TD_EDGE && d.y < r.top + TD_EDGE) tree.scrollTop -= TD_STEP;
+    else if (d.y > r.bottom - TD_EDGE && d.y <= r.bottom + TD_EDGE) tree.scrollTop += TD_STEP;
+  }
+  treeDragShow();
+}
+
+async function moveEntry(tid, path, into) {
+  let pairs;
+  try { pairs = await request('fs.paste', { id: tid, from: tid, paths: [path], dir: into, cut: true }); } catch (e) { toast(errText(e)); return; }
+  const project = wsProject(tid);
+  movedPaths(project, pairs); // its tabs follow
+  const w = work(tid);
+  if (into) w.open.add(into);
+  if (pairs.length) w.treeSel = pairs[0][1]; // selected, as after Paste
+  treesChanged(project);
+}
+
+document.addEventListener('mousedown', (e) => {
+  if (TD.drag) treeDragEnd(null); // its mouseup was lost
+  TD.press = null;
+  if (e.button !== 0 || e.ctrlKey || e.metaKey || e.altKey || e.shiftKey) return; // Ctrl+click: the right-click menu
+  const node = e.target.closest('#tree .node[data-node]');
+  const tid = wsId();
+  if (!node || !tid || S.mode !== 'dev' || S.treeRename) return; // the name field: its text is selected with the mouse
+  TD.press = { tid, path: node.dataset.node, x: e.clientX, y: e.clientY };
+}, true);
+
+document.addEventListener('mousemove', (e) => {
+  const p = TD.press;
+  if (!p) return;
+  if (!(e.buttons & 1)) { // the button came up where no mouseup reached the page
+    TD.press = null;
+    if (TD.drag) treeDragEnd(null);
+    return;
+  }
+  if (!TD.drag) {
+    if (Math.hypot(e.clientX - p.x, e.clientY - p.y) < 6) return;
+    treeDragStart(p);
+  }
+  e.preventDefault();
+  TD.drag.x = e.clientX;
+  TD.drag.y = e.clientY;
+  treeDragShow();
+});
+
+document.addEventListener('mouseup', () => {
+  TD.press = null;
+  if (TD.drag) treeDragEnd(TD.drag.into);
+});
+
+document.addEventListener('click', (e) => {
+  if (TD.justDragged) { e.stopPropagation(); e.preventDefault(); }
+}, true);
+
+document.addEventListener('keydown', (e) => {
+  if (!TD.drag || e.key !== 'Escape') return;
+  e.preventDefault(); e.stopPropagation();
+  TD.press = null;
+  treeDragEnd(null);
+}, true);
+
+window.addEventListener('blur', () => {
+  TD.press = null;
+  if (TD.drag) treeDragEnd(null);
+});
 
 // ------------------------------------------------------------------ events
 

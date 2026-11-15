@@ -19,7 +19,7 @@
 // never see a drag of files.
 // Uses S, $, request, toast, uiLog, wsId, wsProject, ownerFor, addProject (app.js), G, paneOf,
 // paneActive, shownPanes (grid.js), work (files.js), newFinder, refreshFinders (finder.js),
-// treeRow, nameOf, parentOf, errText, treesChanged (explorer.js), treeSearchShows, treeSearchNow
+// treeRow, treeInto, nameOf, errText, treesChanged (explorer.js), treeSearchShows, treeSearchNow
 // (treesearch.js), revealColumn (layout.js), at call time.
 
 // inner: a drag that started in this page (a card, an image of a tab); over: the element that the
@@ -58,8 +58,7 @@ function osDropTarget(el, x, y) {
     const tid = wsId();
     const root = wsProject(tid);
     if (!root || S.treeRename || el.closest('#tree-search')) return null;
-    const node = el.closest('#tree .node[data-node]');
-    const into = !node ? '' : node.dataset.dir === '1' ? node.dataset.node : parentOf(node.dataset.node);
+    const into = treeInto(el.closest('#tree .node[data-node]'));
     const row = into ? treeRow(into) : null; // the folder's row; the project folder, or a row off screen: the whole tree
     return { kind: 'tree', tid, into, rect: rect(row || $('#tree-wrap')), label: `Copy into ${nameOf(into || root)}/` };
   }
