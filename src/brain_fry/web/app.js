@@ -43,6 +43,7 @@ const S = {
   planned: null, // task id: plan answered, the cursor goes to its card when it is in the state
   dragging: false, // no re-render of the board while a card is dragged
   autoAdvance: stored('autoAdvance', true), // after an answer, select the next inbox item (the header's switch)
+  threadsOpen: stored('threadsOpen', false), // 1b shows its list (a click on its header)
   advance: null, // {from, order, at, timer}: an advance waiting for its second
   lastAnswered: null, // the task that the last advance (answer or archive) left: Cmd+Up from the first item goes back
   project: null, // the project picked in the dropdown when it had no task to land on (path)
@@ -1006,6 +1007,7 @@ function inboxHintKey(k) {
 function renderThreads(st) {
   const task = st.tasks[S.selected];
   $('#threads-section').hidden = !task; // no task selected, which an empty inbox implies
+  $('#threads-section').classList.toggle('open', S.threadsOpen);
   if (!task) return;
   const threads = [...task.threads].reverse();
   $('#threads').innerHTML = threads.length
@@ -1017,6 +1019,13 @@ function renderThreads(st) {
     : task.notes ? `<div class="notes"><div class="label">My notes (no thread yet)</div>${esc(task.notes)}</div>`
     : '';
 }
+
+// a click on the header opens or closes 1b, as a section of VS Code's side bar; closed by default
+$('#threads-head').addEventListener('click', () => {
+  S.threadsOpen = !S.threadsOpen;
+  store('threadsOpen', S.threadsOpen);
+  $('#threads-section').classList.toggle('open', S.threadsOpen);
+});
 
 function renderAgent(st) {
   const task = st.tasks[S.selected];

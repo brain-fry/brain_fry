@@ -459,6 +459,7 @@ Asked by Renaud on 2026-11-10: a decent browser in panel 3 that keeps its cookie
 - Clicking a thread in 1b opens it as a read-only tab in 3a: digest, question, prompt and reply as Markdown, read from the task file (`thread.get`). Thread tabs are not saved with the task's open files.
 - The tab's "Find in conversation" button scrolls 4a to the thread: xterm.js's search add-on looks backward in the scrollback for the first 30 characters of the prompt (short, because the terminal may wrap a long line). Limits: the scrollback size (50,000 lines), and Claude Code re-renders the history on resume.
 - Tested with a fake session that prints a conversation. Not tested yet with real Claude Code, which draws the prompt in its own way.
+- 1b is closed by default (Renaud, 2026-11-15): only its header shows. A click on the header opens or closes the list, as a section of VS Code's side bar, with a chevron in the left margin. The state is a window setting (`threadsOpen` in `window.json`), the same for every task.
 
 ## Modes
 

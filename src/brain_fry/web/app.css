@@ -163,6 +163,12 @@ body.tab-dragging, body.tab-dragging * { cursor: grabbing !important; user-selec
 #side h2 { margin: 0 12px 6px; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .06em; color: var(--dim); }
 
 .list .row { display: flex; gap: 8px; padding: 6px 12px; cursor: pointer; border-left: 3px solid transparent; }
+/* 1b opens and closes (app.js): the twisty sits in the left margin, so "Threads" lines up with "Inbox" */
+#side #threads-head { display: flex; align-items: center; margin-left: 0; cursor: pointer; user-select: none; }
+#threads-head .twisty { flex: none; }
+#threads-section.open .twisty { transform: rotate(90deg); }
+#threads-section:not(.open) #threads { display: none; }
+#threads-section:not(.open) h2 { margin-bottom: 0; }
 .list .row:hover { background: var(--panel-2); }
 .list .row.sel { background: #2f3540; border-left-color: var(--accent); }
 .list .row.current { opacity: .75; }
