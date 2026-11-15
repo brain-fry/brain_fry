@@ -19,28 +19,63 @@ from .core import Core
 from .server import start_backend
 
 log = logging.getLogger(__name__)
+APP_NAME = "Brain Fry"
 QUIT_NAMES = 5  # the files named in the question at quit, then "and N more"
 _probes: list[subprocess.Popen] = []  # `claude --version` (_log_start): ended at quit, else it outlives the app
 
 
 def _mac_identity() -> None:
-    """Dock icon and app menu name ("Python" otherwise), through AppKit. Main thread, before
-    webview.start(). The app must be a regular app before its icon is set: an icon set earlier
-    never reaches the Dock or Cmd+Tab, which show the blank document of the bare python binary
-    (pywebview makes the app regular only when it loads its Cocoa module, after this call)."""
+    """Dock icon, app menu name ("Python" otherwise) and the name of Cmd+Tab and the Dock
+    ("python3" otherwise), through AppKit. Main thread, before webview.start(). The app must be
+    a regular app before its icon is set: an icon set earlier never reaches the Dock or Cmd+Tab,
+    which show the blank document of the bare python binary (pywebview makes the app regular only
+    when it loads its Cocoa module, after this call). The name is set before the app becomes
+    regular, so that Cmd+Tab never lists "python3"."""
     try:
         from AppKit import NSApplication, NSImage  # noqa: PLC0415 (pyobjc, a pywebview dependency)
         from Foundation import NSBundle  # noqa: PLC0415
 
-        NSBundle.mainBundle().infoDictionary()["CFBundleName"] = "Brain Fry"
+        NSBundle.mainBundle().infoDictionary()["CFBundleName"] = APP_NAME
+        app = NSApplication.sharedApplication()  # registers the process with LaunchServices
+        set_display_name(APP_NAME)
         icon = resources.files("brain_fry") / "web" / "dock_icon.png"  # transparent, see frontend/dock_icon.py
         image = NSImage.alloc().initWithContentsOfFile_(str(icon))
         if image is not None:
-            app = NSApplication.sharedApplication()
             app.setActivationPolicy_(0)  # NSApplicationActivationPolicyRegular, as pywebview does
             app.setApplicationIconImage_(image)
     except Exception:
         log.debug("could not set the Dock icon", exc_info=True)
+
+
+def set_display_name(name: str) -> bool:
+    """The name that Cmd+Tab, the Dock and Activity Monitor show. LaunchServices names a process
+    that is not an .app after the file that started it (`.venv/bin/python3`, the shebang of
+    `bf`), and CFBundleName changes only the app menu, inside this process. A private call of
+    LaunchServices, through ctypes, after NSApplication.sharedApplication(). A macOS without it
+    leaves "python3", and the app goes on."""
+    import ctypes  # noqa: PLC0415
+
+    try:
+        ls = ctypes.CDLL("/System/Library/Frameworks/CoreServices.framework/CoreServices")
+        cf = ctypes.CDLL("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation")
+        cf.CFStringCreateWithCString.restype = ctypes.c_void_p
+        cf.CFStringCreateWithCString.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_uint32]
+        ls._LSGetCurrentApplicationASN.restype = ctypes.c_void_p
+        ls._LSSetApplicationInformationItem.restype = ctypes.c_int32
+        ls._LSSetApplicationInformationItem.argtypes = [ctypes.c_int] + [ctypes.c_void_p] * 4
+        key = ctypes.c_void_p.in_dll(ls, "_kLSDisplayNameKey")
+        asn = ls._LSGetCurrentApplicationASN()
+        if not asn:
+            log.info("Cmd+Tab name not set: the process is not registered with LaunchServices")
+            return False
+        value = cf.CFStringCreateWithCString(None, name.encode(), 0x08000100)  # kCFStringEncodingUTF8
+        err = ls._LSSetApplicationInformationItem(-2, asn, key, value, None)  # -2: kLSDefaultSessionID
+    except (OSError, AttributeError, ValueError):
+        log.info("Cmd+Tab name not set: no such call in LaunchServices", exc_info=True)
+        return False
+    if err:
+        log.info("Cmd+Tab name not set: LaunchServices error %d", err)
+    return err == 0
 
 
 def _file_menu(get_window) -> list:
