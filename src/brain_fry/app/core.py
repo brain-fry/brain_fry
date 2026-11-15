@@ -83,6 +83,7 @@ class Core:
         self._broadcast_pending = False
         self.shell_seq = 0
         self.restored: set[str] = set()  # tasks whose terminal tabs were restored since start
+        self.restarting: dict[str, tuple[list[str], str]] = {}  # task id -> (argv, cwd) of its next session (`restart`)
         self.shutting_down = False
         self.running: dict[str, dict] | None = None  # session id -> its process, from Claude Code
         self._projects_version: int | None = None
@@ -481,7 +482,7 @@ class Core:
                 self.loop.run_in_executor(None, self._save_terminal_tabs, s.task)
             self.request_broadcast()
             return
-        if self._retry_without_prefill(s):
+        if self._retry_without_prefill(s) or self._start_again(s):
             return
         if self.shutting_down:  # shutdown marks it not live and removes owned.json itself
             return
@@ -507,6 +508,20 @@ class Core:
             return False
         log.warning("pty %s: claude does not know --prefill, started again without the title and notes", s.key)
         self._start_pty(s.key, plain, s.cwd, s.rows, s.cols)
+        self.request_broadcast()
+        return True
+
+    def _start_again(self, s: PtySession) -> bool:
+        """Restart (the right-click menu of an inbox row): the old `claude` has exited, the new one
+        starts in the same callback, so no state push shows the task without a session (4a would
+        flash "No live session"). Its SessionEnd hook still arrives: `live` off, and a turn that was
+        running goes to the inbox (actions.end_session), which is true, since it was cut off."""
+        how = self.restarting.pop(s.key, None)
+        if how is None or self.shutting_down or self.ptys.get(s.key) is not s:
+            return False
+        argv, cwd = how
+        log.info("pty %s: started again (restart)", s.key)
+        self._start_pty(s.key, argv, cwd, s.rows, s.cols)
         self.request_broadcast()
         return True
 
@@ -996,6 +1011,15 @@ class Core:
             task = await run(actions.load, tid)
             if self._live_gen(tid) is None:
                 self._start_pty(tid, self._resume_argv(task), task.cwd, rows, cols)
+        elif cmd == "restart":  # the right-click menu of an inbox row: a new `claude` on the same conversation
+            s = self.ptys.get(tid)
+            if not s or s.kind != "claude" or not s.alive:
+                raise ValueError("No Claude Code session of this app runs for this task.")
+            task = await run(actions.load, tid)
+            self.restarting[tid] = (self._resume_argv(task), task.cwd)  # _start_again, at its exit
+            # SIGHUP, then SIGTERM and SIGKILL 3 s apart if it stays: a hung session must restart
+            # too. In a thread, so that the commands of this connection do not wait for the exit.
+            self.loop.run_in_executor(None, s.kill, 9.0)
         elif cmd == "new":
             # from: the previous task, whose tabs the new one starts with (actions.new_task)
             task = await run(actions.new_task, Path(msg["project"]), msg.get("from"))
@@ -1015,7 +1039,8 @@ class Core:
             self.selected = task.id
         elif cmd == "archive":
             await run(actions.archive, tid)
-        elif cmd == "delete":  # the right-click menu of a card: its processes end, its file goes to the Trash
+        elif cmd == "delete":  # the right-click menu of a card or an inbox row: its processes end, its file goes to the Trash
+            self.restarting.pop(tid, None)  # a restart on its way must not start the deleted task again
             for s in [self.ptys.get(tid), *self._shells_of(tid)]:
                 if s and s.alive:
                     s.hangup()  # the exit finds no task to mark: actions.NotFound is ignored there

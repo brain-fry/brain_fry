@@ -663,11 +663,17 @@ function selectArrival() {
 function act(cmd) {
   const id = targetId();
   if (!id) return;
-  const task = S.state.tasks[id];
-  const archiving = cmd === 'archive' && S.mode === 'dev' && id === S.selected && task && task.status !== 'done';
-  const next = archiving ? nextAfter(id, [...S.state.inbox]) : null; // the inbox order before the archive
+  if (cmd === 'archive') return archiveTask(id);
   const sh = cmd === 'fork' ? shellBoxSize() : null; // a fork starts the parent's terminal tabs
   send(cmd, { id, ...termSize(), ...(sh ? { shellRows: sh.rows, shellCols: sh.cols } : {}) });
+}
+
+// Archive or unarchive: Cmd+E, the header's button, the right-click menu of an inbox row
+function archiveTask(id) {
+  const task = S.state.tasks[id];
+  const archiving = S.mode === 'dev' && id === S.selected && task && task.status !== 'done';
+  const next = archiving ? nextAfter(id, [...S.state.inbox]) : null; // the inbox order before the archive
+  send('archive', { id, ...termSize() });
   if (archiving) afterArchive(id, next);
 }
 
@@ -1349,9 +1355,39 @@ $('#columns').addEventListener('contextmenu', (e) => {
   ]);
 });
 
+// The right-click menu of an inbox row (Renaud, 2026-11-15): Archive (Unarchive on the archived task
+// kept at the top of 1a), Restart Claude Code, Delete. The row is not selected: selecting marks it
+// read and starts its session.
+$('#inbox').addEventListener('contextmenu', (e) => {
+  e.preventDefault(); // WebKit's own menu
+  const rowEl = e.target.closest('.row[data-id]');
+  const id = rowEl && rowEl.dataset.id;
+  const t = id && S.state && S.state.tasks[id];
+  if (!t) return;
+  openCtx(e.clientX, e.clientY, [
+    // ⌘E acts on the selected task, so the key shows on its row only
+    { label: t.status === 'done' ? 'Unarchive' : 'Archive', key: id === S.selected ? '⌘E' : '', run: () => archiveTask(id) },
+    { label: 'Restart Claude Code', disabled: !t.pty, run: () => restartTask(id) },
+    { label: 'Delete', run: () => deleteTask(id) },
+  ]);
+});
+
+// A new `claude --resume` on the same conversation (the command `restart` of core.py): it reads
+// CLAUDE.md, the settings, hooks, MCP servers and skills again, or a new version of Claude Code.
+// Only for a session that this app runs (the item is disabled otherwise: a select resumes it).
+function restartTask(id) {
+  const t = S.state && S.state.tasks[id];
+  if (!t || !t.pty) return;
+  const name = t.shortTitle || t.title || 'untitled';
+  if ((t.status === 'working' || t.status === 'blocked')
+    && !confirm(`Restart the Claude Code session of "${name}"? Its turn is cut off.`)) return;
+  request('restart', { id }).catch((e) => toast(`Could not restart Claude Code: ${e.message}`));
+}
+
 // Delete: the task file goes to the Trash of macOS (Finder's Put Back brings it back), its session
-// and its terminal tabs end (the command `delete` of core.py). The cursor moves to the next card of
-// its column, or to the one above.
+// and its terminal tabs end (the command `delete` of core.py). On the board, the cursor moves to the
+// next card of its column, or to the one above. The selected task in Dev mode: the next inbox item
+// is selected, as after an archive.
 async function deleteTask(id) {
   const t = S.state && S.state.tasks[id];
   if (!t) return;
@@ -1360,6 +1396,7 @@ async function deleteTask(id) {
   const col = boardColumns(S.state).find((c) => c.ids.includes(id));
   const ids = col ? col.ids : [];
   const i = ids.indexOf(id);
+  const next = S.mode === 'dev' && S.selected === id ? nextAfter(id, [...S.state.inbox]) : null; // the order before
   try { await request('delete', { id }); } catch (e) { toast(`Could not delete the task: ${e.message}`); return; }
   delete S.state.tasks[id]; // no flash of its card before the state push
   S.state.inbox = S.state.inbox.filter((x) => x !== id);
@@ -1369,7 +1406,8 @@ async function deleteTask(id) {
     S.selected = null;
     S.starting = null;
     showTerm(null);
-    showIdle(lastOpenedAny());
+    if (next && S.state.tasks[next]) select(next);
+    else showIdle(lastOpenedAny());
   }
   const term = S.terms.get(id); // its Claude Code terminal (4a)
   if (term) { if (term.ws) { term.ws.onclose = null; term.ws.close(); } term.term.dispose(); term.el.remove(); S.terms.delete(id); }

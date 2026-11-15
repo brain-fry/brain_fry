@@ -401,6 +401,47 @@ def test_delete_ends_the_session_and_the_terminal_tabs(backend, project, tmp_pat
     assert trashed == [f"{tid}.md"]
 
 
+def test_restart_starts_claude_again_on_the_same_conversation(backend, project):
+    core, port = backend
+    t = actions.new_task(project)
+    actions._update(t.id, threads=[Thread(n=1, ts="x", kind="answer", prompt="do it", reply="Done.")])
+    with connect(f"ws://127.0.0.1:{port}/ctl") as ctl:
+        ctl.recv(timeout=5)
+        assert not request(ctl, 1, cmd="restart", id=t.id)["ok"]  # no session of this app runs it
+        ctl.send(json.dumps({"cmd": "resume", "id": t.id, "rows": 10, "cols": 80}))
+        gen = states(ctl, lambda m: m["tasks"][t.id]["pty"])["tasks"][t.id]["pty"]
+        old = core.ptys[t.id]
+        assert request(ctl, 2, cmd="restart", id=t.id)["ok"]
+        seen = []  # no state between the two sessions shows the task without one (4a would flash)
+        states(ctl, lambda m: seen.append(m["tasks"][t.id]["pty"]) or seen[-1] not in (None, gen))
+        assert None not in seen and not old.alive and t.id not in core.restarting
+        assert core.ptys[t.id].argv[1:] == ["--resume", t.id]
+        with connect(f"ws://127.0.0.1:{port}/pty/{t.id}") as pty:
+            assert f"ARGS --resume {t.id}".encode() in read_pty(pty, b"HYPERLINK=")
+
+
+def test_restart_ends_a_session_that_ignores_sighup(backend, project, tmp_path, monkeypatch):
+    core, port = backend
+    deaf = tmp_path / "deaf_claude"
+    deaf.write_text("#!/bin/bash\ntrap '' HUP\necho \"ARGS $*\"\nsleep 30\n")  # sleep inherits the ignored HUP
+    deaf.chmod(0o755)
+    monkeypatch.setenv("BRAIN_FRY_CLAUDE", str(deaf))
+    t = actions.new_task(project)
+    with connect(f"ws://127.0.0.1:{port}/ctl") as ctl:
+        ctl.recv(timeout=5)
+        ctl.send(json.dumps({"cmd": "resume", "id": t.id, "rows": 10, "cols": 80}))
+        gen = states(ctl, lambda m: m["tasks"][t.id]["pty"])["tasks"][t.id]["pty"]
+        old = core.ptys[t.id]
+        end = time.time() + 5
+        while b"ARGS" not in old.replay and time.time() < end:  # its trap is set
+            time.sleep(0.02)
+        start = time.time()
+        assert request(ctl, 2, cmd="restart", id=t.id)["ok"]
+        states(ctl, lambda m: m["tasks"][t.id]["pty"] not in (None, gen), timeout=8)
+        assert time.time() - start > 2.5  # SIGTERM, 3 s after the SIGHUP
+        assert not old.alive and core.ptys[t.id].alive
+
+
 def test_thread_get(backend, project):
     core, port = backend
     t = actions.new_task(project)
