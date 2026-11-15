@@ -707,6 +707,9 @@ function reviewKey(e) {
 // ------------------------------------------------------------------ mouse
 
 $('#review').addEventListener('mousedown', (e) => {
+  R.press = { x: e.clientX, y: e.clientY }; // a click that moved from here selected text (the click handler)
+  // Shift+click and Cmd+click on a + or - line pick lines to stage: no text selection with them
+  if ((e.shiftKey || e.metaKey) && e.target.closest('.rv-pick .ln.add, .rv-pick .ln.del')) e.preventDefault();
   for (const [which, sel] of Object.entries(PANELS)) {
     if (e.target.closest(sel)) { R.focus = which; return; }
   }
@@ -765,7 +768,17 @@ $('#review').addEventListener('click', (e) => {
   const hb = t.closest('[data-rv-hunk]');
   if (hb) return hunkAction(hb.dataset.rvHunk, Number(hb.closest('.rv-hunk').dataset.h));
   const ln = t.closest('.ln');
-  if (ln) return clickLine(e, Number(ln.closest('.rv-hunk').dataset.h), Number(ln.dataset.l));
+  // a drag that selected text, or a double or triple click (a word, a line), selects text to copy:
+  // the lines picked for staging stay as they were before the first click
+  const moved = R.press && Math.hypot(e.clientX - R.press.x, e.clientY - R.press.y) > 3;
+  if ((ln || t.closest('.rv-hunk')) && (e.detail > 1 || (moved && !getSelection().isCollapsed))) {
+    if (e.detail > 1 && R.beforeClick) { [R.lines, R.anchor] = R.beforeClick; R.beforeClick = null; drawDiffMarks(); }
+    return;
+  }
+  if (ln) {
+    R.beforeClick = [R.lines, R.anchor];
+    return clickLine(e, Number(ln.closest('.rv-hunk').dataset.h), Number(ln.dataset.l));
+  }
   const hunk = t.closest('.rv-hunk');
   if (hunk) { R.cursor = Number(hunk.dataset.h); drawDiff(); }
 });
@@ -802,6 +815,19 @@ function clickLine(e, h, j) {
   }
   drawDiff();
 }
+
+// Cmd+C (Copy of the Edit menu) on text selected in the diff: plain text only (WebKit's copy would
+// carry the colors into a mail), the text of the lines one per row, without the line numbers, the
+// signs, the hunk headers and "\ No newline at end of file". Inside one line, the range is a bare text node
+$('#rv-diffbody').addEventListener('copy', (e) => {
+  const sel = getSelection();
+  if (!sel.rangeCount || sel.isCollapsed) return;
+  const rows = sel.getRangeAt(0).cloneContents().querySelectorAll('.ln:not(.meta)');
+  e.clipboardData.setData('text/plain', rows.length
+    ? [...rows].map((ln) => (ln.querySelector('.tx') || {}).textContent || '').join('\n')
+    : sel.toString());
+  e.preventDefault();
+});
 
 $('#rv-rows').addEventListener('scroll', () => {
   const box = $('#rv-rows');

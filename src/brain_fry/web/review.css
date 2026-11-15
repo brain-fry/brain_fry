@@ -126,10 +126,13 @@
 .rv-hh .hdr { flex: 1; min-width: 0; white-space: pre; overflow: hidden; text-overflow: ellipsis; }
 .rv-hh .btns { display: flex; gap: 6px; flex: none; }
 .rv-hh button { font: 11px -apple-system, BlinkMacSystemFont, sans-serif; line-height: 17px; padding: 0 8px; border-radius: 4px; border-color: #4a4d55; }
-.ln { display: flex; }
-.ln .o, .ln .nn { width: 44px; flex: none; padding-right: 8px; box-sizing: border-box; text-align: right; color: var(--dim); user-select: none; }
-.ln .sg { width: 16px; flex: none; text-align: center; user-select: none; }
-.ln .tx { flex: 1; min-width: 0; padding-right: 10px; white-space: pre-wrap; overflow-wrap: anywhere; }
+/* the text of a line can be selected and copied (pywebview puts user-select: none on body);
+   the line numbers, the signs and the hunk headers cannot */
+.ln { display: flex; -webkit-user-select: text; user-select: text; }
+.ln .o, .ln .nn { width: 44px; flex: none; padding-right: 8px; box-sizing: border-box; text-align: right; color: var(--dim); -webkit-user-select: none; user-select: none; }
+.ln .sg { width: 16px; flex: none; text-align: center; -webkit-user-select: none; user-select: none; }
+.ln .tx { flex: 1; min-width: 0; padding-right: 10px; white-space: pre-wrap; overflow-wrap: anywhere; cursor: text; }
+.rv-pick .ln.add .tx, .rv-pick .ln.del .tx { cursor: pointer; }
 .ln.add { background: #30a46c24; }
 .ln.add .sg { color: #30a46c; }
 .ln.del { background: #e5484d24; }
