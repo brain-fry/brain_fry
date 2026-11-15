@@ -31,9 +31,6 @@
     <button class="mode" data-mode="organize" title="Organize mode (Cmd+B toggles)">Organize</button>
     <button class="mode" data-mode="review" title="Review mode: git (Cmd+Shift+G toggles)">Review</button>
   </div>
-  <div id="task-head"></div>
-  <label class="switch" title="After I answer the selected task, select the next inbox item (Cmd+Up from the first item goes back). Off: stay on the task"><input type="checkbox" id="auto-advance"> Auto-advance</label>
-  <button id="new-btn" title="New task (Cmd+T). In Organize mode: a card on the board, not started">+ New task</button>
 </header>
 <div id="menu" hidden>
   <button data-menu="cookies">Overwrite my cookies<small>Copies my Firefox cookies into the browser of 3a. For each site that Firefox has cookies for, they replace the browser's.</small></button>
@@ -44,7 +41,8 @@
 <main id="dev">
   <aside id="side">
     <section>
-      <h2 id="inbox-head">Inbox&nbsp;<span id="inbox-count"></span><button id="inbox-all"
+      <h2 id="inbox-head">Inbox&nbsp;<span id="inbox-count"></span><button id="inbox-aa"
+        title="Auto-advance: after I answer the selected task, select the next inbox item (Cmd+Up from the first item goes back). Off: stay on the task">AA</button><button id="inbox-all"
         title="All working: every task of the working column, not only the ones that wait for me"><svg viewBox="0 0 16 16" width="14" height="14"
         fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><path d="M3 4h10M3 8h10M3 12h10"/></svg></button></h2>
       <div id="inbox" class="list"></div>

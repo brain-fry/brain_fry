@@ -42,10 +42,11 @@ const S = {
   planDraft: null, // {title, notes}: what that dialog held when it was closed without creating: back at the next N
   planned: null, // task id: plan answered, the cursor goes to its card when it is in the state
   dragging: false, // no re-render of the board while a card is dragged
-  autoAdvance: stored('autoAdvance', true), // after an answer, select the next inbox item (the header's switch)
+  autoAdvance: stored('autoAdvance', true), // after an answer, select the next inbox item (AA in 1a's heading, Task > Auto-advance)
   threadsOpen: stored('threadsOpen', false), // 1b shows its list (a click on its header)
   inboxAll: stored('inboxAll', false), // 1a shows every task of the working column (its switch "All working")
   inboxRename: null, // task id while the title of its row in 1a is a name field (Rename, renameTask)
+  menuSent: '', // what the Task menu of the menu bar shows, as last sent (syncTaskMenu)
   advance: null, // {from, order, at, timer}: an advance waiting for its second
   lastAnswered: null, // the task that the last advance (answer or archive) left: Cmd+Up from the first item goes back
   project: null, // the project picked in the dropdown when it had no task to land on (path)
@@ -54,7 +55,7 @@ const S = {
   instant: false, // 4a swaps at once in this frame, nothing fades (swapAtOnce)
 };
 
-// the task that the header's actions apply to
+// the task that Cmd+E, Cmd+Shift+D and the Task menu act on
 const targetId = () => (S.mode === 'organize' ? S.boardSel : S.selected);
 
 // ------------------------------------------------------------------ control channel
@@ -665,15 +666,14 @@ function selectArrival() {
   return true;
 }
 
-function act(cmd) {
-  const id = targetId();
+function act(cmd, id = targetId()) {
   if (!id) return;
   if (cmd === 'archive') return archiveTask(id);
   const sh = cmd === 'fork' ? shellBoxSize() : null; // a fork starts the parent's terminal tabs
   send(cmd, { id, ...termSize(), ...(sh ? { shellRows: sh.rows, shellCols: sh.cols } : {}) });
 }
 
-// Archive or unarchive: Cmd+E, the header's button, the right-click menu of an inbox row
+// Archive or unarchive: Cmd+E, Task > Archive in the menu bar, the right-click menu of an inbox row
 function archiveTask(id) {
   const task = S.state.tasks[id];
   const archiving = S.mode === 'dev' && id === S.selected && task && task.status !== 'done';
@@ -896,8 +896,8 @@ function render() {
   if (S.mode === 'organize') ensureBoardSel(boardColumns(st));
   renderBanner(st);
   renderProjectSelect(st);
-  renderHead(st);
-  $('#auto-advance').checked = S.autoAdvance;
+  syncTaskMenu(st);
+  $('#inbox-aa').classList.toggle('on', S.autoAdvance);
   if (S.mode === 'organize') return renderBoard(st);
   if (S.mode === 'review') { renderAgent(st); return renderReview(st); } // review.js
   renderInbox(st);
@@ -923,21 +923,33 @@ function banner(html, sticky = false) {
   if (html) b.innerHTML = html;
 }
 
-function renderHead(st) {
-  const task = st.tasks[targetId()];
-  const head = $('#task-head');
-  if (!task) { head.innerHTML = ''; return; }
-  // only the actions: the task itself is on its row in 1a or its card (Renaud, 2026-11-10)
-  head.innerHTML = `
-    <span class="actions">
-      ${task.pinned
-        ? '<button data-act="pin" title="Leaves the inbox when nothing waits for me">Unpin</button>'
-        : `<button data-act="pin" ${task.status === 'done' ? 'disabled title="Unarchive it first"' : 'title="Stays in the inbox until I unpin it"'}>Pin</button>`}
-      ${task.status === 'done'
-        ? '<button data-act="archive" title="Back from the archive (Cmd+E)">Unarchive</button>'
-        : '<button data-act="archive" title="Done: out of the inbox, on to the next item (Cmd+E)">Archive</button>'}
-      <button data-act="fork" title="Split: a new task with a copy of this conversation (Cmd+Shift+D)">Fork</button>
-    </span>`;
+// The Task menu of the menu bar (taskmenu.py) cannot ask the page: it shows Unarchive, Unpin, the
+// grayed items and the check of Auto-advance from what the page sends here, at each change.
+// The task is the one that Cmd+E and Cmd+Shift+D act on (targetId: the card under the cursor in
+// Organize mode).
+function syncTaskMenu(st) {
+  const t = st.tasks[targetId()];
+  const m = { task: t ? (t.status === 'done' ? 'done' : 'open') : null, pinned: !!(t && t.pinned), autoAdvance: S.autoAdvance };
+  const key = JSON.stringify(m);
+  if (key === S.menuSent) return;
+  S.menuSent = key;
+  send('menu.task', m);
+}
+
+// Task in the menu bar (Renaud, 2026-11-15: it replaced the buttons of the header). main.py calls it.
+function taskMenu(name) {
+  uiLog(`menu: task ${name}`);
+  if (name === 'new') openPicker(); // as Cmd+T
+  else if (name === 'auto') setAutoAdvance(!S.autoAdvance);
+  else if (['archive', 'fork', 'pin'].includes(name)) act(name);
+}
+
+function setAutoAdvance(on) {
+  S.autoAdvance = on;
+  store('autoAdvance', on);
+  if (!on) cancelAdvance();
+  uiLog(`auto-advance switched ${on ? 'on' : 'off'}`);
+  render();
 }
 
 function row(task, extra = '') {
@@ -1049,7 +1061,14 @@ $('#inbox-all').addEventListener('click', () => {
   uiLog(`inbox: all working ${S.inboxAll ? 'on' : 'off'}`);
   render();
   const t = S.mode === 'dev' && S.selected && S.terms.get(S.selected);
-  if (t) t.term.focus(); // the keys go back to the selected task's terminal, as after the auto-advance switch
+  if (t) t.term.focus(); // the keys go back to the selected task's terminal, as after AA
+});
+
+// AA in the heading of 1a: auto-advance on or off (Renaud chose it from a mockup, 2026-11-15), as Task > Auto-advance
+$('#inbox-aa').addEventListener('click', () => {
+  setAutoAdvance(!S.autoAdvance);
+  const t = S.mode === 'dev' && S.selected && S.terms.get(S.selected);
+  if (t) t.term.focus(); // the keys go back to the selected task's terminal
 });
 
 $('#threads-head').addEventListener('click', () => {
@@ -1364,8 +1383,9 @@ document.addEventListener('click', (e) => {
   if (e.target.id === 'picker') return closePicker();
 });
 
-// The right-click menu of a card (Renaud, 2026-11-14): Archive (Unarchive on an archived card) and
-// Delete. The menu of the explorer (#ctx, openCtx in explorer.js); the cursor moves to the card first.
+// The right-click menu of a card (Renaud, 2026-11-14): Archive (Unarchive on an archived card), Fork
+// and Pin (Unpin; 2026-11-15, with the Task menu), then Delete. The menu of the explorer (#ctx, openCtx
+// in explorer.js); the cursor moves to the card first, so the keys of Organize mode act on it.
 $('#columns').addEventListener('contextmenu', (e) => {
   e.preventDefault(); // WebKit's own menu
   const cardEl = e.target.closest('.card');
@@ -1377,13 +1397,16 @@ $('#columns').addEventListener('contextmenu', (e) => {
   render();
   openCtx(e.clientX, e.clientY, [
     { label: t.status === 'done' ? 'Unarchive' : 'Archive', key: 'E', run: () => send('archive', { id }) },
+    { label: 'Fork', key: 'F', run: () => act('fork', id) },
+    { label: t.pinned ? 'Unpin' : 'Pin', disabled: !t.pinned && t.status === 'done', run: () => act('pin', id) },
+    '-',
     { label: 'Delete', run: () => deleteTask(id) },
   ]);
 });
 
 // The right-click menu of an inbox row (Renaud, 2026-11-15): Archive (Unarchive on the archived task
-// kept at the top of 1a), Restart Claude Code, Rename, Delete. The row is not selected: selecting marks
-// it read and starts its session.
+// kept at the top of 1a), Fork, Pin (Unpin), then Restart Claude Code, Rename, Delete. The row is not
+// selected: selecting marks it read and starts its session (a fork selects the new task).
 $('#inbox').addEventListener('contextmenu', (e) => {
   e.preventDefault(); // WebKit's own menu
   const rowEl = e.target.closest('.row[data-id]');
@@ -1391,8 +1414,11 @@ $('#inbox').addEventListener('contextmenu', (e) => {
   const t = id && S.state && S.state.tasks[id];
   if (!t) return;
   openCtx(e.clientX, e.clientY, [
-    // ⌘E acts on the selected task, so the key shows on its row only
+    // ⌘E and ⇧⌘D act on the selected task, so the keys show on its row only
     { label: t.status === 'done' ? 'Unarchive' : 'Archive', key: id === S.selected ? '⌘E' : '', run: () => archiveTask(id) },
+    { label: 'Fork', key: id === S.selected ? '⇧⌘D' : '', run: () => act('fork', id) },
+    { label: t.pinned ? 'Unpin' : 'Pin', disabled: !t.pinned && t.status === 'done', run: () => act('pin', id) },
+    '-',
     { label: 'Restart Claude Code', disabled: !t.pty, run: () => restartTask(id) },
     { label: 'Rename', run: () => renameTask(id) },
     { label: 'Delete', run: () => deleteTask(id) },
@@ -1479,7 +1505,6 @@ async function deleteTask(id) {
   render();
 }
 
-$('#new-btn').addEventListener('click', () => openPicker());
 $('#park-btn').addEventListener('click', () => { parkOthers(); $('#board').focus(); }); // the board keys keep working
 $('#board-search').addEventListener('input', (e) => { S.search = e.target.value; render(); });
 $('#board-search').addEventListener('keydown', (e) => { // the document's handler leaves a text field its keys
@@ -1499,14 +1524,6 @@ $('#board-search').addEventListener('keydown', (e) => { // the document's handle
 
 document.addEventListener('change', (e) => {
   if (e.target.id === 'show-hidden') { setShowHidden(e.target.checked); $('#board').focus(); }
-  if (e.target.id === 'auto-advance') {
-    S.autoAdvance = e.target.checked;
-    store('autoAdvance', S.autoAdvance);
-    if (!S.autoAdvance) cancelAdvance();
-    uiLog(`auto-advance switched ${S.autoAdvance ? 'on' : 'off'}`);
-    const t = S.mode === 'dev' && S.selected && S.terms.get(S.selected);
-    if (t) t.term.focus(); // the keys go back to the selected task's terminal
-  }
   if (e.target.id === 'project-select') {
     e.target.blur(); // the selected task's terminal takes the focus
     if (e.target.value) openProject(e.target.value);

@@ -43,9 +43,6 @@ button:disabled { opacity: .45; cursor: default; }
 .mode:first-child { border-radius: 5px 0 0 5px; }
 .mode:last-child { border-radius: 0 5px 5px 0; border-left: none; }
 .mode.on { background: var(--accent); color: #fff; border-color: var(--accent); }
-#task-head { flex: 1; display: flex; align-items: center; gap: 10px; min-width: 0; }
-#task-head .actions { display: flex; gap: 6px; margin-left: auto; }
-.switch { display: flex; align-items: center; gap: 5px; color: var(--dim); font-size: 12px; white-space: nowrap; cursor: pointer; }
 
 #banner { padding: 6px 12px; background: #4a3a12; color: #ffd98a; border-bottom: 1px solid var(--line); }
 #banner code { background: #0004; padding: 0 4px; border-radius: 3px; }
@@ -164,12 +161,14 @@ body.tab-dragging, body.tab-dragging * { cursor: grabbing !important; user-selec
 #toast button { margin-left: 8px; font-size: 12px; padding: 1px 8px; }
 #side section { padding: 8px 0 4px; }
 #side h2 { margin: 0 12px 6px; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .06em; color: var(--dim); }
-/* the switch "All working" of 1a (app.js, S.inboxAll): an icon at the right end of the heading, gray pressed when on (as Wrap) */
-#side #inbox-head { display: flex; align-items: center; min-height: 18px; }
-#inbox-all { margin-left: auto; width: 20px; height: 18px; padding: 0; display: grid; place-items: center; color: var(--dim);
+/* the switches of 1a's heading (app.js), gray pressed when on (as Wrap): "AA" (auto-advance, S.autoAdvance),
+   then an icon at the right end ("All working", S.inboxAll) */
+#side #inbox-head { display: flex; align-items: center; gap: 2px; min-height: 18px; }
+#inbox-aa, #inbox-all { width: 20px; height: 18px; padding: 0; display: grid; place-items: center; color: var(--dim);
   background: none; border-color: transparent; border-radius: 4px; }
-#inbox-all:hover { color: var(--text); }
-#inbox-all.on { color: var(--text); background: #3a3d44; border-color: var(--dim); }
+#inbox-aa { margin-left: auto; width: auto; padding: 0 3px; font: 600 10px/16px ui-monospace, Menlo, monospace; letter-spacing: 0; }
+#inbox-aa:hover, #inbox-all:hover { color: var(--text); }
+#inbox-aa.on, #inbox-all.on { color: var(--text); background: #3a3d44; border-color: var(--dim); }
 /* 1b opens and closes (app.js): the twisty sits in the left margin, so "Threads" lines up with "Inbox" */
 #side #threads-head { display: flex; align-items: center; margin-left: 0; cursor: pointer; user-select: none; }
 #threads-head .twisty { flex: none; }

@@ -15,6 +15,7 @@ from importlib import resources
 
 from .. import logs, paths, projects
 from ..util import child_env, claude_bin
+from . import taskmenu
 from .core import Core
 from .server import start_backend
 
@@ -116,10 +117,11 @@ def _file_menu(get_window) -> list:
                           MenuAction("Refresh Explorer", refresh_explorer)])]  # fmt: skip
 
 
-def _file_menu_first() -> None:
+def _patch_menu_builder() -> None:
     """pywebview appends its custom menus after Edit and View; on macOS, File comes right after
     the app menu. pywebview builds the menu bar again when the window becomes key, so the reorder
-    goes into its builder. Internal to pywebview 6.2: if it changes, File stays at the end."""
+    goes into its builder, and so does the state of the Task menu (`taskmenu.prepare`). Internal
+    to pywebview 6.2: if it changes, File stays at the end and the Task menu stays plain."""
     try:
         from webview.platforms.cocoa import BrowserView  # noqa: PLC0415
 
@@ -132,11 +134,12 @@ def _file_menu_first() -> None:
                 item = bar.itemAtIndex_(i)
                 bar.removeItemAtIndex_(i)
                 bar.insertItem_atIndex_(item, 1)
+            taskmenu.prepare(bar)
             return bar
 
         BrowserView._recreate_menus = recreate
     except Exception:
-        log.debug("could not move the File menu", exc_info=True)
+        log.debug("could not patch the menu builder", exc_info=True)
 
 
 def _dark_titlebar(window) -> None:
@@ -181,7 +184,8 @@ def _fill_screen(window) -> None:
 
 
 def _menu_titles() -> str:
-    """The menu bar, for the selftest: 'Brain Fry, File (Open..., Add New Project..., Refresh Explorer), Edit (...), ...'."""
+    """The menu bar, for the selftest: 'Brain Fry, File (Open..., Add New Project..., Refresh Explorer), Edit (...), ...'.
+    A checked item starts with ✓, a disabled one ends with [off]."""
     try:
         from AppKit import NSApp  # noqa: PLC0415
         from PyObjCTools import AppHelper  # noqa: PLC0415
@@ -191,7 +195,8 @@ def _menu_titles() -> str:
         def read():  # main thread: AppKit
             for item in NSApp().mainMenu().itemArray():
                 sub = item.submenu()
-                kids = [k.title() for k in sub.itemArray() if not k.isSeparatorItem()] if sub else []
+                kids = [("✓ " if k.state() else "") + k.title() + ("" if k.isEnabled() else " [off]")
+                        for k in sub.itemArray() if not k.isSeparatorItem()] if sub else []  # fmt: skip
                 out.append(f"{item.title() or sub.title()} ({', '.join(kids)})")
             done.set()
 
@@ -426,11 +431,11 @@ def run(debug: bool = False, browser: bool = False, selftest: float | None = Non
         from AppKit import NSApp  # noqa: PLC0415
 
         _mac_identity()
-        _file_menu_first()
+        _patch_menu_builder()
         window = webview.create_window(
             "Brain Fry", url, width=1600, height=1000, min_size=(900, 500),
             background_color="#040510",  # the splash color: no white flash before the page paints
-            menu=_file_menu(lambda: window),
+            menu=_file_menu(lambda: window) + taskmenu.menu(lambda: window),
         )  # fmt: skip
 
         def on_closing():

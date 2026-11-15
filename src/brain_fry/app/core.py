@@ -19,7 +19,7 @@ from .. import actions, digest, events, files, finder, firefox, git, install, pa
 from .. import treesearch, window_settings
 from ..logs import short
 from ..util import child_env, claude_bin, write_atomic
-from . import drops
+from . import drops, taskmenu
 from .ptys import PREFILL, PtySession
 
 log = logging.getLogger(__name__)
@@ -42,6 +42,7 @@ QUIET = {"fs.list", "fs.read", "fs.versions", "fs.search", "thread.get", "log", 
          "fs.apps", "finder.apps",  # at each Open With submenu
          "grid.set", "window.set",  # at each click on a tab, each drag of a splitter
          "drop.take",  # its names are file names; the command logs how many it found
+         "menu.task",  # at each change of the selected task
          "browser.place", "browser.open", "browser.go", "browser.nav", "browser.find", "browser.snapshot",
          "browser.tabs.set", "browser.cookies.info",
          "git.state", "git.log", "git.diff", "git.commit_info"}  # fmt: skip
@@ -748,6 +749,9 @@ class Core:
         if cmd == "projects":  # the picker asks each time it opens: projects.json may have changed
             return views.project_order((await run(projects.load))["projects"], await run(actions.all_tasks),
                                        await run(actions.archive_times))  # fmt: skip
+        if cmd == "menu.task":  # what the Task menu of the menu bar shows (taskmenu.py)
+            taskmenu.update(msg)
+            return None
         if cmd == "archive.show":  # the board can show archived cards (H, or a search): all of them in the state, or not
             self.show_archive = bool(msg.get("on"))
             self._touch(*(msg.get("ids") or []))  # the ones that the front end holds (selected, idle, ...)
