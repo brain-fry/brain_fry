@@ -222,6 +222,8 @@ def test_file_commands(backend, project):
         far.write_text("far\n")
         link = request(ctl, 9, cmd="fs.link", id=t.id, target=str(far))["data"]
         assert link == {"path": str(far), "line": None}
+        found = request(ctl, 13, cmd="fs.paths", id=t.id, targets=["notes.md:1", "nope.md", str(far)])["data"]
+        assert found == [{"path": "notes.md", "line": 1}, None, {"path": str(far), "line": None}]
         r = request(ctl, 10, cmd="fs.read", id=t.id, path=str(far))["data"]
         assert r["text"] == "far\n" and r["path"] == str(far)
         w = request(ctl, 11, cmd="fs.write", id=t.id, path=str(far), text="near\n", base=r["version"])["data"]

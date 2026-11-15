@@ -645,6 +645,12 @@ function newUntitled(tid, pane) {
 async function openLink(tid, target) {
   let r;
   try { r = await request('fs.link', { id: tid, target }); } catch (e) { toast(e.message); return; }
+  await openLinkAt(tid, r);
+}
+
+// A link that the backend resolved ({path, line}: fs.link, or fs.paths for a plain path in a
+// terminal, browser.js): the file in 3a, at its line if it has one.
+async function openLinkAt(tid, r) {
   await openFile(tid, r.path);
   if (r.line) goToLine(viewTabs(work(tid)).find((t) => t.path === r.path), r.line);
 }

@@ -175,7 +175,7 @@ function ensureTerm(id, container = $('#terms'), shell = false) {
   term.loadAddon(new Unicode11Addon.Unicode11Addon());
   term.unicode.activeVersion = '11';
   term.open(el);
-  browserTermLinks(term); // Cmd+click on a URL: a browser tab (browser.js)
+  browserTermLinks(term, shell ? id : null); // Cmd+click on a URL: a browser tab; on a path: 3a (browser.js)
   try {
     const gl = new WebglAddon.WebglAddon();
     gl.onContextLoss(() => gl.dispose());

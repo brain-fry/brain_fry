@@ -807,6 +807,11 @@ class Core:
         if cmd == "fs.link":  # Cmd+click on a file link in a terminal: the target as it was written
             task = await run(self._owner, tid)  # a project's tabs: its folder is the cwd
             return await run(files.link_target, task.project, task.cwd, str(msg.get("target") or ""))
+        if cmd == "fs.paths":  # the plain paths of a terminal line (never logged: text of a reply)
+            task = await run(self._owner, tid)
+            s = self.ptys.get(str(msg.get("shell") or ""))  # a terminal tab: its folder, after any cd
+            base = s.folder if s and s.kind == "shell" else task.cwd
+            return await run(files.text_paths, task.project, base, [str(x) for x in msg.get("targets") or []])
         # the right-click menu of 2a: they change files, so they are logged
         if cmd == "fs.rename":
             project = await run(self._project_of, tid)

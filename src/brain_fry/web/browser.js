@@ -372,7 +372,89 @@ document.addEventListener('keydown', (e) => {
 // (`mailto:`, `vscode:`) is ignored, so that a link in a reply cannot start an app.
 const URL_IN_TEXT = /https?:\/\/[^\s"'<>`]*[^\s"'<>`.,;:!?)\]}]/g;
 
-function browserTermLinks(term) {
+// A plain path in a line (Claude writes `docs/a.md` or `src/x.py:42` as text, not as a link;
+// `git status` in 3b) is a link too, as in VS Code's terminal: a word that has a `/` or ends in
+// an extension, checked by the backend (fs.paths: against the task's cwd, a terminal tab's folder,
+// then the project), so that only a file that exists is underlined. The answers are kept
+// (pathSeen): a line whose words are all known answers at once, which the Cmd+press of the
+// fullscreen mode needs (linkAt, below); a word known for more than 5 s is asked again after that
+// answer. A path that the terminal wraps onto the next row is one link; a path that the program
+// itself breaks with a new line (Claude Code, for a word longer than 4a is wide) is no link.
+const PATH_WORD = /[^\s"'`<>()[\]{},;|*?]+/g;
+const PATH_LIKE = /\/|\.[A-Za-z][A-Za-z0-9]{0,9}(?::\d+(?:[-:]\d+)?)?$/;
+const pathSeen = new Map(); // `${tid}|${shell}|${word}` --> { r: {path, line} or null, at }
+
+// The text of a buffer line and the column (from 1) of each of its characters: a wide character
+// (an emoji) takes two columns, so the index in the text is not the column.
+function termLineCells(line) {
+  let text = '';
+  const col = [];
+  for (let x = 0; x < line.length; x++) {
+    const c = line.getCell(x);
+    if (!c || c.getWidth() === 0) continue; // the right half of a wide character
+    const ch = c.getChars() || ' ';
+    for (let i = 0; i < ch.length; i++) col.push(x + 1);
+    text += ch;
+  }
+  return { text, col };
+}
+
+// The rows that the terminal wrapped into one line, around row y (from 1): the text, and the
+// cell {x, y} of each character. At most 20 rows.
+function termWrappedLine(buf, y) {
+  let top = y;
+  while (top > 1 && y - top < 20 && buf.getLine(top - 1)?.isWrapped) top--;
+  let text = '';
+  const at = [];
+  for (let r = top; r < top + 20; r++) {
+    const line = buf.getLine(r - 1);
+    if (!line || (r > top && !line.isWrapped)) break;
+    const c = termLineCells(line);
+    text += c.text;
+    for (const x of c.col) at.push({ x, y: r });
+  }
+  return { text, at };
+}
+
+function termPathLinks(term, shellKey, open) {
+  term.registerLinkProvider({
+    provideLinks(y, callback) {
+      const tid = wsId();
+      if (!term.buffer.active.getLine(y - 1) || !tid) { callback(undefined); return; }
+      const { text, at } = termWrappedLine(term.buffer.active, y);
+      const words = [];
+      for (const m of text.matchAll(PATH_WORD)) {
+        let w = m[0].replace(/[.,:;!]+$/, ''); // the end of a sentence; `a.py:42:` keeps its line
+        const lead = w.startsWith('@') ? 1 : 0; // Claude Code's `@src/a.py`
+        w = w.slice(lead);
+        if (w && w.length <= 1024 && !w.includes('://') && PATH_LIKE.test(w)) words.push({ w, i: m.index + lead });
+      }
+      if (!words.length) { callback(undefined); return; }
+      const key = (w) => `${tid}|${shellKey || ''}|${w}`;
+      const answer = () => {
+        const links = [];
+        for (const { w, i } of words) {
+          const r = pathSeen.get(key(w))?.r;
+          if (r) links.push({ text: w, range: { start: at[i], end: at[i + w.length - 1] }, activate: (e) => open(e, tid, r) });
+        }
+        return links.length ? links : undefined;
+      };
+      const now = Date.now();
+      const known = words.every(({ w }) => pathSeen.has(key(w)));
+      const ask = [...new Set(words.map(({ w }) => w))].filter((w) => !(now - (pathSeen.get(key(w))?.at ?? -Infinity) < 5000));
+      if (known) callback(answer());
+      if (!ask.length) return;
+      if (pathSeen.size > 5000) pathSeen.clear();
+      request('fs.paths', { id: tid, targets: ask, ...(shellKey ? { shell: shellKey } : {}) })
+        .then((rs) => { ask.forEach((w, n) => pathSeen.set(key(w), { r: (rs && rs[n]) || null, at: Date.now() })); })
+        .catch(() => {})
+        .finally(() => { if (!known) callback(answer()); });
+    },
+  });
+}
+
+// shellKey: the key of a terminal tab of 3b (its folder resolves a relative path); null for 4a
+function browserTermLinks(term, shellKey = null) {
   const open = (e, uri) => {
     if (!e.metaKey) return;
     if (/^https?:/i.test(uri)) openWebTab(ownerFor(wsId()), uri, { activate: true }); // no task selected: a project tab
@@ -385,14 +467,15 @@ function browserTermLinks(term) {
     provideLinks(y, callback) {
       const line = term.buffer.active.getLine(y - 1);
       if (!line) { callback(undefined); return; }
-      const text = line.translateToString(true);
+      const { text, col } = termLineCells(line); // an emoji takes two columns: the index is not the column
       const links = [];
       for (const m of text.matchAll(URL_IN_TEXT)) {
-        links.push({ text: m[0], range: { start: { x: m.index + 1, y }, end: { x: m.index + m[0].length, y } }, activate: open });
+        links.push({ text: m[0], range: { start: { x: col[m.index], y }, end: { x: col[m.index + m[0].length - 1], y } }, activate: open });
       }
       callback(links.length ? links : undefined);
     },
   });
+  termPathLinks(term, shellKey, (e, tid, r) => { if (e.metaKey) openLinkAt(tid, r); }); // after the URLs: a URL wins
   // While the program tracks the mouse (Claude Code's fullscreen mode, `"tui": "fullscreen"`;
   // vim or htop in 3b), xterm.js sends it the press, the program redraws the row, xterm.js
   // builds a new link object for it, and its own check at mouseup (the same link at press and

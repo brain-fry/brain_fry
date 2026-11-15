@@ -85,6 +85,45 @@ def link_target(project: str | Path, cwd: str | None, target: str) -> dict:
 
 
 LINE_SUFFIX = re.compile(r"(.+?):(\d+)(?::\d+)?")  # app.py:42, app.py:42:7 (the column is ignored)
+TEXT_LINE = re.compile(r"(.+?):(\d+)(?:[-:]\d+)?")  # also app.py:42-50, as Claude writes a range
+MAX_TEXT_PATHS = 64
+
+
+def text_paths(project: str | Path, base: str | None, targets: list[str]) -> list[dict | None]:
+    """The paths that a terminal shows as plain text (Claude's `docs/a.md`, `src/x.py:42`,
+    `~/.brain_fry/logs/bf.log`; `git status` in 3b), as the front end cut them out of a line.
+    A relative path is relative to `base` (the session's cwd, a shell's folder), else to the
+    project. For each target: {"path": as a tab names it, "line": n or None} when it names a
+    file, else None (missing, a folder). Cmd+click opens it; see DESIGN_DETAILS.md "Browser (3a)",
+    plain paths in the terminals."""
+    roots = [Path(project)]
+    if base and Path(base).is_dir() and Path(base).resolve() != Path(project).resolve():
+        roots.insert(0, Path(base))
+
+    def find(s: str) -> Path | None:
+        try:
+            p = Path(s).expanduser()
+        except RuntimeError:  # ~someone who does not exist
+            return None
+        for root in roots:
+            q = root / p  # an absolute path replaces the root
+            try:
+                if q.is_file():
+                    return q.resolve()
+            except OSError:  # a name too long
+                return None
+            if p.is_absolute():
+                return None
+        return None
+
+    out: list[dict | None] = []
+    for t in targets[:MAX_TEXT_PATHS]:
+        s, line = str(t).strip()[:1024], None
+        p = find(s) if s else None
+        if p is None and (m := TEXT_LINE.fullmatch(s)):
+            p, line = find(m.group(1)), int(m.group(2))
+        out.append({"path": tab_path(project, p), "line": line} if p else None)
+    return out
 
 
 def bf_target(project: str | Path, target: str) -> dict:

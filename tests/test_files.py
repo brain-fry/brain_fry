@@ -217,6 +217,33 @@ def test_link_target_refuses_what_3a_cannot_open(repo):
         files.link_target(repo, str(repo), "#L3")
 
 
+def test_text_paths_finds_the_plain_paths_of_a_terminal_line(repo, monkeypatch):
+    """Claude writes `src/a.py:2` or `docs/x.md` as plain text: Cmd+click opens what exists."""
+    cwd = str(repo / "src")
+    (repo.parent / "outside.txt").write_text("x\n")
+    home = repo.parent / "home"
+    (home / ".bf").mkdir(parents=True)
+    (home / ".bf" / "bf.log").write_text("log\n")
+    monkeypatch.setenv("HOME", str(home))
+    got = files.text_paths(repo, cwd, [
+        "a.py", "a.py:2", "a.py:2:7", "a.py:2-5", "src/a.py",  # the cwd, then the project
+        "README.md", "../outside.txt", str(repo / "README.md"), "~/.bf/bf.log",
+        "missing.py", "missing.py:3", "src", "e.g", "", "x" * 5000,
+    ])
+    out = str((repo.parent / "outside.txt").resolve())
+    assert got == [
+        {"path": "src/a.py", "line": None}, {"path": "src/a.py", "line": 2}, {"path": "src/a.py", "line": 2},
+        {"path": "src/a.py", "line": 2}, {"path": "src/a.py", "line": None},
+        {"path": "README.md", "line": None}, {"path": out, "line": None}, {"path": "README.md", "line": None},
+        {"path": str((home / ".bf" / "bf.log").resolve()), "line": None},
+        None, None, None, None, None, None,
+    ]
+    # a cwd that is gone: the project
+    assert files.text_paths(repo, str(repo / "gone"), ["src/a.py:1"]) == [{"path": "src/a.py", "line": 1}]
+    (repo / "src" / "odd:7").write_text("a file whose name ends in :7\n")
+    assert files.text_paths(repo, cwd, ["odd:7"]) == [{"path": "src/odd:7", "line": None}]
+
+
 def test_bf_target_names_a_file_of_the_project(repo):
     """`bf <file>` in a terminal tab: the shell sends an absolute path, maybe with :line."""
     (repo / "src" / "odd:7").write_text("a file whose name ends in :7\n")
