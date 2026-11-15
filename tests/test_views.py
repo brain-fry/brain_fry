@@ -35,3 +35,22 @@ def test_first_prompt_is_empty_until_the_title():
 
 def test_first_prompt_of_a_planned_task_is_its_notes():
     assert views.first_prompt(task(title="Plan", notes="Look at\nthe logs")) == "Look at the logs"
+
+
+def test_working_list_is_the_inbox_then_the_rest_of_the_working_column():
+    def t(sid, updated, **kw):
+        return Task(session_ids=[sid], project="/p", cwd="/p", updated=f"2026-11-15T10:{updated:02d}:00", **kw)
+
+    tasks = [
+        t("busy-old", 1, status="working"),
+        t("reply", 2, inbox=True),
+        t("busy-new", 3, status="working"),
+        t("blocked", 4, inbox=True, status="blocked"),
+        t("pinned", 5, pinned=True),
+        t("planned", 6, prio="planning", inbox=True),  # not the working column
+        t("next", 7, prio="next", status="working"),
+        t("done", 8, status="done"),  # archived
+    ]
+    assert views.working_list(tasks) == ["blocked", "reply", "pinned", "busy-new", "busy-old"]
+    inbox = [x.id for x in sorted(filter(views.in_inbox, tasks), key=views.inbox_order)]
+    assert views.working_list(tasks)[: len(inbox)] == inbox

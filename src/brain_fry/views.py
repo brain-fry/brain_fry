@@ -23,6 +23,20 @@ def in_inbox(t: Task) -> bool:
     return (t.inbox or t.pinned) and t.status != "done" and t.prio == "working"
 
 
+def in_working(t: Task) -> bool:
+    """The working column, never an archived task: what 1a shows while its "All working"
+    switch is on (Renaud, 2026-11-15)."""
+    return t.prio == "working" and t.status != "done"
+
+
+def working_list(tasks: list[Task]) -> list[str]:
+    """The ids that 1a shows with "All working" on: the inbox first, in its order, then the
+    other tasks of the working column, red first, then the most recent."""
+    inbox = [t.id for t in sorted(filter(in_inbox, tasks), key=inbox_order)]
+    rest = [t.id for t in sorted(tasks, key=inbox_order) if in_working(t) and not in_inbox(t)]
+    return inbox + rest
+
+
 def inbox_order(t: Task):
     """What needs me first (the `inbox` flag): red first, then most recent first.
     DESIGN_DETAILS.md "Status, inbox, board". Then the pinned tasks that need nothing now,

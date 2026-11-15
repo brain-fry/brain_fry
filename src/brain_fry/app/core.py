@@ -179,6 +179,7 @@ class Core:
             "type": "state",
             "tasks": by_id,
             "inbox": inbox,
+            "working": views.working_list(tasks),  # 1a with "All working" on
             "projects": projs,
             "selected": self.selected,
             "hookInstalled": (hook := self._hook_state())[0],

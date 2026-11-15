@@ -164,6 +164,12 @@ body.tab-dragging, body.tab-dragging * { cursor: grabbing !important; user-selec
 #toast button { margin-left: 8px; font-size: 12px; padding: 1px 8px; }
 #side section { padding: 8px 0 4px; }
 #side h2 { margin: 0 12px 6px; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .06em; color: var(--dim); }
+/* the switch "All working" of 1a (app.js, S.inboxAll): an icon at the right end of the heading, gray pressed when on (as Wrap) */
+#side #inbox-head { display: flex; align-items: center; min-height: 18px; }
+#inbox-all { margin-left: auto; width: 20px; height: 18px; padding: 0; display: grid; place-items: center; color: var(--dim);
+  background: none; border-color: transparent; border-radius: 4px; }
+#inbox-all:hover { color: var(--text); }
+#inbox-all.on { color: var(--text); background: #3a3d44; border-color: var(--dim); }
 /* 1b opens and closes (app.js): the twisty sits in the left margin, so "Threads" lines up with "Inbox" */
 #side #threads-head { display: flex; align-items: center; margin-left: 0; cursor: pointer; user-select: none; }
 #threads-head .twisty { flex: none; }
@@ -185,6 +191,8 @@ body.tab-dragging, body.tab-dragging * { cursor: grabbing !important; user-selec
 .list .row.unread .title { font-weight: 700; }
 .list .row .meta { color: var(--dim); font-size: 11px; }
 .list .row .line { color: #b9bac0; font-size: 12px; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+.list .row .inbox-rename { font: inherit; color: var(--text); background: var(--bg); border: 1px solid var(--accent); border-radius: 3px;
+  padding: 0 3px; width: 100%; outline: none; } /* the name field of Rename (app.js, renameTask), as the explorer's */
 .list .row .q { color: #e9d38a; font-size: 12px; margin-top: 2px; }
 .list .thread { padding: 4px 12px; font-size: 12px; display: flex; gap: 6px; cursor: pointer; }
 .list .thread:hover { background: var(--panel-2); }

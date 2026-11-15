@@ -44,6 +44,8 @@ const S = {
   dragging: false, // no re-render of the board while a card is dragged
   autoAdvance: stored('autoAdvance', true), // after an answer, select the next inbox item (the header's switch)
   threadsOpen: stored('threadsOpen', false), // 1b shows its list (a click on its header)
+  inboxAll: stored('inboxAll', false), // 1a shows every task of the working column (its switch "All working")
+  inboxRename: null, // task id while the title of its row in 1a is a name field (Rename, renameTask)
   advance: null, // {from, order, at, timer}: an advance waiting for its second
   lastAnswered: null, // the task that the last advance (answer or archive) left: Cmd+Up from the first item goes back
   project: null, // the project picked in the dropdown when it had no task to land on (path)
@@ -545,9 +547,12 @@ function select(id, notify = true) {
   if (task) restoreFiles(id); // the file tabs of its last session
 }
 
+// The rows of 1a: the inbox, or with "All working" on (Renaud, 2026-11-15) every task of the working
+// column (st.working: the inbox first). Cmd+Up/Down and Cmd+J I follow these rows; auto-advance and
+// an arrival still pick only a task that needs me.
 function visibleInbox() {
   const st = S.state;
-  const ids = [...st.inbox];
+  const ids = [...((S.inboxAll && st.working) || st.inbox)];
   if (S.selected && st.tasks[S.selected] && !ids.includes(S.selected)) ids.unshift(S.selected);
   return ids;
 }
@@ -677,13 +682,19 @@ function archiveTask(id) {
   if (archiving) afterArchive(id, next);
 }
 
+// The task leaves the lists of 1a before the state push (an archive, a delete)
+function dropRow(id) {
+  S.state.inbox = S.state.inbox.filter((x) => x !== id);
+  if (S.state.working) S.state.working = S.state.working.filter((x) => x !== id);
+}
+
 // Archiving the selected task (Dev mode): it is done, so it leaves 1a at once and the next
 // item that needs me is selected, with no second to wait, whatever the auto-advance switch
 // (that switch is about staying on a task after an answer). Nothing needs me: 4a empties.
 // Cmd+Up goes back to the archived task, to unarchive it.
 function afterArchive(id, next) {
   S.lastAnswered = id;
-  S.state.inbox = S.state.inbox.filter((x) => x !== id); // no flash of its row before the state push
+  dropRow(id); // no flash of its row before the state push
   uiLog(`archive: ${id.slice(0, 8)} --> ${next ? `${next.slice(0, 8)} ${JSON.stringify(S.state.tasks[next].title)}` : 'nothing needs me'}`);
   if (next) return select(next);
   selectNone();
@@ -946,8 +957,13 @@ function renderInbox(st) {
   const ids = visibleInbox();
   const waiting = st.inbox.filter((id) => st.tasks[id].inbox).length; // pinned tasks that need nothing do not count
   $('#inbox-count').textContent = waiting ? `(${waiting})` : '';
-  // An empty inbox: only its heading, no text, and no Threads section (Renaud, 2026-11-10)
-  $('#inbox').innerHTML = ids.map((id) => row(st.tasks[id], st.inbox.includes(id) ? '' : 'current')).join('');
+  $('#inbox-all').classList.toggle('on', S.inboxAll);
+  if (S.inboxRename) return; // a redraw would take the name field away (renameTask redraws after it)
+  // An empty inbox: only its heading, no text, and no Threads section (Renaud, 2026-11-10).
+  // Dimmed ('current'): only the selected task kept at the top; with "All working" on, the other
+  // tasks of the working column look like the inbox rows (Renaud chose it from a mockup, 2026-11-15)
+  const listed = (S.inboxAll && st.working) || st.inbox;
+  $('#inbox').innerHTML = ids.map((id) => row(st.tasks[id], listed.includes(id) ? '' : 'current')).join('');
   drawInboxHints(); // the rows are new: their labels again
 }
 
@@ -1027,6 +1043,15 @@ function renderThreads(st) {
 }
 
 // a click on the header opens or closes 1b, as a section of VS Code's side bar; closed by default
+$('#inbox-all').addEventListener('click', () => {
+  S.inboxAll = !S.inboxAll;
+  store('inboxAll', S.inboxAll);
+  uiLog(`inbox: all working ${S.inboxAll ? 'on' : 'off'}`);
+  render();
+  const t = S.mode === 'dev' && S.selected && S.terms.get(S.selected);
+  if (t) t.term.focus(); // the keys go back to the selected task's terminal, as after the auto-advance switch
+});
+
 $('#threads-head').addEventListener('click', () => {
   S.threadsOpen = !S.threadsOpen;
   store('threadsOpen', S.threadsOpen);
@@ -1325,6 +1350,7 @@ document.addEventListener('click', (e) => {
   const cardEl = e.target.closest('.card');
   if (cardEl && e.detail === 2) return openInDev(cardEl.dataset.card);
   if (cardEl) { S.boardSel = cardEl.dataset.card; $('#board').focus(); return render(); }
+  if (e.target.closest('.inbox-rename')) return; // a click in the name field of a row (renameTask)
   const rowEl = e.target.closest('.list .row');
   if (rowEl) return select(rowEl.dataset.id);
   const newIn = e.target.closest('[data-new-in]');
@@ -1356,8 +1382,8 @@ $('#columns').addEventListener('contextmenu', (e) => {
 });
 
 // The right-click menu of an inbox row (Renaud, 2026-11-15): Archive (Unarchive on the archived task
-// kept at the top of 1a), Restart Claude Code, Delete. The row is not selected: selecting marks it
-// read and starts its session.
+// kept at the top of 1a), Restart Claude Code, Rename, Delete. The row is not selected: selecting marks
+// it read and starts its session.
 $('#inbox').addEventListener('contextmenu', (e) => {
   e.preventDefault(); // WebKit's own menu
   const rowEl = e.target.closest('.row[data-id]');
@@ -1368,9 +1394,48 @@ $('#inbox').addEventListener('contextmenu', (e) => {
     // ⌘E acts on the selected task, so the key shows on its row only
     { label: t.status === 'done' ? 'Unarchive' : 'Archive', key: id === S.selected ? '⌘E' : '', run: () => archiveTask(id) },
     { label: 'Restart Claude Code', disabled: !t.pty, run: () => restartTask(id) },
+    { label: 'Rename', run: () => renameTask(id) },
     { label: 'Delete', run: () => deleteTask(id) },
   ]);
 });
+
+// Rename (Renaud, 2026-11-15: "edit the summary shown on the task"): the title of the row becomes a
+// name field, as Rename in the explorer. Enter or a click elsewhere keeps the text, Esc or an empty
+// text changes nothing. The command `rename` sets the title and the short title (the card's heading),
+// which the digest then keeps. 1a is not redrawn while the field is open (renderInbox).
+function renameTask(id) {
+  const t = S.state && S.state.tasks[id];
+  const title = $('#inbox').querySelector(`.row[data-id="${id}"] .title`);
+  if (!t || !title || S.inboxRename) return;
+  const input = document.createElement('input');
+  input.className = 'inbox-rename';
+  input.value = t.title;
+  input.spellcheck = false;
+  title.replaceWith(input);
+  S.inboxRename = id;
+  input.focus();
+  input.select();
+  let over = false;
+  const finish = (save, refocus) => {
+    if (over) return;
+    over = true;
+    S.inboxRename = null;
+    const to = input.value.trim();
+    if (save && to && to !== t.title) {
+      send('rename', { id, title: to });
+      if (S.state.tasks[id]) Object.assign(S.state.tasks[id], { title: to, shortTitle: to }); // no flash of the old title before the push
+    }
+    render();
+    const term = refocus && S.mode === 'dev' && S.selected && S.terms.get(S.selected);
+    if (term) term.term.focus(); // the keys go back to the selected task's terminal
+  };
+  input.addEventListener('keydown', (e) => {
+    e.stopPropagation();
+    if (e.key === 'Enter') { e.preventDefault(); finish(true, true); }
+    if (e.key === 'Escape') { e.preventDefault(); finish(false, true); }
+  });
+  input.addEventListener('blur', () => finish(true, false)); // a click elsewhere keeps the text, as in the explorer
+}
 
 // A new `claude --resume` on the same conversation (the command `restart` of core.py): it reads
 // CLAUDE.md, the settings, hooks, MCP servers and skills again, or a new version of Claude Code.
@@ -1399,7 +1464,7 @@ async function deleteTask(id) {
   const next = S.mode === 'dev' && S.selected === id ? nextAfter(id, [...S.state.inbox]) : null; // the order before
   try { await request('delete', { id }); } catch (e) { toast(`Could not delete the task: ${e.message}`); return; }
   delete S.state.tasks[id]; // no flash of its card before the state push
-  S.state.inbox = S.state.inbox.filter((x) => x !== id);
+  dropRow(id);
   if (S.boardSel === id) S.boardSel = ids[i + 1] || ids[i - 1] || null;
   if (S.lastAnswered === id) S.lastAnswered = null;
   if (S.selected === id || S.idle === id) { // as at start: the idle screen shows the task that I opened last
