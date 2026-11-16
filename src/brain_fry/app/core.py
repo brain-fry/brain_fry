@@ -172,9 +172,10 @@ class Core:
                 shells.setdefault(s.task, []).append({"key": s.key, "gen": s.gen, "title": s.title,
                                                       "cmd": s.command, "cwd": s.folder})  # fmt: skip
         running = self.running or {}
+        open_ids = views.open_set(tasks)
         by_id = {t.id: views.task_json(t, gen := self._live_gen(t.id), shells.get(t.id),
-                                       running.get(t.id) if gen is None else None) for t in tasks}  # fmt: skip
-        inbox = [t.id for t in sorted(filter(views.in_inbox, tasks), key=views.inbox_order)]
+                                       running.get(t.id) if gen is None else None, open_ids) for t in tasks}  # fmt: skip
+        inbox = views.inbox_list(tasks)
         for p in projs:  # the tabs that every task of the project shows
             p["tabs"] = views.project_tabs_json(actions.project_tabs(p["path"]), shells.get(PROJECT_WS + p["path"]))
         return {
@@ -307,13 +308,16 @@ class Core:
         archives its task before its digest); `archive` (the first sweep of a run): the archive too."""
         tasks = actions.all_tasks() + (actions.archived_tasks() if archive else [])
         retry = [t.id for t in tasks if digest.needs_call(t)] + list(self.failed)
+        open_ids = views.open_set(tasks)
         now = time.time()
         for s in [s for s in list(self.ptys.values()) if s.kind == "claude" and s.alive]:
             try:
                 t = actions.load(s.key)
             except actions.NotFound:
                 continue
-            if not t.inbox and now - views.epoch(t.updated) > IDLE_CLOSE and now - s.last_output > IDLE_CLOSE:
+            # a reply keeps its session, unless the task waits for another (out of the inbox for long)
+            needs_me = t.inbox and not views.waits(t, open_ids)
+            if not needs_me and now - views.epoch(t.updated) > IDLE_CLOSE and now - s.last_output > IDLE_CLOSE:
                 log.info("closing idle session %s", t.id)
                 s.hangup()
         return retry
@@ -1062,6 +1066,8 @@ class Core:
                 self.selected = None
         elif cmd == "pin":  # or unpin a pinned task
             await run(actions.pin, tid)
+        elif cmd == "wait":  # "Waiting for" in a right-click menu: out of the inbox until `for` is archived; none: stop waiting
+            await run(actions.wait_for, tid, str(msg.get("for") or "") or None)
         elif cmd == "rename":
             await run(actions.rename, tid, str(msg.get("title", "")))
         elif cmd == "prio":  # rank: the Undo of park puts each task back at its place
@@ -1087,7 +1093,7 @@ def _describe(msg: dict) -> str:
             continue
         if k in ("text", "notes", "message"):  # free text, as a prompt: never logged
             out.append(f"{k}=<{len(str(v))} chars>")
-        elif k in ("id", "from") and isinstance(v, str):
+        elif k in ("id", "from", "for") and isinstance(v, str):
             out.append(f"{k}={short(v)}")
         elif k == "names" and isinstance(v, list):  # of dropped files (drop.take): pasted into Claude Code, they are a part of a prompt
             out.append(f"{k}=<{len(v)}>")

@@ -1053,3 +1053,20 @@ def test_a_task_that_cannot_be_saved_does_not_stop_the_check_of_the_others(backe
     monkeypatch.setattr(taskfile, "save", real)
     core._refresh_outside()  # tried again at each check
     assert actions.load(bad.id).live is False and core._save_failed == set()
+
+
+def test_wait_command_takes_a_task_out_of_the_inbox(backend, project):
+    core, port = backend
+    a = actions._update(actions.new_task(project).id, inbox=True)
+    b = actions._update(actions.new_task(project).id, inbox=True)
+    with connect(f"ws://127.0.0.1:{port}/ctl") as ctl:
+        states(ctl, lambda m: m["type"] == "state")
+        ctl.send(json.dumps({"cmd": "wait", "id": a.id, "for": b.id, "req": 1}))
+        st = states(ctl, lambda m: m["type"] == "state" and m["inbox"] == [b.id])
+        assert st["tasks"][a.id]["waitingFor"] == b.id and a.id not in st["working"]
+        ctl.send(json.dumps({"cmd": "wait", "id": a.id, "for": a.id, "req": 2}))  # refused: an error answer
+        got = states(ctl, lambda m: m.get("req") == 2 or m["type"] == "error")
+        assert "itself" in json.dumps(got)
+        ctl.send(json.dumps({"cmd": "wait", "id": a.id, "for": None, "req": 3}))
+        st = states(ctl, lambda m: m["type"] == "state" and a.id in m["inbox"])
+        assert st["tasks"][a.id]["waitingFor"] is None

@@ -139,6 +139,32 @@ def pin(task_id: str) -> Task:
     return _update(task_id, pinned=not task.pinned)
 
 
+def wait_for(task_id: str, other: str | None) -> Task:
+    """"Waiting for" (Renaud, 2026-11-16): the task leaves the inbox until `other` is archived or
+    deleted (views.waits); None: it waits for nothing. Refused: the task itself, an archived or
+    unknown task, and a loop (`other` waits for this task, directly or through a chain), which
+    would hide both for good."""
+    if other:
+        if other == task_id:
+            raise ValueError("A task cannot wait for itself.")
+        if load(other).status == "done":  # NotFound: deleted meanwhile
+            raise ValueError("That task is archived: there is nothing to wait for.")
+        if task_id in waits_chain(other, {t.id: t for t in all_tasks()}):
+            raise ValueError("That task already waits for this one.")
+    return _update(task_id, waiting_for=other or None)
+
+
+def waits_chain(task_id: str, tasks: dict[str, Task]) -> list[str]:
+    """The open tasks that `task_id` waits for: the one it names, the one that this one names, etc.
+    `tasks`: the open tasks by id (an archived link holds nothing back)."""
+    out: list[str] = []
+    t = tasks.get(task_id)
+    while t and t.waiting_for in tasks and t.waiting_for not in out and t.waiting_for != task_id:
+        out.append(t.waiting_for)
+        t = tasks[t.waiting_for]
+    return out
+
+
 def rename(task_id: str, title: str) -> Task:
     """My name wins on the card too: the short title takes it, whatever its length."""
     return _update(task_id, title=title.strip(), short_title=title.strip())

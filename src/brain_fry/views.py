@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Collection
 from datetime import datetime
 from pathlib import Path
 
@@ -16,11 +17,23 @@ def epoch(ts: str) -> float:
         return 0.0
 
 
-def in_inbox(t: Task) -> bool:
+def in_inbox(t: Task, open_ids: Collection[str] = ()) -> bool:
     """The `inbox` flag (a reply or a block waits for me), or pinned. Only a task of the working
     column (Renaud, 2026-11-11: planning and the hidden columns wait; next too, 2026-11-13),
-    never an archived one."""
-    return (t.inbox or t.pinned) and t.status != "done" and t.prio == "working"
+    never an archived one, nor one that waits for an open task (`open_ids`, see waits)."""
+    return (t.inbox or t.pinned) and t.status != "done" and t.prio == "working" and not waits(t, open_ids)
+
+
+def waits(t: Task, open_ids: Collection[str]) -> bool:
+    """"Waiting for" (Renaud, 2026-11-16): the task that it waits for is still open (`open_ids`: the
+    ids of the open tasks, open_set). Archived or deleted, it holds nothing back: the link stays in
+    the file, so an unarchived task holds it back again. Red and pinned tasks wait too."""
+    return bool(t.waiting_for) and t.waiting_for != t.id and t.waiting_for in open_ids
+
+
+def open_set(tasks: list[Task]) -> set[str]:
+    """The ids of the open tasks among `tasks` (the state also holds archived ones)."""
+    return {t.id for t in tasks if t.status != "done"}
 
 
 def in_working(t: Task) -> bool:
@@ -29,11 +42,19 @@ def in_working(t: Task) -> bool:
     return t.prio == "working" and t.status != "done"
 
 
+def inbox_list(tasks: list[Task]) -> list[str]:
+    """The ids of the inbox, in its order."""
+    open_ids = open_set(tasks)
+    return [t.id for t in sorted(tasks, key=inbox_order) if in_inbox(t, open_ids)]
+
+
 def working_list(tasks: list[Task]) -> list[str]:
     """The ids that 1a shows with "All working" on: the inbox first, in its order, then the
-    other tasks of the working column, red first, then in the order of the board."""
-    inbox = [t.id for t in sorted(filter(in_inbox, tasks), key=inbox_order)]
-    rest = [t.id for t in sorted(tasks, key=inbox_order) if in_working(t) and not in_inbox(t)]
+    other tasks of the working column, red first, then in the order of the board. Not a task that
+    waits for an open one: only the board shows it (Renaud, 2026-11-16)."""
+    open_ids = open_set(tasks)
+    inbox = inbox_list(tasks)
+    rest = [t.id for t in sorted(tasks, key=inbox_order) if in_working(t) and t.id not in inbox and not waits(t, open_ids)]
     return inbox + rest
 
 
@@ -141,7 +162,8 @@ def project_tabs_json(tabs: dict, shells: list[dict] | None = None) -> dict:
     }
 
 
-def task_json(t: Task, pty_gen: int | None, shells: list[dict] | None = None, elsewhere: dict | None = None) -> dict:
+def task_json(t: Task, pty_gen: int | None, shells: list[dict] | None = None, elsewhere: dict | None = None,
+              open_ids: Collection[str] = ()) -> dict:  # fmt: skip
     last = t.threads[-1] if t.threads else None
     return {
         "id": t.id,
@@ -159,6 +181,7 @@ def task_json(t: Task, pty_gen: int | None, shells: list[dict] | None = None, el
         "updated": t.updated,
         "opened": t.opened,
         "parent": t.parent,
+        "waitingFor": t.waiting_for if waits(t, open_ids) else None,  # only while it holds the task back
         "digest": t.digest,
         "notes": t.notes,  # a planned task: the card's text until the first digest
         "goal": goal_line(t.digest),  # the card of 4a at a switch

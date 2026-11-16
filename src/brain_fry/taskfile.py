@@ -75,6 +75,8 @@ class Task:
     held: bool = False
     notification: str | None = None
     parent: str | None = None
+    # "Waiting for": the id of a task that must be archived first; out of the inbox until then (views.waits)
+    waiting_for: str | None = None
     created: str = ""
     updated: str = ""
     opened: str = ""  # last selected in Dev mode: the project dropdown lands on it

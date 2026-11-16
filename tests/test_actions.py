@@ -297,3 +297,93 @@ def test_park_others_keeps_the_order_of_the_moved_tasks(project, home):
     queued = actions.set_prio(actions.new_task(project).id, "next")
     assert actions.park_others(project) == [high, low]
     assert column("next") == [high, low, queued.id]
+
+
+def inbox():
+    return views.inbox_list(actions.all_tasks())
+
+
+def test_waiting_for_hides_a_task_until_the_other_is_archived(project):
+    """Renaud, 2026-11-16: "As long as the other item is not closed (meaning archived), the other one
+    does not show up." Its flags stay, so it comes back with its reply; the link stays too."""
+    a = actions._update(actions.new_task(project).id, inbox=True, unread=True)
+    b = actions._update(actions.new_task(project).id, inbox=True)
+    assert set(inbox()) == {a.id, b.id}
+    actions.wait_for(a.id, b.id)
+    assert inbox() == [b.id]
+    assert views.working_list(actions.all_tasks()) == [b.id]  # not a row of "All working" either: only the board shows it
+    actions.archive(b.id)
+    back = actions.load(a.id)
+    assert inbox() == [a.id] and (back.inbox, back.unread, back.waiting_for) == (True, True, b.id)
+    actions.archive(b.id)  # unarchived (without its inbox flag, which the archive cleared): it holds the task back again
+    assert inbox() == []
+
+
+def test_waiting_for_a_deleted_task_holds_nothing_back(project, tmp_path, monkeypatch):
+    trash = tmp_path / "Trash"
+    trash.mkdir()
+    monkeypatch.setattr("brain_fry.files._move_to_trash", lambda p: p.rename(trash / p.name))
+    a = actions._update(actions.new_task(project).id, inbox=True)
+    b = actions.new_task(project)
+    actions.wait_for(a.id, b.id)
+    assert inbox() == []
+    actions.delete(b.id)
+    assert inbox() == [a.id]
+
+
+def test_red_and_pinned_tasks_wait_too(project):
+    b = actions.new_task(project)
+    red = actions._update(actions.new_task(project).id, inbox=True, status="blocked")
+    pinned = actions._update(actions.new_task(project).id, pinned=True)
+    for t in (red, pinned):
+        actions.wait_for(t.id, b.id)
+    assert inbox() == []
+
+
+def test_waiting_for_follows_a_chain(project):
+    a, b, c = (actions._update(actions.new_task(project).id, inbox=True) for _ in range(3))
+    actions.wait_for(a.id, b.id)
+    actions.wait_for(b.id, c.id)
+    assert inbox() == [c.id]
+    actions.archive(c.id)
+    assert inbox() == [b.id]
+    actions.archive(b.id)
+    assert inbox() == [a.id]
+
+
+def test_waiting_for_refuses_itself_an_archived_task_and_a_loop(project):
+    a, b, c = (actions.new_task(project) for _ in range(3))
+    with pytest.raises(ValueError):
+        actions.wait_for(a.id, a.id)
+    actions.archive(c.id)
+    with pytest.raises(ValueError):
+        actions.wait_for(a.id, c.id)
+    with pytest.raises(actions.NotFound):
+        actions.wait_for(a.id, "no-such-task")
+    actions.archive(c.id)
+    actions.wait_for(b.id, c.id)
+    actions.wait_for(c.id, a.id)
+    with pytest.raises(ValueError):  # a --> b --> c --> a would hide all three for good
+        actions.wait_for(a.id, b.id)
+    assert actions.load(a.id).waiting_for is None
+
+
+def test_stop_waiting_and_what_the_front_end_gets(project):
+    a = actions._update(actions.new_task(project).id, inbox=True)
+    b = actions.new_task(project)
+    actions.wait_for(a.id, b.id)
+    tasks = actions.all_tasks()
+    open_ids = views.open_set(tasks)
+    assert views.task_json(actions.load(a.id), None, open_ids=open_ids)["waitingFor"] == b.id
+    assert views.task_json(actions.load(b.id), None, open_ids=open_ids)["waitingFor"] is None
+    actions.archive(b.id)  # the link holds nothing back: the front end shows no badge
+    assert views.task_json(actions.load(a.id), None, open_ids=views.open_set(actions.all_tasks()))["waitingFor"] is None
+    actions.archive(b.id)
+    actions.wait_for(a.id, None)
+    assert actions.load(a.id).waiting_for is None and inbox() == [a.id]
+
+
+def test_a_fork_does_not_wait(project):
+    a = actions.new_task(project)
+    actions.wait_for(a.id, actions.new_task(project).id)
+    assert actions.fork_task(a.id).waiting_for is None

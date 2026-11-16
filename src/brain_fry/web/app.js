@@ -737,12 +737,13 @@ function boardColumns(st) {
 // pos: the card's position in the working column (1 to 9), the digit that opens it; 0 for none
 function card(t, pos = 0) {
   const cls = ['card', t.id === S.boardSel ? 'sel' : '', t.status === 'done' ? 'archived' : '', t.unread ? 'unread' : ''].join(' ');
+  const inInbox = t.inbox && t.prio === 'working' && !t.waitingFor; // a task that waits for another is out of the inbox
   return `<div class="${cls}" data-card="${t.id}" draggable="true">
     <div class="top">${pos ? `<span class="pos" title="press ${pos} to open">${pos}</span>` : ''}<span class="dot ${t.status}" title="${t.status}"></span>
-      ${t.inbox && t.prio === 'working' ? '<span class="inbox-badge">inbox</span>' : ''}${t.pinned ? '<span class="pin-badge">pinned</span>' : ''}<span class="proj" style="--h:${hue(t.project)}">${esc(t.project)}</span></div>
+      ${inInbox ? '<span class="inbox-badge">inbox</span>' : ''}${t.pinned ? '<span class="pin-badge">pinned</span>' : ''}${waitBadge(t)}<span class="proj" style="--h:${hue(t.project)}">${esc(t.project)}</span></div>
     <div class="title" title="${esc(t.title)}">${esc(t.shortTitle || t.title)}</div>
     ${t.digest || t.notes ? `<div class="desc" title="${esc(t.digest || t.notes)}">${esc(t.digest || t.notes)}</div>` : ''}
-    ${t.inbox && t.prio === 'working' && t.line ? `<div class="line need">${esc(t.line)}</div>` : ''}
+    ${inInbox && t.line ? `<div class="line need">${esc(t.line)}</div>` : ''}
   </div>`;
 }
 
@@ -991,7 +992,7 @@ function row(task, extra = '') {
     <div class="marks"><span class="dot ${task.status}" title="${task.status}"></span></div>
     <div class="main">
       <div class="title">${esc(task.title)}</div>
-      <div class="meta">${esc(task.project)} · ${task.prio.replace('_', ' ')}${kind}${task.pinned ? ' · <span class="pin-badge">pinned</span>' : ''}</div>
+      <div class="meta">${esc(task.project)} · ${task.prio.replace('_', ' ')}${kind}${task.pinned ? ' · <span class="pin-badge">pinned</span>' : ''}${task.waitingFor ? ` · ${waitBadge(task)}` : ''}</div>
       ${task.line ? `<div class="line">${esc(task.line)}</div>` : ''}
       ${task.question ? `<div class="q">Q: ${esc(task.question)}</div>` : ''}
     </div></div>`;
@@ -1431,6 +1432,7 @@ $('#columns').addEventListener('contextmenu', (e) => {
     { label: t.status === 'done' ? 'Unarchive' : 'Archive', key: 'E', run: () => send('archive', { id }) },
     { label: 'Fork', key: 'F', run: () => act('fork', id) },
     { label: t.pinned ? 'Unpin' : 'Pin', disabled: !t.pinned && t.status === 'done', run: () => act('pin', id) },
+    ...waitItems(t),
     '-',
     { label: 'Delete', run: () => deleteTask(id) },
   ]);
@@ -1450,12 +1452,74 @@ $('#inbox').addEventListener('contextmenu', (e) => {
     { label: t.status === 'done' ? 'Unarchive' : 'Archive', key: id === S.selected ? '⌘E' : '', run: () => archiveTask(id) },
     { label: 'Fork', key: id === S.selected ? '⇧⌘D' : '', run: () => act('fork', id) },
     { label: t.pinned ? 'Unpin' : 'Pin', disabled: !t.pinned && t.status === 'done', run: () => act('pin', id) },
+    ...waitItems(t),
     '-',
     { label: 'Restart Claude Code', disabled: !t.pty, run: () => restartTask(id) },
     { label: 'Rename', run: () => renameTask(id) },
     { label: 'Delete', run: () => deleteTask(id) },
   ]);
 });
+
+// "Waiting for" (Renaud, 2026-11-16): the task leaves the inbox until the task that it waits for is
+// archived or deleted (views.waits). The items of the right-click menus of an inbox row and a card: a
+// submenu of the other open tasks of the working column (the rows of "All working", then the tasks
+// that wait, which only the board shows), the project's name beside a task of another project; then
+// "Stop waiting for" while the task waits. A task that waits for this one, directly or through a
+// chain, is disabled: the loop would hide both for good.
+function waitItems(t) {
+  const st = S.state;
+  const listed = st.working || [];
+  const parked = Object.values(st.tasks).filter((o) => o.prio === 'working' && o.status !== 'done' && !listed.includes(o.id));
+  const others = [...listed, ...parked.sort(cardOrder).map((o) => o.id)].filter((id) => id !== t.id && st.tasks[id]);
+  const items = [{
+    label: 'Waiting for',
+    disabled: t.status === 'done' || !others.length,
+    sub: () => others.map((id) => {
+      const o = st.tasks[id];
+      return {
+        label: taskName(o),
+        key: o.project === t.project ? '' : o.project,
+        disabled: id === t.waitingFor || waitsOn(id, t.id),
+        run: () => setWait(t.id, id),
+      };
+    }),
+  }];
+  const w = t.waitingFor && st.tasks[t.waitingFor];
+  if (w) items.push({ label: `Stop waiting for "${taskName(w)}"`, run: () => setWait(t.id, null) });
+  return items;
+}
+
+function taskName(t) { return t.shortTitle || t.title || 'untitled'; }
+
+// true when the task `id` waits for `target`, directly or through a chain of waiting tasks
+function waitsOn(id, target) {
+  const seen = new Set();
+  for (let t = S.state.tasks[id]; t && t.waitingFor && !seen.has(t.waitingFor); t = S.state.tasks[t.waitingFor]) {
+    if (t.waitingFor === target) return true;
+    seen.add(t.waitingFor);
+  }
+  return false;
+}
+
+// The selected inbox item that starts to wait leaves the inbox: the next item that needs me is
+// selected at once, as after an archive (afterArchive). Only the board shows it then (not "All working").
+function setWait(id, target) {
+  const leaves = target && S.mode === 'dev' && id === S.selected && S.state.inbox.includes(id);
+  const next = leaves ? nextItem(id) : null;
+  request('wait', { id, for: target }).catch((e) => toast(`Could not change what the task waits for: ${e.message}`));
+  if (!leaves) return;
+  S.lastAnswered = id; // Cmd+Up goes back to it
+  S.state.inbox = S.state.inbox.filter((x) => x !== id); // no flash of its row before the state push
+  uiLog(`waiting for: ${id.slice(0, 8)} --> ${next ? `${next.slice(0, 8)} ${JSON.stringify(S.state.tasks[next].title)}` : 'nothing needs me'}`);
+  if (next) return select(next);
+  selectNone();
+}
+
+// The badge of a task that waits (a card, a row of 1a)
+function waitBadge(t) {
+  const w = t.waitingFor && S.state.tasks[t.waitingFor];
+  return w ? `<span class="wait-badge" title="out of the inbox until &quot;${esc(w.title)}&quot; is archived">waits for ${esc(taskName(w))}</span>` : '';
+}
 
 // Rename (Renaud, 2026-11-15: "edit the summary shown on the task"): the title of the row becomes a
 // name field, as Rename in the explorer. Enter or a click elsewhere keeps the text, Esc or an empty

@@ -305,6 +305,9 @@ body.tab-dragging, body.tab-dragging * { cursor: grabbing !important; user-selec
   margin-left: auto; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 60%; }
 .inbox-badge { font-size: 10px; padding: 0 4px; border-radius: 3px; background: #30a46c33; color: #7ee2a8; }
 .pin-badge { font-size: 10px; padding: 0 4px; border-radius: 3px; background: #8fc1ff22; color: #8fc1ff; }
+/* "waits for <task>" (app.js, waitBadge): gray, cut with ... in a narrow card or row */
+.wait-badge { font-size: 10px; padding: 0 4px; border-radius: 3px; background: #ffffff14; color: #b9bac0; display: inline-block;
+  max-width: 100%; min-width: 0; vertical-align: bottom; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
 #splash { position: fixed; inset: 0; z-index: 100; background: #040510; display: flex; flex-direction: column;
   align-items: center; justify-content: center; gap: 18px; transition: opacity .45s ease; }
