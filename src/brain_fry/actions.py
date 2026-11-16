@@ -7,6 +7,7 @@ import copy
 import json
 import logging
 import threading
+import time
 import uuid
 from pathlib import Path
 
@@ -143,24 +144,93 @@ def rename(task_id: str, title: str) -> Task:
     return _update(task_id, title=title.strip(), short_title=title.strip())
 
 
-def set_prio(task_id: str, prio: str) -> Task:
+def set_prio(task_id: str, prio: str, rank: float | None = None) -> Task:
+    """Another column: the task lands on top of it, or at `rank` (the Undo of park_others puts the
+    tasks back where they were). Its own column: nothing moves."""
     if prio not in PRIOS:
         raise ValueError(prio)
-    return _update(task_id, prio=prio)
+    with taskfile.LOCK:
+        if load(task_id).prio == prio and rank is None:
+            return _update(task_id, prio=prio)
+        return _update(task_id, prio=prio, rank=_top_of(prio, task_id) if rank is None else rank)
+
+
+def _column(prio: str, but: str) -> list[Task]:
+    """The open tasks of a column, top first, without the task `but`."""
+    return sorted((t for t in all_tasks() if t.prio == prio and t.id != but), key=views.column_order)
+
+
+def _top_of(prio: str, but: str) -> float:
+    """A rank above every open card of the column."""
+    col = _column(prio, but)
+    return _above(views.rank(col[0]) if col else None)
+
+
+def _above(top: float | None) -> float:
+    """A rank above `top` (None: an empty column): now, as a task born now gets it (taskfile.save),
+    so that a task born later still lands above; 1 above `top` when `top` is later than now."""
+    now = -time.time()
+    return now if top is None or now < top else top - 1
+
+
+MIN_GAP = 1e-3  # two neighbors closer than this: the column is numbered again (ranks near -1.8e9 keep 7 decimals)
+
+
+def place(task_id: str, over_id: str, after: bool = False) -> Task:
+    """Shift+Up/Down on the board (Renaud, 2026-11-16): the task goes just above `over_id` (below with
+    `after`), an open task of its column; the front end names the neighbor that it shows, so a card
+    hidden by the search is passed over. One file is written: the rank halfway between its new
+    neighbors. When they are too close (or tied), every card of the column is numbered again, 1 apart."""
+    with taskfile.LOCK:
+        task, over = load(task_id), load(over_id)
+        if task.id == over.id or task.prio != over.prio or "done" in (task.status, over.status):
+            raise ValueError("place: two open tasks of one column")
+        col = _column(task.prio, task.id)
+        i = [t.id for t in col].index(over.id) + after
+        lo = views.rank(col[i - 1]) if i > 0 else None
+        hi = views.rank(col[i]) if i < len(col) else None
+        if lo is None:
+            return _update(task_id, rank=_above(hi))
+        if hi is None:
+            return _update(task_id, rank=lo + 1)
+        if hi - lo > MIN_GAP:
+            return _update(task_id, rank=(lo + hi) / 2)
+        col.insert(i, task)
+        base = views.rank(col[0])
+        log.info("place: the ranks of the column %s are numbered again (%d tasks)", task.prio, len(col))
+        for n, t in enumerate(col):
+            if t.rank != base + n:
+                _update(t.id, rank=base + n)
+        return load(task_id)
+
+
+def migrate_rank() -> int:
+    """At the start of the app: an open task without a rank (its file was last written before ranks,
+    2026-11-16) gets the place that it had on the board then, by its last update, the most recent on
+    top. Then the board looks as before, and only my moves change it."""
+    n = 0
+    with taskfile.LOCK:
+        for t in all_tasks():
+            if t.rank is None:
+                t.rank = -(views.epoch(t.updated) or views.epoch(t.created))
+                taskfile.save(t)
+                n += 1
+    if n:
+        log.info("rank: %d open task(s) got the place of their last update", n)
+    return n
 
 
 def park_others(project: Path | str) -> list[str]:
     """The button of Organize mode: every open task of the working column that is not in `project`
     moves to next, and so leaves the inbox. Returns their ids, for Undo. Next, not planning
     (Renaud, 2026-11-13): they are interrupted work, not plans. Archived tasks stay (since
-    2026-11-14 the archive is out of all_tasks; before, they moved too)."""
+    2026-11-14 the archive is out of all_tasks; before, they moved too). They land on top of next,
+    in the order that they had: the bottom one moves first."""
     keep = str(Path(project))
-    moved = []
-    for t in all_tasks():
-        if t.prio == "working" and str(Path(t.project)) != keep:
-            set_prio(t.id, "next")
-            moved.append(t.id)
-    return moved
+    moved = [t for t in _column("working", "") if str(Path(t.project)) != keep]
+    for t in reversed(moved):
+        set_prio(t.id, "next")
+    return [t.id for t in moved]
 
 
 def set_open_files(task_id: str, open_files: list[str]) -> Task:

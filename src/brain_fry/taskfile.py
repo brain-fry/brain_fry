@@ -13,6 +13,7 @@ import logging
 import os
 import re
 import threading
+import time
 from dataclasses import dataclass, field, fields
 from datetime import date, datetime
 from pathlib import Path
@@ -61,6 +62,9 @@ class Task:
     short_title: str = ""  # 2 or 3 words, the heading of the task's card on the board
     transcript_path: str = ""
     prio: str = "working"
+    # the place in its column, the smallest on top (views.rank, actions.place); the inbox follows it
+    # inside a color. Set by the first save (save) or, for a file older than ranks, at start (actions.migrate_rank)
+    rank: float | None = None
     status: str = "waiting"
     live: bool = False
     inbox: bool = False
@@ -222,9 +226,14 @@ def path_of(project: Path, task_id: str) -> Path:
 def save(task: Task) -> Path:
     """Writes the task where its status puts it, and removes the copy at the other place (an
     archive, an unarchive). Written first, removed second: a crash in between leaves two copies,
-    and the top folder's wins (path_of, migrate)."""
+    and the top folder's wins (path_of, migrate). A task without a rank: a new file gets the time of
+    its first save, to the microsecond (`created` keeps the second), so that it lands above every task
+    born or moved before it; an older file, its birth."""
     project = Path(task.project)
     path, other = paths.task_path(project, task.id), paths.archive_path(project, task.id)
+    if task.rank is None:
+        old = path.exists() or other.exists()
+        task.rank = -((_epoch(task.created) if old else 0.0) or time.time())
     if task.status == "done":
         path, other = other, path
         path.parent.mkdir(exist_ok=True)

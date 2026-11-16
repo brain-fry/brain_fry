@@ -104,6 +104,7 @@ class Core:
     async def start(self) -> None:
         self.loop = asyncio.get_running_loop()
         await asyncio.to_thread(actions.migrate_archive)  # archived files of the top folders --> archive/
+        await asyncio.to_thread(actions.migrate_rank)  # before any event: open files older than ranks keep their place
         await asyncio.to_thread(self._reset_leftover_owned)
         selection.clear()  # left over after a crash (the hook also checks that our pid lives)
         threading.Thread(target=self._digest_worker, name="digest", daemon=True).start()
@@ -1057,8 +1058,11 @@ class Core:
             await run(actions.pin, tid)
         elif cmd == "rename":
             await run(actions.rename, tid, str(msg.get("title", "")))
-        elif cmd == "prio":
-            await run(actions.set_prio, tid, str(msg.get("prio")))
+        elif cmd == "prio":  # rank: the Undo of park puts each task back at its place
+            rank = msg.get("rank")
+            await run(actions.set_prio, tid, str(msg.get("prio")), float(rank) if isinstance(rank, (int, float)) else None)
+        elif cmd == "order":  # Shift+Up/Down on the board: just above (below) the card `over`
+            await run(actions.place, tid, str(msg.get("over")), bool(msg.get("after")))
         elif cmd == "park":  # Organize mode: the working tasks of the other projects --> next
             ids = await run(actions.park_others, Path(msg["project"]))
             self.request_broadcast()

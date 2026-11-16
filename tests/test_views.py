@@ -38,8 +38,8 @@ def test_first_prompt_of_a_planned_task_is_its_notes():
 
 
 def test_working_list_is_the_inbox_then_the_rest_of_the_working_column():
-    def t(sid, updated, **kw):
-        return Task(session_ids=[sid], project="/p", cwd="/p", updated=f"2026-11-15T10:{updated:02d}:00", **kw)
+    def t(sid, place, **kw):
+        return Task(session_ids=[sid], project="/p", cwd="/p", rank=-float(place), **kw)
 
     tasks = [
         t("busy-old", 1, status="working"),
@@ -54,3 +54,11 @@ def test_working_list_is_the_inbox_then_the_rest_of_the_working_column():
     assert views.working_list(tasks) == ["blocked", "reply", "pinned", "busy-new", "busy-old"]
     inbox = [x.id for x in sorted(filter(views.in_inbox, tasks), key=views.inbox_order)]
     assert views.working_list(tasks)[: len(inbox)] == inbox
+
+
+def test_rank_of_a_file_without_one_is_its_birth():
+    born = "2026-11-16T10:00:00+01:00"
+    assert views.rank(task(created=born)) == -views.epoch(born)
+    assert views.rank(task(created=born, rank=3)) == 3.0
+    assert views.rank(task(created=born, rank="broken")) == -views.epoch(born)  # a hand edit
+    assert views.rank(task()) == 0.0

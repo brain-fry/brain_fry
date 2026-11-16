@@ -166,16 +166,96 @@ def test_archive_unpins_and_an_archived_task_cannot_be_pinned(project):
 
 
 def test_inbox_order_puts_quiet_pinned_tasks_last(project):
-    def make(updated, **flags):
+    def make(rank, **flags):
         t = actions.new_task(project)
-        return actions._update(t.id, updated=updated, **flags)
+        return actions._update(t.id, rank=rank, **flags)
 
-    quiet = make("2026-11-11T12:00:00", pinned=True)
-    waiting = make("2026-11-11T10:00:00", inbox=True)
-    blocked = make("2026-11-11T09:00:00", inbox=True, status="blocked")
-    pinned_waiting = make("2026-11-11T11:00:00", pinned=True, inbox=True)
+    quiet = make(1.0, pinned=True)
+    waiting = make(4.0, inbox=True)
+    blocked = make(5.0, inbox=True, status="blocked")
+    pinned_waiting = make(3.0, pinned=True, inbox=True)
     got = sorted([quiet, waiting, blocked, pinned_waiting], key=views.inbox_order)
     assert [t.id for t in got] == [blocked.id, pinned_waiting.id, waiting.id, quiet.id]
+
+
+def test_inbox_follows_the_board_inside_a_color(project):
+    """Renaud, 2026-11-16: of two green tasks, the one higher on the board is higher in the inbox,
+    whatever their last update."""
+    old = actions._update(actions.new_task(project).id, inbox=True, updated="2026-11-16T09:00:00+01:00")
+    new = actions._update(actions.new_task(project).id, inbox=True, updated="2026-11-16T10:00:00+01:00")
+    actions.place(old.id, new.id)
+    assert [t.id for t in sorted(actions.all_tasks(), key=views.inbox_order)] == [old.id, new.id]
+    actions.place(old.id, new.id, after=True)
+    assert [t.id for t in sorted(actions.all_tasks(), key=views.inbox_order)] == [new.id, old.id]
+
+
+def column(prio="working"):
+    return [t.id for t in sorted((t for t in actions.all_tasks() if t.prio == prio), key=views.column_order)]
+
+
+def test_a_new_task_lands_on_top_of_its_column(project):
+    a = actions.new_task(project)
+    b = actions.new_task(project)
+    actions.place(a.id, b.id)  # a above b, in the second of their birth
+    c = actions.new_task(project)
+    assert column() == [c.id, a.id, b.id]
+    assert actions.load(c.id).rank is not None  # written by the first save: an update does not move it
+    actions._update(b.id, updated="2099-01-01T00:00:00+01:00")
+    assert column() == [c.id, a.id, b.id]
+
+
+def test_place_moves_a_task_above_or_below_another(project):
+    ids = [actions._update(actions.new_task(project).id, rank=float(r)).id for r in range(4)]
+    a, b, c, d = ids
+    actions.place(d, b)  # d just above b
+    assert column() == [a, d, b, c]
+    actions.place(a, c, after=True)  # a to the bottom
+    assert column() == [d, b, c, a]
+    actions.place(c, d)  # c to the top
+    assert column() == [c, d, b, a]
+    with pytest.raises(ValueError):
+        actions.place(a, a)
+    other = actions.set_prio(actions.new_task(project).id, "planning")
+    with pytest.raises(ValueError):
+        actions.place(a, other.id)  # not in its column
+
+
+def test_place_numbers_the_column_again_when_the_gap_is_too_small(project):
+    a, b, c = (actions._update(actions.new_task(project).id, rank=r).id for r in (0.0, 0.0001, 0.0002))
+    actions.place(c, b)
+    assert column() == [a, c, b]
+    assert [actions.load(i).rank for i in (a, c, b)] == [0.0, 1.0, 2.0]
+    tied = [actions._update(actions.new_task(project).id, prio="next", rank=5.0).id for _ in range(3)]
+    top, mid, bottom = column("next")
+    actions.place(bottom, top)  # a tie gets an order too
+    assert column("next") == [bottom, top, mid] and sorted(tied) == sorted(column("next"))
+
+
+def test_another_column_puts_the_task_on_top(project):
+    a = actions.set_prio(actions.new_task(project).id, "next")
+    b = actions.set_prio(actions.new_task(project).id, "next")
+    w = actions.new_task(project)
+    actions.place(a.id, b.id)
+    assert column("next") == [a.id, b.id]
+    actions.set_prio(w.id, "next")
+    assert column("next") == [w.id, a.id, b.id]
+    rank = actions.load(b.id).rank
+    assert actions.set_prio(b.id, "next").rank == rank  # its own column: nothing moves
+    assert actions.set_prio(b.id, "working", rank=7.5).rank == 7.5  # the Undo of park: back at its place
+
+
+def test_migrate_rank_keeps_the_board_of_the_last_updates(project):
+    from brain_fry import taskfile
+
+    old = actions._update(actions.new_task(project).id, updated="2026-11-15T09:00:00+01:00")
+    recent = actions._update(actions.new_task(project).id, updated="2026-11-15T10:00:00+01:00")
+    for t in (old, recent):  # files written before ranks
+        path = taskfile.path_of(project, t.id)
+        path.write_text("\n".join(line for line in path.read_text().split("\n") if not line.startswith("rank:")))
+        assert actions.load(t.id).rank is None
+    assert actions.migrate_rank() == 2
+    assert column() == [recent.id, old.id]
+    assert actions.migrate_rank() == 0
 
 
 def test_only_the_working_column_is_in_the_inbox(project):
@@ -200,7 +280,20 @@ def test_park_others_moves_the_working_tasks_of_the_other_projects(project, home
     archived = actions._update(actions.new_task(other).id, status="done")
     later = actions.set_prio(actions.new_task(other).id, "later")
     assert actions.park_others(project) == [theirs.id]  # open tasks only: the archive is out of all_tasks (2026-11-14)
+    assert column("next")[0] == theirs.id  # on top of next
     prios = {t.id: actions.load(t.id).prio for t in (mine, theirs, archived, later)}
     assert prios == {mine.id: "working", theirs.id: "next", archived.id: "working", later.id: "later"}
     assert actions.load(theirs.id).inbox and not views.in_inbox(actions.load(theirs.id))
     assert actions.park_others(project) == []
+
+
+def test_park_others_keeps_the_order_of_the_moved_tasks(project, home):
+    from brain_fry import projects
+
+    other = home / "other"
+    other.mkdir()
+    projects.init(other)
+    low, high = (actions._update(actions.new_task(other).id, rank=r).id for r in (2.0, 1.0))
+    queued = actions.set_prio(actions.new_task(project).id, "next")
+    assert actions.park_others(project) == [high, low]
+    assert column("next") == [high, low, queued.id]

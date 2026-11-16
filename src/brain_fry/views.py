@@ -31,17 +31,33 @@ def in_working(t: Task) -> bool:
 
 def working_list(tasks: list[Task]) -> list[str]:
     """The ids that 1a shows with "All working" on: the inbox first, in its order, then the
-    other tasks of the working column, red first, then the most recent."""
+    other tasks of the working column, red first, then in the order of the board."""
     inbox = [t.id for t in sorted(filter(in_inbox, tasks), key=inbox_order)]
     rest = [t.id for t in sorted(tasks, key=inbox_order) if in_working(t) and not in_inbox(t)]
     return inbox + rest
 
 
 def inbox_order(t: Task):
-    """What needs me first (the `inbox` flag): red first, then most recent first.
-    DESIGN_DETAILS.md "Status, inbox, board". Then the pinned tasks that need nothing now,
-    in the same order."""
-    return (not t.inbox, t.status != "blocked", -epoch(t.updated))
+    """What needs me first (the `inbox` flag): red first, then in the order of the board (Renaud,
+    2026-11-16; before, the most recent first). DESIGN_DETAILS.md "Status, inbox, board". Then the
+    pinned tasks that need nothing now, in the same order."""
+    return (not t.inbox, t.status != "blocked", *column_order(t))
+
+
+def rank(t: Task) -> float:
+    """The task's place in its column, the smallest on top (DESIGN_DETAILS.md "Status, inbox, board",
+    "Order in a column"). A file without one (an archived file older than ranks, not saved since) or
+    with a broken one: its birth, the newest on top, as taskfile.save would set it."""
+    try:
+        return float(t.rank)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return -epoch(t.created) if t.created else 0.0
+
+
+def column_order(t: Task) -> tuple[float, str]:
+    """The order of the open cards of a column, top first; the id breaks a tie (two tasks born in the
+    same second). The front end sorts the same way (cardOrder in app.js)."""
+    return (rank(t), t.id)
 
 
 def project_order(projects: list[dict], tasks: list[Task], archived: dict[str, tuple] | None = None) -> list[dict]:
@@ -134,6 +150,7 @@ def task_json(t: Task, pty_gen: int | None, shells: list[dict] | None = None, el
         "project": Path(t.project).name,
         "projectPath": t.project,
         "prio": t.prio,
+        "rank": rank(t),  # the order of the board (cardOrder in app.js)
         "status": t.status,
         "live": t.live,
         "inbox": t.inbox,

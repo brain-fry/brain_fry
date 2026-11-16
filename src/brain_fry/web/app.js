@@ -47,7 +47,7 @@ const S = {
   inboxAll: stored('inboxAll', false), // 1a shows every task of the working column (its switch "All working")
   inboxRename: null, // task id while the title of its row in 1a is a name field (Rename, renameTask)
   menuSent: '', // what the Task menu of the menu bar shows, as last sent (syncTaskMenu)
-  advance: null, // {from, order, at, timer}: an advance waiting for its second
+  advance: null, // {from, at, why, timer}: an advance waiting for its second
   lastAnswered: null, // the task that the last advance (answer or archive) left: Cmd+Up from the first item goes back
   project: null, // the project picked in the dropdown when it had no task to land on (path)
   idle: null, // task id: nothing is selected (4a: a photo), 2a and column 3 still show this task's tabs (showIdle)
@@ -583,8 +583,7 @@ function onPrompted(m) {
   if (!S.autoAdvance) return uiLog(`auto-advance off: stays on ${m.id.slice(0, 8)}`);
   if (m.slash) return uiLog(`auto-advance: no advance for a slash command in ${m.id.slice(0, 8)}`);
   cancelAdvance();
-  // the inbox order before the answer: the "next" item is the one after it
-  S.advance = { from: m.id, order: [...S.state.inbox], at: Date.now(), why: m.why };
+  S.advance = { from: m.id, at: Date.now(), why: m.why };
   S.advance.timer = setTimeout(doAdvance, ADVANCE_MS);
 }
 
@@ -593,12 +592,11 @@ function cancelAdvance() {
   S.advance = null;
 }
 
-// only items that need me: a pinned task without a reply or a block is skipped
-function nextAfter(from, order) {
-  const inbox = S.state.inbox.filter((id) => id !== from && S.state.tasks[id].inbox);
-  const i = order.indexOf(from);
-  if (i >= 0) for (const id of [...order.slice(i + 1), ...order.slice(0, i)]) if (inbox.includes(id)) return id;
-  return inbox[0] || null;
+// The first inbox item that needs me, other than `from` (Renaud, 2026-11-16: of two green tasks, the
+// one higher on the board is selected first; before, the item after `from`). A pinned task without a
+// reply or a block is skipped.
+function nextItem(from) {
+  return S.state.inbox.find((id) => id !== from && S.state.tasks[id] && S.state.tasks[id].inbox) || null;
 }
 
 function doAdvance() {
@@ -607,7 +605,7 @@ function doAdvance() {
   if (!a || S.mode !== 'dev' || S.selected !== a.from || !S.autoAdvance) return;
   const t = S.terms.get(a.from);
   if (t && t.lastInput > a.at) return uiLog(`auto-advance: stays on ${a.from.slice(0, 8)}, I am typing in it`);
-  const next = nextAfter(a.from, a.order);
+  const next = nextItem(a.from);
   uiLog(`auto-advance${a.why ? ` (${a.why})` : ''}: ${a.from.slice(0, 8)} --> ${next ? `${next.slice(0, 8)} ${JSON.stringify(S.state.tasks[next].title)}` : 'nothing needs me'}`);
   S.lastAnswered = a.from;
   if (next) return select(next);
@@ -677,7 +675,7 @@ function act(cmd, id = targetId()) {
 function archiveTask(id) {
   const task = S.state.tasks[id];
   const archiving = S.mode === 'dev' && id === S.selected && task && task.status !== 'done';
-  const next = archiving ? nextAfter(id, [...S.state.inbox]) : null; // the inbox order before the archive
+  const next = archiving ? nextItem(id) : null;
   send('archive', { id, ...termSize() });
   if (archiving) afterArchive(id, next);
 }
@@ -715,6 +713,16 @@ const searchWords = () => S.search.toLowerCase().split(/\s+/).filter(Boolean);
 const searchText = (t) => [t.title, t.shortTitle, t.project, t.digest, t.notes,
   ...(t.threads || []).flatMap((th) => [th.digest, th.prompt])].join('\n').toLowerCase();
 
+// The order of a column (Renaud, 2026-11-16): the open cards by their rank (views.column_order: the
+// smallest on top, Shift+Up/Down moves a card), then the archived ones, the most recent first: they are
+// done, and the numbers 1 to 9 of the open cards do not change when H shows them.
+function cardOrder(a, b) {
+  const done = (a.status === 'done') - (b.status === 'done');
+  if (done) return done;
+  const by = a.status === 'done' ? Date.parse(b.updated) - Date.parse(a.updated) : a.rank - b.rank;
+  return by || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+}
+
 function boardColumns(st) {
   const words = searchWords();
   const all = S.showHidden || words.length > 0;
@@ -722,7 +730,7 @@ function boardColumns(st) {
   const tasks = Object.values(st.tasks).filter((t) => (all || t.status !== 'done') && (!words.length || match(t)));
   return PRIOS.filter((p) => all || !HIDDEN_PRIOS.has(p)).map((prio) => ({
     prio,
-    ids: tasks.filter((t) => t.prio === prio).sort((a, b) => Date.parse(b.updated) - Date.parse(a.updated)).map((t) => t.id),
+    ids: tasks.filter((t) => t.prio === prio).sort(cardOrder).map((t) => t.id),
   }));
 }
 
@@ -790,11 +798,12 @@ function parkable(st, cur) {
 async function parkOthers() {
   const cur = currentProject();
   if (!cur) return;
+  const rank = Object.fromEntries(parkable(S.state, cur).map((t) => [t.id, t.rank])); // Undo: back at their places
   try {
     const { ids } = await request('park', { project: cur });
     if (!ids.length) return;
     toast(`Moved ${ids.length} task${ids.length > 1 ? 's' : ''} to Next`, {
-      label: 'Undo', run: () => ids.forEach((id) => send('prio', { id, prio: 'working' })),
+      label: 'Undo', run: () => ids.forEach((id) => send('prio', { id, prio: 'working', rank: rank[id] })),
     });
   } catch (e) {
     toast(`Could not move the tasks: ${e.message}`);
@@ -869,9 +878,32 @@ function movePrio(step) {
   const i = PRIOS.indexOf(t.prio) + step;
   if (i < 0 || i >= PRIOS.length) return;
   t.prio = PRIOS[i]; // at once on screen; the backend confirms with the next state
+  t.rank = rankOnTop(t.prio, t.id);
   send('prio', { id: t.id, prio: t.prio });
   if (HIDDEN_PRIOS.has(t.prio) && !S.showHidden) setShowHidden(true); // keep the card in view
   else render();
+}
+
+// A card that changes column lands on top of it (actions.set_prio): its rank on screen until the push
+function rankOnTop(prio, id) {
+  const ranks = Object.values(S.state.tasks).filter((x) => x.prio === prio && x.id !== id && x.status !== 'done').map((x) => x.rank);
+  return ranks.length ? Math.min(...ranks) - 1 : 0;
+}
+
+// Shift+Up/Down (Renaud, 2026-11-16): the card under the cursor one place up or down in its column,
+// in reading order in planning (two cards per row). Its neighbor is the one on screen: a card that the
+// search hides is passed over. Archived cards stay after the open ones: an open card does not pass
+// them, and an archived card does not move.
+function moveCard(step) {
+  const t = S.state.tasks[S.boardSel];
+  const col = t && t.status !== 'done' && boardColumns(S.state).find((c) => c.ids.includes(t.id));
+  if (!col) return;
+  const ids = col.ids.filter((id) => S.state.tasks[id].status !== 'done');
+  const o = S.state.tasks[ids[ids.indexOf(t.id) + step]];
+  if (!o) return;
+  [t.rank, o.rank] = [o.rank, t.rank]; // at once on screen; the backend sets the ranks (actions.place)
+  send('order', { id: t.id, over: o.id, after: step > 0 });
+  render();
 }
 
 // A new task starts with the tabs of the previous task (files, browser, terminals; DESIGN_DETAILS.md,
@@ -1326,8 +1358,8 @@ document.addEventListener('keydown', (e) => {
     const k = e.key;
     if (k === 'ArrowLeft') e.shiftKey ? movePrio(-1) : boardMove(-1, 0);
     else if (k === 'ArrowRight') e.shiftKey ? movePrio(1) : boardMove(1, 0);
-    else if (k === 'ArrowUp') boardMove(0, -1);
-    else if (k === 'ArrowDown') boardMove(0, 1);
+    else if (k === 'ArrowUp') e.shiftKey ? moveCard(-1) : boardMove(0, -1);
+    else if (k === 'ArrowDown') e.shiftKey ? moveCard(1) : boardMove(0, 1);
     else if (k === 'Enter') { if (S.boardSel) openInDev(S.boardSel); }
     else if (/^[1-9]$/.test(k)) openWorking(Number(k));
     else if (k === 'Escape') setMode('dev');
@@ -1487,7 +1519,7 @@ async function deleteTask(id) {
   const col = boardColumns(S.state).find((c) => c.ids.includes(id));
   const ids = col ? col.ids : [];
   const i = ids.indexOf(id);
-  const next = S.mode === 'dev' && S.selected === id ? nextAfter(id, [...S.state.inbox]) : null; // the order before
+  const next = S.mode === 'dev' && S.selected === id ? nextItem(id) : null;
   try { await request('delete', { id }); } catch (e) { toast(`Could not delete the task: ${e.message}`); return; }
   delete S.state.tasks[id]; // no flash of its card before the state push
   dropRow(id);
@@ -1556,6 +1588,7 @@ document.addEventListener('drop', (e) => {
   S.dragging = false;
   if (!col || !S.state.tasks[id]) return render();
   e.preventDefault();
+  if (S.state.tasks[id].prio !== col.dataset.prio) S.state.tasks[id].rank = rankOnTop(col.dataset.prio, id);
   S.state.tasks[id].prio = col.dataset.prio;
   S.boardSel = id;
   send('prio', { id, prio: col.dataset.prio });
