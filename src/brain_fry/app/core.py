@@ -857,6 +857,12 @@ class Core:
             log.info("%s %s from %s into %s", "moved" if cut else "copied", ", ".join(f"{a} -> {b}" for a, b in pairs) or "nothing",
                      Path(src).name, Path(dst).name)  # fmt: skip
             return pairs
+        if cmd == "fs.zip":  # Zip: "<name>.zip" next to the entry; concurrent (server.CONCURRENT), a big folder takes time
+            project = await run(self._project_of, tid)
+            new = await run(files.zip_entry, project, msg["path"])
+            size = await run(lambda: (Path(project) / new).stat().st_size)
+            log.info("zipped %s to %s in %s (%d bytes)", msg["path"], new, Path(project).name, size)
+            return new
         if cmd == "fs.copypath":
             text = await run(files.path_text, await run(self._project_of, tid), msg["path"], bool(msg.get("relative")))
             await run(files.copy_to_clipboard, text)

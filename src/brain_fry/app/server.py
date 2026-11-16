@@ -45,7 +45,7 @@ ICON_KEY = re.compile(r"[0-9a-z_+-]{1,40}")
 # Slow commands (Quick Look, Spotlight, a big folder, the explorer's search): they run beside the others, which would
 # wait for them otherwise (a connection's commands run one after the other). Their order does
 # not matter: each reply carries its request number.
-CONCURRENT = {"finder.list", "finder.info", "finder.thumb", "fs.search"}
+CONCURRENT = {"finder.list", "finder.info", "finder.thumb", "fs.search", "fs.zip"}
 
 
 def _refused(headers: Headers, port: int) -> str | None:

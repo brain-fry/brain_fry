@@ -9,7 +9,10 @@ from __future__ import annotations
 import os
 import re
 import shutil
+import stat
 import subprocess
+import time
+import zipfile
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
@@ -395,6 +398,51 @@ def paste(src_project: str | Path, rels: list[str], dst_project: str | Path, dst
             shutil.copy2(src, target, follow_symlinks=False)
         pairs.append([rel.strip("/"), _join(dst_dir, name)])
     return pairs
+
+
+ZIP_MIN_TIME = 315576000  # 1980-01-02: a zip cannot hold an older date
+
+
+def zip_entry(project: str | Path, rel: str) -> str:
+    """Zip (the right-click menu of 2a): the file or folder `rel` into "<name>.zip" next to it,
+    or "<name> 2.zip", "<name> 3.zip", as Finder's Compress names it. Never replaces anything.
+    A folder's entries start with its name, so unzipping gives the folder back. The zip holds
+    what the explorer shows: the HIDDEN names are left out (.git, .venv, .DS_Store...), and so
+    are the files that are neither regular files nor links (sockets, pipes); a link is stored as
+    a link, never its target. A zip that fails is removed. Returns the zip's path."""
+    src = entry(project, rel)
+    n = 1
+    while True:
+        name = f"{src.name}{f' {n}' if n > 1 else ''}.zip"
+        target = src.parent / name
+        try:
+            fh = open(target, "xb")  # noqa: SIM115 (the name is taken at once: a second Zip takes the next name)
+            break
+        except FileExistsError:
+            n += 1
+    try:
+        with fh, zipfile.ZipFile(fh, "w", zipfile.ZIP_DEFLATED, strict_timestamps=False) as z:
+            _zip_add(z, src, src.name)
+    except BaseException:
+        target.unlink(missing_ok=True)
+        raise
+    return _join(rel.strip("/").rpartition("/")[0], name)
+
+
+def _zip_add(z: zipfile.ZipFile, p: Path, arc: str) -> None:
+    st = os.lstat(p)
+    if stat.S_ISLNK(st.st_mode):
+        info = zipfile.ZipInfo(arc, time.localtime(max(st.st_mtime, ZIP_MIN_TIME))[:6])
+        info.create_system = 3  # Unix: unzip, ditto and Archive Utility make the link again
+        info.external_attr = (st.st_mode & 0xFFFF) << 16
+        z.writestr(info, os.readlink(p))
+    elif stat.S_ISDIR(st.st_mode):
+        z.write(p, f"{arc}/")
+        for e in sorted(os.scandir(p), key=lambda e: e.name):
+            if e.name not in HIDDEN:
+                _zip_add(z, Path(e.path), f"{arc}/{e.name}")
+    elif stat.S_ISREG(st.st_mode):
+        z.write(p, arc)
 
 
 def path_text(project: str | Path, rel: str, relative: bool) -> str:

@@ -1,5 +1,7 @@
 import os
+import stat
 import subprocess
+import zipfile
 
 import pytest
 
@@ -134,6 +136,47 @@ def test_new_file_and_folder_never_replace_and_make_the_folders_on_the_way(repo,
     with pytest.raises(PermissionError):
         files.create(repo, "", "out/x.py", is_dir=False)  # a link on the way leads out of the project
     assert not (outside / "x.py").exists()
+
+
+def test_zip_takes_a_free_name_and_holds_what_the_explorer_shows(repo, tmp_path, monkeypatch):
+    src = repo / "src"
+    (src / "empty").mkdir()
+    (src / "__pycache__").mkdir()
+    (src / "__pycache__" / "a.pyc").write_bytes(b"\0")
+    (src / ".DS_Store").write_bytes(b"\0")
+    (src / ".env").write_text("K=1\n")  # a dotfile that the tree shows
+    os.symlink("a.py", src / "link.py")
+    os.symlink(tmp_path, src / "out")  # a link to a folder outside: stored as a link, not followed
+    os.mkfifo(src / "pipe")  # neither a file nor a link: left out (reading it would block)
+    os.utime(src / "a.py", (0, 0))  # 1970: older than any zip date
+    assert files.zip_entry(repo, "src") == "src.zip"
+    with zipfile.ZipFile(repo / "src.zip") as z:
+        assert sorted(z.namelist()) == ["src/", "src/.env", "src/a.py", "src/empty/", "src/link.py", "src/out"]
+        assert z.read("src/a.py") == b"x = 1\n"
+        links = {i.filename: z.read(i).decode() for i in z.infolist() if stat.S_ISLNK(i.external_attr >> 16)}
+        assert links == {"src/link.py": "a.py", "src/out": str(tmp_path)}
+    out = tmp_path / "unzipped"
+    subprocess.run(["ditto", "-x", "-k", str(repo / "src.zip"), str(out)], check=True)  # as Archive Utility
+    assert (out / "src" / "a.py").read_text() == "x = 1\n" and (out / "src" / "empty").is_dir()
+    assert os.readlink(out / "src" / "link.py") == "a.py"
+    # a file, in a folder; a taken name gives the next one, as Finder's Compress
+    assert files.zip_entry(repo, "src/a.py") == "src/a.py.zip"
+    assert files.zip_entry(repo, "src/a.py") == "src/a.py 2.zip"
+    with zipfile.ZipFile(src / "a.py 2.zip") as z:
+        assert z.namelist() == ["a.py"]
+    assert files.zip_entry(repo, "src") == "src 2.zip"
+    with pytest.raises(PermissionError):
+        files.zip_entry(repo, "../outside")
+    with pytest.raises(FileNotFoundError):
+        files.zip_entry(repo, "nope")
+
+    def broken(z, p, arc):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(files, "_zip_add", broken)
+    with pytest.raises(OSError):
+        files.zip_entry(repo, "README.md")
+    assert not (repo / "README.md.zip").exists()  # a zip that fails is removed
 
 
 def test_a_symlink_is_renamed_and_trashed_as_a_link_never_its_target(repo, monkeypatch):

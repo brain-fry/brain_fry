@@ -1,7 +1,7 @@
 'use strict';
 // The right-click menu of the explorer (2a) and its keys, as in VS Code on macOS: Enter (or F2)
 // renames the selected entry, Cmd+Backspace moves it to the Trash, Ctrl+C copies its relative path. Cut / Copy / Paste move or copy
-// files and folders, also between projects. New File... / New Folder... into the folder that was
+// files and folders, also between projects; Zip makes "<name>.zip" next to the entry. New File... / New Folder... into the folder that was
 // right-clicked, the file's folder, or the project folder (the empty space). A row dragged onto a
 // folder moves there.
 // See DESIGN_DETAILS.md "2a, 3a, 3b: files and terminals".
@@ -72,6 +72,7 @@ function ctxItems(tid, path, dir) {
     { label: 'Cut', run: () => setClip(tid, path, true) },
     { label: 'Copy', run: () => setClip(tid, path, false) },
     paste,
+    { label: 'Zip', run: () => zipPath(tid, path) },
     '-',
     { label: 'Copy path', run: () => copyPath(tid, path, false) },
     { label: 'Copy relative path', key: '⌃C', run: () => copyPath(tid, path, true) },
@@ -332,6 +333,19 @@ async function pasteInto(tid, dir) {
   if (dir) w.open.add(dir);
   if (pairs.length) w.treeSel = pairs[pairs.length - 1][1];
   treesChanged(project);
+}
+
+// Zip (asked by Renaud on 2026-11-16): "<name>.zip" next to the entry (files.zip_entry), then
+// selected in the tree, as after Paste. A zip that takes over 1 s shows a toast meanwhile, and
+// another one when it is written.
+async function zipPath(tid, path) {
+  let slow = false;
+  const timer = setTimeout(() => { slow = true; toast(`Zipping ${nameOf(path)}...`); }, 1000);
+  let to;
+  try { to = await request('fs.zip', { id: tid, path }); } catch (e) { toast(errText(e)); return; } finally { clearTimeout(timer); }
+  if (slow) toast(`Zipped: ${nameOf(to)}`);
+  work(tid).treeSel = to;
+  treesChanged(wsProject(tid));
 }
 
 // In the folder, or in the file's folder; pane 3 (bottom left), which opens if it was empty.

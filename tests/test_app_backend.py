@@ -340,7 +340,7 @@ def test_open_panel_returns_the_chosen_files_of_the_project(backend, project, tm
 
 
 def test_commands_of_the_explorer_menu(backend, project, monkeypatch):
-    """Rename, Trash, Paste (also from a task of another project), Copy path."""
+    """Rename, Trash, Paste (also from a task of another project), Copy path, New File..., Zip."""
     core, port = backend
     t = actions.new_task(project)
     (project / "notes.md").write_text("hello\n")
@@ -370,6 +370,9 @@ def test_commands_of_the_explorer_menu(backend, project, monkeypatch):
         assert (project / "docs" / "a.md").is_file() and (project / "lib").is_dir()
         taken = request(ctl, 10, cmd="fs.new", id=t.id, dir="", name="lib", folder=False)
         assert not taken["ok"] and taken["error"].startswith("FileExistsError")
+        assert request(ctl, 11, cmd="fs.zip", id=t.id, path="docs")["data"] == "docs.zip"
+        assert request(ctl, 12, cmd="fs.zip", id=t.id, path="docs")["data"] == "docs 2.zip"
+        assert (project / "docs.zip").is_file()
     assert trashed == [(project / "docs").resolve() / "todo.md"]
     assert clip == ["docs", str(project / "docs")]
 
