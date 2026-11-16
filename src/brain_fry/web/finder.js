@@ -59,12 +59,13 @@ function makeFinderTab(tid, root, chain = []) {
 }
 
 // Cmd+N E (grid.js): a Finder tab at the project folder, in pane n. `folder`: at that folder,
-// anywhere on the disk (a folder dropped from Finder on a pane, drop.js).
-function newFinder(tid, n, folder = null) {
+// anywhere on the disk (a folder dropped from Finder on a pane, drop.js; Open in BF Finder,
+// explorer.js). `chain`: the names selected from it (a file shown selected in its folder).
+function newFinder(tid, n, folder = null, chain = []) {
   const root = folder || wsProject(tid);
   if (!root) { toast('No project: a Finder tab starts at the project folder.'); return; }
   const w = work(tid); // its owner: a task, or a project's tabs (ownerFor)
-  const tab = makeFinderTab(tid, root);
+  const tab = makeFinderTab(tid, root, chain);
   addTab(w, tab, n);
   showTab(tab, true);
   refreshFinder(tab).then(() => saveFinderTabs(tid));

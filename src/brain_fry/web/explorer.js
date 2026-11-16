@@ -6,7 +6,8 @@
 // folder moves there.
 // See DESIGN_DETAILS.md "2a, 3a, 3b: files and terminals".
 // Uses S, $, esc, request, send, toast, store, uiLog (app.js), work, loadDir, refreshTree, renderExplorer,
-// renderFiles, saveOpenFiles, closeFile, openFile (files.js) and newShell (shells.js).
+// renderFiles, saveOpenFiles, closeFile, openFile (files.js), newShell (shells.js), newFinder (finder.js)
+// and openPane (grid.js).
 
 // What Cut or Copy put aside for Paste: { tid, project, paths, cut }. Kept in Brain Fry only,
 // not on the clipboard of macOS: Finder cannot paste it.
@@ -55,7 +56,8 @@ function ctxItems(tid, path, dir) {
   ];
   // Open in Finder (asked by Renaud on 2026-11-14): a folder opens in Finder, a file shows selected
   // in a Finder window on its folder (VS Code's Reveal in Finder), the empty space opens the project folder
-  if (path === null) return [...create, { label: 'Open in Finder', run: () => send('fs.open', { id: tid, path: '' }) }, '-', paste, '-', refresh];
+  const bf = { label: 'Open in BF Finder', run: () => finderHere(tid, path, dir) };
+  if (path === null) return [...create, { label: 'Open in Finder', run: () => send('fs.open', { id: tid, path: '' }) }, bf, '-', paste, '-', refresh];
   // a markdown file: as VS Code's Open Preview (asked by Renaud on 2026-11-14, mdpreview.js)
   const preview = !dir && mdPreviewable(path) ? [{ label: 'Open Preview', run: () => openPreview(tid, path) }] : [];
   return [
@@ -64,6 +66,7 @@ function ctxItems(tid, path, dir) {
     ...(dir ? [] : [{ label: 'Open in default app', run: () => send('fs.open', { id: tid, path }) }]),
     { label: 'Open With', sub: () => openWithItems('fs.apps', { id: tid, path }, (app) => send('fs.open', { id: tid, path, app })) },
     { label: 'Open in Finder', run: () => send('fs.open', { id: tid, path, reveal: !dir }) },
+    bf,
     { label: 'Open a terminal here', run: () => terminalHere(tid, path) },
     '-',
     { label: 'Cut', run: () => setClip(tid, path, true) },
@@ -335,6 +338,19 @@ async function pasteInto(tid, dir) {
 function terminalHere(tid, path) {
   uiLog('create: terminal in pane 3, from the explorer');
   newShell(ownerFor(tid), 3, path); // as Cmd+N T: no task selected, a project tab
+}
+
+// Open in BF Finder (asked by Renaud on 2026-11-16): a Finder tab of column 3 (finder.js), as Open
+// in Finder does it: at the folder, at the file's folder with the file selected, or (`path` null,
+// the empty space) at the project folder. It goes where a file from 2a goes (openPane: not over a
+// terminal nor a Finder tab) and takes the keyboard, as Cmd+N E.
+function finderHere(tid, path, dir) {
+  const root = wsProject(tid);
+  if (!root) return;
+  const folder = path === null ? '' : dir ? path : parentOf(path);
+  const n = openPane(work(tid));
+  uiLog(`create: Finder tab in pane ${n}, from the explorer`);
+  newFinder(ownerFor(tid), n, folder ? `${root}/${folder}` : root, path === null || dir ? [] : [nameOf(path)]);
 }
 
 async function copyPath(tid, path, relative) {
