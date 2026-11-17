@@ -85,6 +85,7 @@ def test_bash_tells_its_commands_and_its_folder(tmp_path):
     found, _ = ptys.scan_info(out)
     cmds = [v for k, v in found if k == "cmd"]
     assert cmds == ["cd sub", "echo hi | cat; true", "echo $FROM_PROFILE", "echo DONE"]
+    assert [v for k, v in found if k == "ran"] == ["echo hidden"]  # not in history: its first command (empty line: nothing)
     assert [v for k, v in found if k == "cwd"][-1] == str(tmp_path / "sub")
     assert b"PC-RAN" in out  # the profile's PROMPT_COMMAND still runs
     assert b"yes\r\n" in out  # the login files were read
@@ -101,7 +102,7 @@ def test_bash_without_a_profile_reads_profile_or_nothing(tmp_path):
 
 def test_a_session_keeps_the_last_command_and_folder():
     s = ptys.PtySession.__new__(ptys.PtySession)  # no process: only the reader of the sequences
-    s.scan, s.command, s.folder, s._tail, s.prompts = True, "", "/start", b"", 0
+    s.scan, s.command, s.folder, s._tail, s.prompts, s.writes, s.fs_gen = True, "", "/start", b"", 0, False, 0
     seen = []
     s.on_info = lambda x: seen.append((x.command, x.folder))
     whole = seq("cmd", "make test") + b"output" + seq("cwd", "/start/sub")
@@ -112,6 +113,53 @@ def test_a_session_keeps_the_last_command_and_folder():
     s._read_info(seq("cwd", "/elsewhere"))
     assert seen == [("make test", "/start/sub"), ("make test", "/elsewhere")]
     assert s.prompts == 2  # a `cwd` before each prompt (the play button of a Python file waits for the first)
+
+
+# ---- a command line that may change files reloads the explorer at the next prompt
+
+@pytest.mark.parametrize(("line", "writes"), [
+    ("ls -la", False), ("cd sub && ls | head -3; pwd", False), ("git status", False), ("git -c x=y log --oneline", False),
+    ("grep -rn foo . 2>&1 | less", False), ("cat a 2> /dev/null", False), ("echo err >&2", False), ("a=$(ls)", False),
+    ("FOO=1 sudo -E ls", False), ("", False),
+    ("rm a", True), ("mv a b", True), ("touch a", True), ("\\rm a", True), ("/bin/rm a", True),
+    ("python make_plots.py", True), ("uv run pytest", True), ("make", True), ("git checkout main", True),
+    ("git -C sub status", True),  # -C's folder taken for the subcommand: a false positive
+    ("echo x > new.txt", True), ("ls >> list.txt", True), ("ls && rm a", True), ("ls | xargs rm", True),
+    ("ls; (cd sub && rm a)", True), ("echo `rm a`", True), ("cat a | tee b", True), ("FOO=1 rm a", True),
+])
+def test_changes_files(line, writes):
+    assert ptys.changes_files(line) is writes
+
+
+def test_a_session_counts_the_lines_that_may_change_files_at_the_prompt():
+    s = ptys.PtySession.__new__(ptys.PtySession)
+    s.scan, s.command, s.folder, s._tail, s.prompts, s.writes, s.fs_gen = True, "", "/p", b"", 0, False, 0
+    seen = []
+    s.on_info, s.on_open = lambda x: seen.append(x.fs_gen), None
+    s._read_info(seq("cmd", "python run.py"))
+    assert s.fs_gen == 0 and s.writes  # before it runs: its files are not there yet
+    s._read_info(seq("cwd", "/p"))  # the prompt: it has ended (the same folder: news all the same)
+    assert s.fs_gen == 1 and seen[-1] == 1 and not s.writes
+    s._read_info(seq("ran", "python run.py") + seq("cwd", "/p"))  # the same line again, not in history
+    assert s.fs_gen == 2
+    s._read_info(seq("cmd", "ls -la") + seq("cwd", "/p"))
+    s._read_info(seq("ran", "ls") + seq("cwd", "/p"))  # `ls -la` again
+    s._read_info(seq("cwd", "/p"))  # an empty line
+    assert s.fs_gen == 2
+    s._read_info(seq("ran", "rm a") + seq("cwd", "/p"))  # a line with a leading space: its first command
+    assert s.fs_gen == 3 and s.command == "ls -la"  # the name of the terminal stays
+
+
+@pytest.mark.skipif(not Path("/bin/bash").exists(), reason="needs bash")
+def test_bash_tells_a_line_again_that_history_drops(tmp_path):
+    # Renaud's ~/.bash_profile has HISTIGNORE="&": the same line twice in a row is recorded once
+    # and a PROMPT_COMMAND that shows the status of the last line: __bf_prompt, before it, keeps $?
+    (tmp_path / ".bash_profile").write_text("PS1='PROMPT> '\nHISTIGNORE='&'\nPROMPT_COMMAND='echo ST=$?'\n")
+    out = run_bash(tmp_path, ["touch a", "touch a", "", "ls -d a", "ls -d a | cat", "false"], b"END")
+    found, _ = ptys.scan_info(out)
+    assert [(k, v) for k, v in found if k in ("cmd", "ran")] == [("cmd", "touch a"), ("ran", "touch a"), ("cmd", "ls -d a"),
+                                                                ("cmd", "ls -d a | cat"), ("cmd", "false"), ("cmd", "echo END")]  # fmt: skip
+    assert b"ST=1" in out and b"ST=0" in out
 
 
 # ---- the backend: the state carries them, and shell.copy starts a shell where the other one is
@@ -186,7 +234,11 @@ def test_copy_a_terminal_starts_a_shell_in_its_folder(backend, project, home, tm
             _read(pty, b"PROMPT>")
             pty.send(json.dumps({"t": "in", "d": "cd sub && echo moved\r"}))
             st = _states(ctl, lambda m: (m["tasks"][a.id]["shells"] or [{}])[0].get("cwd") == str(project / "sub"))
-        assert st["tasks"][a.id]["shells"][0]["cmd"] == "cd sub && echo moved"
+            assert st["tasks"][a.id]["shells"][0]["fsgen"] == 0  # cd, echo: the explorer does not reload
+            pty.send(json.dumps({"t": "in", "d": "touch made\r"}))  # it may: at the next prompt
+            st = _states(ctl, lambda m: m["tasks"][a.id]["shells"][0]["fsgen"] == 1)
+            assert (project / "sub" / "made").exists()
+        assert st["tasks"][a.id]["shells"][0]["cmd"] == "touch made"
         new = _request(ctl, 2, cmd="shell.copy", id=b.id, **{"from": key}, rows=10, cols=80)["data"]["key"]
         with connect(f"ws://127.0.0.1:{port}/pty/{new}") as pty:
             _read(pty, b"PROMPT>")
@@ -238,7 +290,7 @@ def test_scan_finds_a_file_to_open():
 
 def test_a_session_passes_a_file_to_open_on():
     s = ptys.PtySession.__new__(ptys.PtySession)
-    s.scan, s.command, s.folder, s._tail, s.prompts = True, "", "/start", b"", 0
+    s.scan, s.command, s.folder, s._tail, s.prompts, s.writes, s.fs_gen = True, "", "/start", b"", 0, False, 0
     s.on_info, opened = None, []
     s.on_open = lambda x, path: opened.append(path)
     s._read_info(seq("open", "/p/a.py") + seq("open", "/p/b.py"))

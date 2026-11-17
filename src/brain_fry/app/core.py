@@ -170,7 +170,8 @@ class Core:
         for s in list(self.ptys.values()):
             if s.kind == "shell" and s.alive:  # cmd, cwd: from bash (shell_init.bash), for Cmd+N O
                 shells.setdefault(s.task, []).append({"key": s.key, "gen": s.gen, "title": s.title,
-                                                      "cmd": s.command, "cwd": s.folder})  # fmt: skip
+                                                      "cmd": s.command, "cwd": s.folder,
+                                                      "fsgen": s.fs_gen})  # the explorer reloads (files.js)  # fmt: skip
         running = self.running or {}
         open_ids = views.open_set(tasks)
         by_id = {t.id: views.task_json(t, gen := self._live_gen(t.id), shells.get(t.id),

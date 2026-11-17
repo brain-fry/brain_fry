@@ -2,7 +2,8 @@
 # in place of ~/.bashrc (`bash --init-file`), as VS Code's shell integration does. It reads the
 # files that a login shell reads, then adds two hooks that tell the app the last command and the
 # current folder, as escape sequences that the terminal ignores (OSC 7771, read by app/ptys.py).
-# The list of Cmd+N O shows them (DESIGN_DETAILS.md, "2a, 3a, 3b: files and terminals"). It also
+# The list of Cmd+N O shows them, and a command that may change files reloads the explorer
+# (DESIGN_DETAILS.md, "2a, 3a, 3b: files and terminals"). It also
 # defines `bf <file>`, which opens a file in the editor.
 
 # what `bash -l` reads
@@ -25,17 +26,26 @@ __bf_last() {
 }
 
 # Before a command line runs (the DEBUG trap fires before each simple command): its text, once
-# per line. A line that history did not record (an empty line, the commands of PROMPT_COMMAND, a
-# line that HISTCONTROL ignores) leaves the history number as it was, and is not sent.
+# per line. A line that history did not record (the same line again under HISTIGNORE="&" or
+# ignoredups, a line with a leading space under ignorespace) leaves the history number as it was:
+# it sends `ran` and its first command, since it too may change files (the explorer reloads,
+# ptys.changes_files). An empty line runs only PROMPT_COMMAND, whose first command is __bf_prompt:
+# nothing is sent.
 __bf_preexec() {
   [ -n "$__bf_ready" ] || return 0
   [ -n "$COMP_LINE" ] && return 0
   __bf_last
-  [ "$__bf_num" = "$__bf_hist" ] && return 0
   __bf_ready=
-  __bf_hist=$__bf_num
-  __bf_send cmd "$__bf_line"
+  if [ "$__bf_num" != "$__bf_hist" ]; then
+    __bf_hist=$__bf_num
+    __bf_send cmd "$__bf_line"
+  elif [ "$BASH_COMMAND" != __bf_prompt ]; then
+    __bf_send ran "$BASH_COMMAND"
+  fi
 }
+
+# First in PROMPT_COMMAND: marks the start of the prompt for __bf_preexec. Keeps $?.
+__bf_prompt() { return $?; }
 
 # Before each prompt (last in PROMPT_COMMAND): the folder. Keeps $? for the prompt.
 __bf_precmd() {
@@ -64,4 +74,4 @@ __bf_last
 __bf_hist=$__bf_num
 __bf_ready=
 trap '__bf_preexec' DEBUG
-PROMPT_COMMAND="${PROMPT_COMMAND:+$PROMPT_COMMAND$'\n'}__bf_precmd"
+PROMPT_COMMAND="__bf_prompt"$'\n'"${PROMPT_COMMAND:+$PROMPT_COMMAND$'\n'}__bf_precmd"

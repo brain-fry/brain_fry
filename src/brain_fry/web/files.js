@@ -239,6 +239,7 @@ async function loadDir(tid, path, quiet = false) {
   const w = work(tid);
   if (w.loading.has(path)) return;
   w.loading.add(path);
+  const before = w.kids.get(path);
   try {
     w.kids.set(path, await request('fs.list', { id: tid, path }));
   } catch (e) {
@@ -247,7 +248,23 @@ async function loadDir(tid, path, quiet = false) {
   } finally {
     w.loading.delete(path);
   }
+  if (before && sameKids(before, w.kids.get(path))) return; // a reload that found the folder as it was: no redraw of thousands of rows
   if (tid === wsId()) renderExplorer();
+}
+
+function sameKids(a, b) {
+  return !!b && a.length === b.length && a.every((e, i) => e.name === b[i].name && e.dir === b[i].dir);
+}
+
+// Each terminal tab counts its command lines that may have changed files and have ended (`fsgen`,
+// ptys.changes_files). Any change reloads the tree on screen, whatever the terminal's task or
+// folder (a `cd ../other && rm x` too). Sorted: the order of the tasks in the state may change.
+function shellsFsSig() {
+  const sig = [];
+  const add = shells => { for (const s of shells || []) if (s.fsgen) sig.push(`${s.key}.${s.gen}:${s.fsgen}`); };
+  for (const t of Object.values(S.state.tasks)) add(t.shells);
+  for (const p of S.state.projects || []) add(p.tabs && p.tabs.shells);
+  return sig.sort().join(' ');
 }
 
 function refreshTree(tid) {
@@ -266,7 +283,10 @@ function renderExplorer() {
   if (S.mode === 'dev') S.treeWs = tid;
   if (!project) { el.innerHTML = ''; treeSearchSync(tid); return; }
   const w = work(tid);
-  if (landed && w.kids.has('')) refreshTree(tid); // its tree is as it was when last on screen: files changed since
+  const fsSig = shellsFsSig();
+  const ran = S.fsSig !== undefined && fsSig !== S.fsSig; // a command in a terminal tab may have changed files
+  S.fsSig = fsSig;
+  if ((landed || ran) && w.kids.has('')) refreshTree(tid); // landed: its tree is as it was when last on screen
   if (task && task.updated !== w.lastUpdated) { // an event arrived: the agent may have added files
     const first = w.lastUpdated === null;
     w.lastUpdated = task.updated;

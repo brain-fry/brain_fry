@@ -26,13 +26,50 @@ from collections.abc import Callable
 REPLAY_BYTES = 4 * 1024 * 1024
 
 # What the bash of a terminal tab says about itself (shell_init.bash): `cmd` (the command line that
-# starts) or `cwd` (the folder, at each prompt), as OSC 7771, which the terminal ignores; and
+# starts), `ran` (a line that history did not record, such as the same line again: its first
+# command) or `cwd` (the folder, at each prompt), as OSC 7771, which the terminal ignores; and
 # `open` (`bf <file>`: a file to open in the editor).
-INFO = re.compile(rb"\x1b\]7771;(cmd|cwd|open);([^\x07\x1b]{0,4096})(?:\x07|\x1b\\)")
+INFO = re.compile(rb"\x1b\]7771;(cmd|ran|cwd|open);([^\x07\x1b]{0,4096})(?:\x07|\x1b\\)")
 INFO_START = b"\x1b]7771;"
 INFO_MAX = 1000  # characters kept of a command line
 
+# A command line that may have created, deleted, renamed or moved a file reloads the explorer at
+# the next prompt (DESIGN_DETAILS.md, "2a, 3a, 3b", after a command in a terminal tab). A negative
+# list: the line reloads it unless each of its commands is read-only and it writes no file with `>`.
+READ_ONLY = frozenset(
+    "ls ll la cd pushd popd pwd cat less more head tail grep egrep fgrep rg wc file stat du df tree "
+    "echo printf clear man which type whereis history whoami date ps top htop exit bf".split()
+)
+READ_ONLY_GIT = frozenset("status log diff show blame branch fetch remote".split())
+WRAPPERS = frozenset("sudo time nohup nice command builtin exec xargs env".split())  # the command follows
+LINE_PARTS = re.compile(r"[;&|()`{}\n]+")  # between commands: ; && || | & ( ) $( ) ` { }
+NO_FILE = re.compile(r"\d*>&\d*-?|&?\d*>>?\s*/dev/null")  # 2>&1, >&2, > /dev/null: no file written
+
 log = logging.getLogger(__name__)
+
+
+def changes_files(line: str) -> bool:
+    """Whether a command line may have changed the names in a folder. False only when each of its
+    commands (after `sudo`, `xargs`, `VAR=x`...) is in READ_ONLY, or is `git` with a subcommand
+    of READ_ONLY_GIT, and the line has no `>` that writes a file. A false positive costs one reload
+    of the explorer; a quote that holds `;` or `|` makes one."""
+    line = NO_FILE.sub(" ", line)  # before the split: the & of 2>&1 is no separator
+    if ">" in line:
+        return True
+    for part in LINE_PARTS.split(line):
+        words = part.split()
+        while words and (words[0] in WRAPPERS or words[0].startswith("-") or "=" in words[0]):
+            words.pop(0)
+        if not words:
+            continue
+        name = words[0].lstrip("\\").rsplit("/", 1)[-1]  # \rm, /bin/rm
+        if name == "git":
+            sub = next((w for w in words[1:] if not w.startswith("-") and "=" not in w), "")  # -c x=y
+            if sub not in READ_ONLY_GIT:
+                return True
+        elif name not in READ_ONLY:
+            return True
+    return False
 
 
 def scan_info(data: bytes) -> tuple[list[tuple[str, str]], bytes]:
@@ -104,6 +141,8 @@ class PtySession:
         self.command, self.folder = "", cwd
         self.tells = False  # set by the caller: its bash runs shell_init.bash, so `prompts` counts
         self.prompts = 0  # the prompts shown so far (a `cwd` comes before each one)
+        self.writes = False  # the line that runs may have changed files (changes_files)
+        self.fs_gen = 0  # the lines that may have changed files and have ended: the explorer reloads
         self.on_info: Callable[[PtySession], None] | None = None
         self.on_open: Callable[[PtySession, str], None] | None = None  # `bf <file>`: the absolute path
         self.opening: asyncio.Task | None = None  # the last `bf <file>` (Core._shell_open), to keep the order
@@ -132,11 +171,16 @@ class PtySession:
         found, self._tail = scan_info(self._tail + data)
         changed = False
         for kind, value in found:
-            self.prompts += kind == "cwd"
+            if kind == "cmd" or kind == "ran":  # `ran`: the last line again, or a line with its first command only
+                self.writes = self.writes or changes_files(value) or (kind == "ran" and changes_files(self.command))
             if kind == "cmd" and value.strip() and value != self.command:
                 self.command, changed = value.strip(), True
-            elif kind == "cwd" and value and value != self.folder:
-                self.folder, changed = value, True
+            elif kind == "cwd":
+                self.prompts += 1
+                if self.writes:  # the line has ended: its files are on disk
+                    self.fs_gen, self.writes, changed = self.fs_gen + 1, False, True
+                if value and value != self.folder:
+                    self.folder, changed = value, True
             elif kind == "open" and value and self.on_open:
                 self.on_open(self, value)
         if changed and self.on_info:
