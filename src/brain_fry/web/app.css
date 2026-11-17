@@ -181,6 +181,8 @@ body.tab-dragging, body.tab-dragging * { cursor: grabbing !important; user-selec
 .list .row.sel { background: #2f3540; border-left-color: var(--accent); }
 .list .row.current { opacity: .75; }
 .list .row .marks { display: flex; flex-direction: column; align-items: center; gap: 4px; padding-top: 4px; }
+/* a pinned row: a small star under its dot, no text (Renaud, 2026-11-17) */
+.list .row .pin-star { color: var(--dim); font-size: 10px; line-height: 10px; }
 /* Cmd+J I: a key on each inbox row, before the title (app.js) */
 .list .row .inbox-hint { display: inline-block; vertical-align: 1px; margin-right: 5px; padding: 0 3px; border-radius: 3px;
   background: var(--accent); color: #0b1220; font: 600 10px/14px ui-monospace, Menlo, monospace; pointer-events: none; }

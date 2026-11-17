@@ -989,10 +989,10 @@ function row(task, extra = '') {
   const cls = ['row', extra, task.unread ? 'unread' : '', task.id === S.selected ? 'sel' : ''].join(' ');
   const kind = KINDS.has(task.kind) ? ` · <span class="kind ${task.kind}">${task.kind}</span>` : '';
   return `<div class="${cls}" data-id="${task.id}">
-    <div class="marks"><span class="dot ${task.status}" title="${task.status}"></span></div>
+    <div class="marks"><span class="dot ${task.status}" title="${task.status}"></span>${task.pinned ? '<span class="pin-star" title="pinned">★</span>' : ''}</div>
     <div class="main">
       <div class="title">${esc(task.title)}</div>
-      <div class="meta">${esc(task.project)} · ${task.prio.replace('_', ' ')}${kind}${task.pinned ? ' · <span class="pin-badge">pinned</span>' : ''}${task.waitingFor ? ` · ${waitBadge(task)}` : ''}</div>
+      <div class="meta">${esc(task.project)} · ${task.prio.replace('_', ' ')}${kind}${task.waitingFor ? ` · ${waitBadge(task)}` : ''}</div>
       ${task.line ? `<div class="line">${esc(task.line)}</div>` : ''}
       ${task.question ? `<div class="q">Q: ${esc(task.question)}</div>` : ''}
     </div></div>`;
