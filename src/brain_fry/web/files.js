@@ -525,12 +525,16 @@ function makePdfTab(tid, path, r) {
 }
 
 async function setupPdf(tab, version) {
-  let V;
-  try { V = (await loadPdfjs()).viewer; } catch (e) { tab.error = `PDF.js did not load: ${e.message}`; renderFiles(); return; }
+  let V, lib;
+  try { ({ viewer: V, lib } = await loadPdfjs()); } catch (e) { tab.error = `PDF.js did not load: ${e.message}`; renderFiles(); return; }
   const bus = tab.eventBus = new V.EventBus();
   tab.link = new V.PDFLinkService({ eventBus: bus, externalLinkTarget: V.LinkTarget.BLANK }); // web links: the default browser
   tab.find = new V.PDFFindController({ eventBus: bus, linkService: tab.link });
-  tab.viewer = new V.PDFViewer({ container: tab.container, eventBus: bus, linkService: tab.link, findController: tab.find });
+  // No annotation editor (3a does not edit PDFs). Its manager listens on the whole page (dragover,
+  // drop, keydown, selectionchange) and its dragover throws until an editor layer exists: every
+  // card dragged on the board logged a TypeError ('this.#tt') per PDF viewer, about every 10 ms.
+  tab.viewer = new V.PDFViewer({ container: tab.container, eventBus: bus, linkService: tab.link, findController: tab.find,
+    annotationEditorMode: lib.AnnotationEditorType.DISABLE });
   tab.link.setViewer(tab.viewer);
   for (const ev of ['pagesinit', 'pagechanging', 'scalechanging']) bus.on(ev, () => pdfTools(tab));
   // Not while hidden, nor when shown again before the ResizeObserver restored tab.loc: WebKit may
@@ -849,9 +853,17 @@ function closeFile(tid, path, ask = true) {
   renderExplorer();
 }
 
-function destroyTab(w, tab) { // any tab but a terminal; w: its owner
+// What a closed file tab holds besides its element: its editor, or PDF.js's viewer and the
+// loading task of its document. The viewer is cleared first: else it keeps its pages and its
+// listeners on the page (the copy listener, text layers in a static map) until the app ends.
+function freeTab(tab) {
   if (tab.view) tab.view.destroy();
+  if (tab.viewer) { tab.viewer.setDocument(null); tab.link.setDocument(null); }
   if (tab.task) tab.task.destroy().catch(() => {});
+}
+
+function destroyTab(w, tab) { // any tab but a terminal; w: its owner
+  freeTab(tab);
   if (tab.close) tab.close(); // a browser tab: its native page (browser.js)
   dropTab(w, tab);
   if (tab.dirty) dirtyLater();
@@ -871,7 +883,7 @@ async function saveAs(tab) {
     r = { ...r, ...(await request('fs.read', { id: tab.tid, path: where.path })) }; // its HEAD, for Diff
   } catch (e) { toast(e.message); return; }
   const old = viewTabs(w).find((t) => t.path === r.path && t !== tab);
-  if (old) { if (old.view) old.view.destroy(); if (old.task) old.task.destroy().catch(() => {}); dropTab(work(old.tid), old); }
+  if (old) { freeTab(old); dropTab(work(old.tid), old); }
   for (const v of viewsOf(tab)) for (const n of PANES) if (v.act[n] === tab.path) v.act[n] = r.path;
   const peer = peerTab(tab.tid, r.path, tab); // the file is open in another task: its tabs take this text
   if (peer) {
